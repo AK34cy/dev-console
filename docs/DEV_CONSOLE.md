@@ -1,5 +1,8 @@
 # IOVON Dev Console service
 
+For the main project overview and common setup path, start with
+[../README.md](../README.md). This document keeps the lower-level service notes.
+
 The Dev Console runs as `iovon-dev-console.service` and listens only on
 `127.0.0.1:8090`. Tailscale Serve provides its permanent, tailnet-only HTTPS URL.
 Run `bin/start-dev-console` on the server to display that URL and the service
@@ -45,3 +48,13 @@ Confirm the local bind and private HTTPS route with:
 ss -ltnp 'sport = :8090'
 tailscale serve status
 ```
+
+Health checks can be performed without authentication:
+
+```sh
+curl -fsS http://127.0.0.1:8090/health
+```
+
+The endpoint returns HTTP 200 with JSON containing the console status, version,
+PHP version, current timestamp, process uptime, and current Dev Console Git
+commit. If Git metadata is unavailable, `git_commit` is returned as `null`.

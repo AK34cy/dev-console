@@ -1,6 +1,90 @@
 <?php
 require __DIR__ . '/deployment.php';
 
+const DEV_CONSOLE_VERSION = '0.1';
+
+$requestMethod = (string)($_SERVER['REQUEST_METHOD'] ?? 'GET');
+$requestPath = parse_url((string)($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/';
+$devConsoleRoot = dirname(__DIR__);
+
+function commandOutputOrNull(array $arguments, string $cwd): ?string
+{
+    $command = implode(' ', array_map('escapeshellarg', $arguments));
+    $pipes = [];
+    $process = @proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $cwd);
+    if (!is_resource($process)) {
+        return null;
+    }
+
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]) ?: '';
+    stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+
+    return proc_close($process) === 0 ? trim($stdout) : null;
+}
+
+function processUptime(): string
+{
+    $stat = @file_get_contents('/proc/self/stat');
+    if ($stat !== false && preg_match('/\)\s+\S+\s+(?:\S+\s+){19}(\d+)/', $stat, $matches) === 1) {
+        $bootTime = null;
+        foreach (file('/proc/stat', FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+            if (str_starts_with($line, 'btime ')) {
+                $bootTime = (int)substr($line, 6);
+                break;
+            }
+        }
+
+        $ticksPerSecond = (int)trim((string)shell_exec('getconf CLK_TCK 2>/dev/null'));
+        if ($bootTime !== null && $ticksPerSecond > 0) {
+            $startedAt = $bootTime + ((int)$matches[1] / $ticksPerSecond);
+            $seconds = max(0, time() - (int)$startedAt);
+            return formatDuration($seconds);
+        }
+    }
+
+    return 'unknown';
+}
+
+function formatDuration(int $seconds): string
+{
+    $days = intdiv($seconds, 86400);
+    $seconds %= 86400;
+    $hours = intdiv($seconds, 3600);
+    $seconds %= 3600;
+    $minutes = intdiv($seconds, 60);
+    $seconds %= 60;
+
+    $parts = [];
+    if ($days > 0) $parts[] = $days . 'd';
+    if ($hours > 0 || !empty($parts)) $parts[] = $hours . 'h';
+    if ($minutes > 0 || !empty($parts)) $parts[] = $minutes . 'm';
+    $parts[] = $seconds . 's';
+
+    return implode(' ', $parts);
+}
+
+function sendHealthResponse(string $projectRoot): void
+{
+    http_response_code(200);
+    header('Content-Type: application/json');
+    echo json_encode([
+        'status' => 'ok',
+        'version' => DEV_CONSOLE_VERSION,
+        'php_version' => PHP_VERSION,
+        'timestamp' => date('c'),
+        'uptime' => processUptime(),
+        'git_commit' => commandOutputOrNull(['git', '-C', $projectRoot, 'rev-parse', 'HEAD'], $projectRoot),
+    ], JSON_UNESCAPED_SLASHES);
+}
+
+if ($requestMethod === 'GET' && $requestPath === '/health') {
+    sendHealthResponse($devConsoleRoot);
+    exit;
+}
+
 $sessionDirectory = DEPLOY_STATE_DIR . '/sessions';
 if (!is_dir($sessionDirectory)) mkdir($sessionDirectory, 0700, true);
 session_save_path($sessionDirectory);
@@ -8,7 +92,6 @@ session_set_cookie_params(['secure' => true, 'httponly' => true, 'samesite' => '
 session_start();
 
 $consoleToken = (string)getenv('IOVON_DEV_CONSOLE_TOKEN');
-$requestMethod = (string)($_SERVER['REQUEST_METHOD'] ?? 'GET');
 if ($requestMethod === 'POST' && isset($_POST['console_token']) && $consoleToken !== '' && hash_equals($consoleToken, (string)$_POST['console_token'])) {
     session_regenerate_id(true);
     $_SESSION['dev_console_authenticated'] = true;
