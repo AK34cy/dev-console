@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+service_name="iovon-dev-console.service"
+repository_root="/var/www/iovon-ai-dev"
+environment_file="/etc/iovon-dev-console.env"
+service_file="/etc/systemd/system/$service_name"
+
+if [[ "${EUID}" -ne 0 ]]; then
+  printf 'Run this installer as root.\n' >&2
+  exit 1
+fi
+
+for command_name in php systemctl tailscale; do
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    printf 'Required command not found: %s\n' "$command_name" >&2
+    exit 1
+  fi
+done
+
+if ! id iovon >/dev/null 2>&1; then
+  printf 'Required service user does not exist: iovon\n' >&2
+  exit 1
+fi
+
+tailscale_status="$(tailscale status --json)"
+tailscale_dns_name="$(printf '%s' "$tailscale_status" | php -r '
+  $status = json_decode(stream_get_contents(STDIN), true);
+  if (!is_array($status) || ($status["BackendState"] ?? "") !== "Running") exit(1);
+  echo rtrim((string)($status["Self"]["DNSName"] ?? ""), ".");
+')"
+if [[ -z "$tailscale_dns_name" ]]; then
+  printf 'Tailscale is not connected or has no tailnet DNS name.\n' >&2
+  exit 1
+fi
+
+serve_status="$(tailscale serve status 2>&1 || true)"
+printf 'Existing Tailscale Serve configuration:\n%s\n' "$serve_status"
+if [[ "$serve_status" != *"No serve config"* ]]; then
+  printf 'Existing Tailscale Serve configuration was not changed. Configure a non-conflicting HTTPS route manually.\n' >&2
+  exit 1
+fi
+
+if [[ ! -e "$environment_file" ]]; then
+  umask 077
+  token="$(php -r 'echo bin2hex(random_bytes(32));')"
+  printf 'IOVON_DEV_CONSOLE_TOKEN=%s\n' "$token" > "$environment_file"
+  unset token
+fi
+chown root:root "$environment_file"
+chmod 600 "$environment_file"
+
+install -o root -g root -m 0644 "$repository_root/systemd/$service_name" "$service_file"
+systemctl daemon-reload
+systemctl enable --now "$service_name"
+tailscale serve --bg http://127.0.0.1:8090
+
+printf 'IOVON Dev Console installed at https://%s/\n' "$tailscale_dns_name"
+printf 'The authentication token remains in %s and was not printed.\n' "$environment_file"

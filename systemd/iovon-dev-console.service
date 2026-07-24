@@ -1,0 +1,19 @@
+[Unit]
+Description=IOVON Dev Console
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iovon
+Group=iovon
+WorkingDirectory=/var/www/iovon-ai-dev
+EnvironmentFile=/etc/iovon-dev-console.env
+ExecStart=/usr/bin/php -S 127.0.0.1:8090 -t tools/dev-console
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

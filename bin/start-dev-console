@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+service_name="iovon-dev-console.service"
+
+printf 'The IOVON Dev Console is managed by %s.\n' "$service_name"
+
+if command -v tailscale >/dev/null 2>&1; then
+  tailscale_dns_name="$(tailscale status --json 2>/dev/null | php -r '
+    $status = json_decode(stream_get_contents(STDIN), true);
+    echo rtrim((string)($status["Self"]["DNSName"] ?? ""), ".");
+  ' || true)"
+  if [[ -n "$tailscale_dns_name" ]]; then
+    printf 'Permanent console URL: https://%s/\n' "$tailscale_dns_name"
+  fi
+fi
+
+systemctl status "$service_name" --no-pager

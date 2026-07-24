@@ -1,0 +1,4 @@
+console/runs/*
+!console/runs/.gitignore
+.env
+*.log
