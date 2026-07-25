@@ -878,17 +878,66 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
     .codex-run-panel strong { color: var(--blue); }
     .codex-status { font-weight: 700; }
     .codex-console { background: #101820; border-radius: 6px; color: #dce7ec; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; line-height: 1.5; max-height: 360px; min-height: 180px; overflow: auto; padding: 14px; white-space: pre-wrap; }
+    .tab-nav { display: flex; gap: 8px; margin-top: 18px; }
+    .tab-button { background: #e8f4f8; color: var(--blue); margin: 0; padding: 9px 14px; }
+    .tab-button.active { background: var(--blue); color: #fff; }
+    .environment-block { padding: 14px; }
+    .environment-block a { color: var(--blue); }
+    .dashboard-header { align-items: baseline; display: flex; gap: 8px; justify-content: space-between; }
+    .dashboard-header h2 { font-size: 18px; }
+    .dashboard-header .meta { font-size: 11px; white-space: nowrap; }
+    .dashboard-grid { display: grid; gap: 8px; margin-top: 10px; }
+    .summary-grid { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .dashboard-card { background: #f8fbfc; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 9px 10px; }
+    .dashboard-card h3 { color: var(--blue); font-size: 13px; margin: 0 0 6px; }
+    .dashboard-list { display: grid; gap: 4px; margin: 0; }
+    .dashboard-list div { display: grid; gap: 5px; grid-template-columns: minmax(68px, .75fr) minmax(0, 1.25fr); }
+    .dashboard-list dt { color: var(--muted); font-size: 11px; font-weight: 700; }
+    .dashboard-list dd { font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+    .dashboard-list code { padding: 1px 3px; }
+    .status-pill { background: #edf0f2; border-radius: 999px; color: #56636a; display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 8px; text-transform: uppercase; }
+    .status-pill.healthy { background: #e4f6ea; color: var(--green); }
+    .status-pill.warning { background: #fff2b8; color: #705900; }
+    .status-pill.error { background: #fde8e8; color: #8a1f1f; }
+    .health-row { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+    .health-item { align-items: center; display: inline-flex; font-size: 11px; font-weight: 700; gap: 5px; }
+    .health-dot { background: #8a969c; border-radius: 50%; height: 8px; width: 8px; }
+    .health-item.healthy .health-dot { background: #1b9a59; }
+    .health-item.warning .health-dot { background: #d59b00; }
+    .health-item.error .health-dot { background: #c83232; }
+    .resource-grid { display: grid; gap: 9px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .resource-head { display: flex; font-size: 11px; font-weight: 700; justify-content: space-between; margin-bottom: 4px; }
+    .progress-track { background: #dce8ed; border-radius: 999px; height: 7px; overflow: hidden; }
+    .progress-bar { background: #238654; border-radius: inherit; height: 100%; }
+    .progress-bar.warning { background: #d59b00; }
+    .progress-bar.error { background: #c83232; }
+    .resource-value { color: var(--muted); font-size: 10px; margin: 4px 0 0; }
+    .compact-details summary { color: var(--blue); cursor: pointer; font-size: 13px; font-weight: 700; }
+    .compact-table { border-collapse: collapse; font-size: 11px; width: 100%; }
+    .compact-table th, .compact-table td { border-top: 1px solid var(--line); padding: 4px 2px; text-align: left; }
+    .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
+    .compact-table th { color: var(--muted); width: 45%; }
+    .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+    .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 6px; text-align: left; }
+    .process-table th { border-top: 0; color: var(--muted); }
+    .process-table td:last-child { overflow-wrap: anywhere; }
     @media (max-width: 900px) {
       .dashboard-columns { display: block; }
       main { margin-top: 18px; }
     }
+    @media (max-width: 520px) { .summary-grid, .resource-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
 <main>
   <h1>IOVON Dev Console</h1>
   <p class="meta">Internal task creator. Run only on <code>127.0.0.1:8090</code>.</p>
+  <nav class="tab-nav" aria-label="Primary">
+    <button type="button" class="tab-button active" data-tab-target="dashboard">Dashboard</button>
+    <button type="button" class="tab-button" data-tab-target="settings">Settings</button>
+  </nav>
 
+  <section id="dashboardTab" data-tab-panel="dashboard">
   <?php if ($error !== ''): ?>
     <section class="panel error">
       <h2>Task creation failed</h2>
@@ -981,6 +1030,14 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
   </div>
 
   <div class="dashboard-column dashboard-column-right">
+    <section class="panel environment-block" id="environment">
+      <div class="dashboard-header">
+        <h2>Environment</h2>
+        <span class="meta" id="dashboardUpdated">Loading...</span>
+      </div>
+      <div class="dashboard-grid" id="environmentDashboard" aria-live="polite"></div>
+    </section>
+
     <section class="panel">
       <h2>Tasks</h2>
       <?php if (empty($latestTasks)): ?>
@@ -1016,6 +1073,14 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
       <p>The requested task file could not be opened.</p>
     </section>
   <?php endif; ?>
+  </section>
+
+  <section id="settingsTab" data-tab-panel="settings" hidden>
+    <section class="panel">
+      <h2>Settings</h2>
+      <p class="meta">Project, environment, web server, deployment, and AI settings will be configured here later.</p>
+    </section>
+  </section>
 
 </main>
 <script>
@@ -1037,8 +1102,24 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
   const copyCodexLog = document.getElementById('copyCodexLog');
   const copyCodexMessage = document.getElementById('copyCodexMessage');
   const draftKey = 'iovon.devConsole.taskDraft';
+  const environmentDashboard = document.getElementById('environmentDashboard');
+  const dashboardUpdated = document.getElementById('dashboardUpdated');
+  const activeTask = <?= json_encode($activeTaskId === '' ? 'None' : $activeTaskId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
+  const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
   const scrollKey = 'iovon.devConsole.scrollPosition';
   let scrollSaveFrame = null;
+  const activateTab = (target) => {
+    tabButtons.forEach((button) => {
+      button.classList.toggle('active', button.dataset.tabTarget === target);
+    });
+    tabPanels.forEach((panel) => {
+      panel.hidden = panel.dataset.tabPanel !== target;
+    });
+  };
+  tabButtons.forEach((button) => {
+    button.addEventListener('click', () => activateTab(button.dataset.tabTarget || 'dashboard'));
+  });
   const saveScrollPosition = () => {
     sessionStorage.setItem(scrollKey, String(window.scrollY));
   };
@@ -1057,6 +1138,70 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
     });
   }, { passive: true });
   window.addEventListener('pagehide', saveScrollPosition);
+  const dashboardEscape = (value) => String(value).replace(/[&<>"']/g, (character) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]));
+  const formatBytes = (bytes) => {
+    let value = Number(bytes) || 0;
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+    return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+  };
+  const statusClass = (status) => {
+    const value = String(status).toLowerCase();
+    if (['running', 'success', 'healthy'].includes(value)) return 'healthy';
+    if (['pending', 'not_started'].includes(value)) return 'warning';
+    return 'error';
+  };
+  const statusLabel = (status) => String(status).replaceAll('_', ' ');
+  const dashboardCard = (title, rows, extraClass = '') => `<section class="dashboard-card ${extraClass}"><h3>${dashboardEscape(title)}</h3><dl class="dashboard-list">${rows.map(([label, value]) => `<div><dt>${dashboardEscape(label)}</dt><dd>${value}</dd></div>`).join('')}</dl></section>`;
+  const dashboardLink = (url) => `<a href="${dashboardEscape(url)}" target="_blank" rel="noopener noreferrer">${dashboardEscape(url)}</a>`;
+  const dashboardStatus = (status) => `<span class="status-pill ${statusClass(status)}">${dashboardEscape(statusLabel(status))}</span>`;
+  const healthItem = (label, state) => `<span class="health-item ${state}"><span class="health-dot" aria-hidden="true"></span>${dashboardEscape(label)}</span>`;
+  const resourceBar = (label, percentage, numericValue) => {
+    const value = Math.max(0, Math.min(100, Number(percentage) || 0));
+    const state = value >= 90 ? 'error' : (value >= 80 ? 'warning' : 'healthy');
+    return `<div><div class="resource-head"><span>${dashboardEscape(label)}</span><span>${dashboardEscape(`${value}%`)}</span></div><div class="progress-track" role="progressbar" aria-label="${dashboardEscape(label)} usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"><div class="progress-bar ${state}" style="width:${value}%"></div></div><p class="resource-value">${dashboardEscape(numericValue)}</p></div>`;
+  };
+  let environmentRefreshInProgress = false;
+  const refreshEnvironmentDashboard = async () => {
+    if (!environmentDashboard || environmentRefreshInProgress) return;
+    environmentRefreshInProgress = true;
+    try {
+      const topProcessesWasOpen = environmentDashboard.querySelector('#topProcesses')?.open ?? false;
+      const response = await fetch('?action=environment-status', { cache: 'no-store' });
+      const payload = await response.json();
+      if (!payload.ok) throw new Error(payload.error || 'Unable to load environment status.');
+      const data = payload.dashboard;
+      const development = data.environment.development;
+      const preview = data.environment.preview;
+      const production = data.environment.production;
+      const memory = data.server.memory;
+      const disk = data.server.disk;
+      const softwareNames = ['PHP', 'Composer', 'Node.js', 'npm', 'Git', 'Codex CLI'];
+      const softwareRows = softwareNames.map((name) => `<tr><th>${dashboardEscape(name.replace('Node.js', 'Node').replace('Codex CLI', 'Codex'))}</th><td>${dashboardEscape(data.software[name])}</td></tr>`).join('');
+      const processes = data.processes.length ? data.processes.map((process) => `<tr><td>${process.pid}</td><td>${dashboardEscape(process.user)}</td><td>${process.cpu.toFixed(1)}</td><td>${process.memory.toFixed(1)}</td><td>${dashboardEscape(process.command)}</td></tr>`).join('') : '<tr><td colspan="5">No process data available.</td></tr>';
+      const previewHealth = statusClass(preview.status);
+      const productionHealth = statusClass(production.status);
+      const consoleHealth = statusClass(data.environment.console.status);
+      const gitHealth = data.software.Git === 'Not installed' ? 'error' : 'healthy';
+      const webHealth = previewHealth === 'error' && productionHealth === 'error' ? 'error' : (previewHealth === 'warning' && productionHealth === 'warning' ? 'warning' : 'healthy');
+      environmentDashboard.innerHTML =
+        `<section class="dashboard-card"><div class="health-row">${healthItem('Preview', previewHealth)}${healthItem('Production', productionHealth)}${healthItem('Dev Console', consoleHealth)}${healthItem('Git', gitHealth)}${healthItem('Apache', webHealth)}${healthItem('Tailscale', consoleHealth)}</div></section>` +
+        `<div class="summary-grid">` +
+        dashboardCard('Development', [['Branch', dashboardEscape(development.branch)], ['Commit', `<code>${dashboardEscape(development.commit)}</code>`], ['Current task', dashboardEscape(activeTask)]]) +
+        dashboardCard('Preview', [['Status', dashboardStatus(preview.status)], ['URL', dashboardLink(preview.url)]]) +
+        dashboardCard('Production', [['Status', dashboardStatus(production.status)], ['URL', dashboardLink(production.url)]]) +
+        dashboardCard('Dev Console', [['Status', dashboardStatus(data.environment.console.status)], ['URL', dashboardLink(data.environment.console.url)]]) +
+        `</div>` +
+        `<section class="dashboard-card"><h3>Resources</h3><div class="resource-grid">${resourceBar('CPU', data.server.load_percentage, `Load ${data.server.load.join(' / ') || 'not detected'}`)}${resourceBar('Memory', memory.percentage, `${formatBytes(memory.used)} / ${formatBytes(memory.total)}`)}${resourceBar('Disk', disk.percentage, `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`)}</div></section>` +
+        `<section class="dashboard-card"><h3>Software Versions</h3><table class="compact-table"><tbody>${softwareRows}</tbody></table></section>` +
+        dashboardCard('Repository', [['Size', formatBytes(data.statistics.development.bytes)], ['File count', data.statistics.development.files.toLocaleString()]]) +
+        `<details class="dashboard-card compact-details" id="topProcesses"${topProcessesWasOpen ? ' open' : ''}><summary>Top Processes</summary><table class="process-table"><thead><tr><th>PID</th><th>User</th><th>CPU %</th><th>Memory %</th><th>Command</th></tr></thead><tbody>${processes}</tbody></table></details>`;
+      dashboardUpdated.textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
+    } finally {
+      environmentRefreshInProgress = false;
+    }
+  };
 
   if (form && form.dataset.created === '1') {
     localStorage.removeItem(draftKey);
@@ -1273,6 +1418,13 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
       }
     }).catch(() => {});
   }
+
+  refreshEnvironmentDashboard().catch(() => {
+    if (dashboardUpdated) dashboardUpdated.textContent = 'Status unavailable';
+  });
+  window.setInterval(() => refreshEnvironmentDashboard().catch(() => {
+    if (dashboardUpdated) dashboardUpdated.textContent = 'Refresh failed';
+  }), 5000);
 })();
 </script>
 </body>
