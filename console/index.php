@@ -88,7 +88,7 @@ if ($requestMethod === 'GET' && $requestPath === '/health') {
 $sessionDirectory = DEPLOY_STATE_DIR . '/sessions';
 if (!is_dir($sessionDirectory)) mkdir($sessionDirectory, 0700, true);
 session_save_path($sessionDirectory);
-session_set_cookie_params(['secure' => true, 'httponly' => true, 'samesite' => 'Strict']);
+session_set_cookie_params(['secure' => false, 'httponly' => true, 'samesite' => 'Strict']);
 session_start();
 
 $consoleToken = (string)getenv('IOVON_DEV_CONSOLE_TOKEN');
