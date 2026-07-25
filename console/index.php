@@ -1,5 +1,6 @@
 <?php
 require __DIR__ . '/deployment.php';
+require __DIR__ . '/config.php';
 
 const DEV_CONSOLE_VERSION = '0.1';
 
@@ -121,6 +122,12 @@ $runsDir = __DIR__ . '/runs';
 function h(string $value): string
 {
     return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
+
+function configuredDisplayValue($value): string
+{
+    $text = is_array($value) ? implode(', ', array_map('strval', $value)) : (string)$value;
+    return trim($text) === '' ? 'Not configured' : $text;
 }
 
 function relativePath(string $repoRoot, string $path): string
@@ -814,6 +821,9 @@ $editorBody = ($createdTaskId === '' && $viewTask) ? $viewTask['body'] : '';
 $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $editorTaskId;
 $previewDeploymentOverview = deploymentOverview('preview');
 $productionDeploymentOverview = deploymentOverview('production');
+$projectConfiguration = devConsoleLoadProjectConfiguration();
+$activeProject = devConsoleActiveProject($projectConfiguration);
+$apacheSites = devConsoleApacheSites();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -836,6 +846,7 @@ $productionDeploymentOverview = deploymentOverview('production');
     textarea { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 8px; box-sizing: border-box; color: #10242f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.5; min-height: 390px; padding: 14px; resize: vertical; tab-size: 2; width: 100%; }
     textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
     button, .button-link { align-items: center; background: var(--blue); border: 0; border-radius: 5px; color: #fff; cursor: pointer; display: inline-flex; font-size: 15px; font-weight: 700; gap: 8px; margin-top: 16px; padding: 11px 18px; text-decoration: none; }
+    button:disabled { cursor: not-allowed; opacity: 0.55; }
     [hidden] { display: none !important; }
     button.secondary, .button-link.secondary { background: #e8f4f8; color: var(--blue); }
     pre { background: #f2f7fa; border-radius: 6px; overflow: auto; padding: 16px; white-space: pre-wrap; }
@@ -903,6 +914,7 @@ $productionDeploymentOverview = deploymentOverview('production');
     .environment-block { padding: 14px; }
     .environment-block a { color: var(--blue); }
     .dashboard-header { align-items: baseline; display: flex; gap: 8px; justify-content: space-between; }
+    .dashboard-header button { margin-top: 0; }
     .dashboard-header h2 { font-size: 18px; }
     .dashboard-header .meta { font-size: 11px; white-space: nowrap; }
     .dashboard-grid { display: grid; gap: 8px; margin-top: 10px; }
@@ -936,6 +948,11 @@ $productionDeploymentOverview = deploymentOverview('production');
     .compact-table th, .compact-table td { border-top: 1px solid var(--line); padding: 4px 2px; text-align: left; }
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
     .compact-table th { color: var(--muted); width: 45%; }
+    .settings-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+    .settings-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+    .settings-table th, .settings-table td { border-top: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }
+    .settings-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .settings-table td { overflow-wrap: anywhere; }
     .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 6px; text-align: left; }
     .process-table th { border-top: 0; color: var(--muted); }
@@ -1160,6 +1177,62 @@ $productionDeploymentOverview = deploymentOverview('production');
       <h2>Settings</h2>
       <p class="meta">Project, environment, web server, deployment, and AI settings will be configured here later.</p>
     </section>
+
+    <div class="settings-grid">
+      <section class="panel">
+        <div class="dashboard-header">
+          <h2>Active Project</h2>
+          <button type="button" class="secondary" disabled title="Project editing will be added in the next step.">Edit</button>
+        </div>
+        <p class="meta">Editing will be added in the next step.</p>
+        <table class="compact-table">
+          <tbody>
+            <tr><th>Project name</th><td><?= h(configuredDisplayValue($activeProject['name'] ?? '')) ?></td></tr>
+            <tr><th>Repository path</th><td><?= h(configuredDisplayValue($activeProject['repository_path'] ?? '')) ?></td></tr>
+            <tr><th>Staging path</th><td><?= h(configuredDisplayValue($activeProject['staging_path'] ?? '')) ?></td></tr>
+            <tr><th>Production path</th><td><?= h(configuredDisplayValue($activeProject['production_path'] ?? '')) ?></td></tr>
+            <tr><th>Staging URL</th><td><?= h(configuredDisplayValue($activeProject['staging_url'] ?? '')) ?></td></tr>
+            <tr><th>Production URL</th><td><?= h(configuredDisplayValue($activeProject['production_url'] ?? '')) ?></td></tr>
+            <tr><th>Web server</th><td><?= h(configuredDisplayValue($activeProject['web_server'] ?? '')) ?></td></tr>
+            <tr><th>Web server config</th><td><?= h(configuredDisplayValue($activeProject['web_server_config'] ?? '')) ?></td></tr>
+            <tr><th>Branch</th><td><?= h(configuredDisplayValue($activeProject['branch'] ?? '')) ?></td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Discovered Apache Sites</h2>
+        <?php if (empty($apacheSites)): ?>
+          <p class="meta">No Apache site configurations detected.</p>
+        <?php else: ?>
+          <table class="settings-table">
+            <thead>
+              <tr>
+                <th>Site</th>
+                <th>Status</th>
+                <th>ServerName</th>
+                <th>Aliases</th>
+                <th>DocumentRoot</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($apacheSites as $site): ?>
+                <tr>
+                  <td>
+                    <strong><?= h(configuredDisplayValue($site['name'] ?? '')) ?></strong><br>
+                    <span class="meta"><?= h(configuredDisplayValue($site['path'] ?? '')) ?></span>
+                  </td>
+                  <td><span class="status-pill <?= !empty($site['enabled']) ? 'healthy' : 'warning' ?>"><?= !empty($site['enabled']) ? 'Enabled' : 'Disabled' ?></span></td>
+                  <td><?= h(configuredDisplayValue($site['server_name'] ?? '')) ?></td>
+                  <td><?= h(configuredDisplayValue($site['server_aliases'] ?? [])) ?></td>
+                  <td><?= h(configuredDisplayValue($site['document_root'] ?? '')) ?></td>
+                </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        <?php endif; ?>
+      </section>
+    </div>
   </section>
 
 </main>
