@@ -812,6 +812,8 @@ $taskGitCompleted = $activeTaskId !== '';
 $editorTaskId = $viewTask ? pathinfo($viewTask['filename'], PATHINFO_FILENAME) : '';
 $editorBody = ($createdTaskId === '' && $viewTask) ? $viewTask['body'] : '';
 $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $editorTaskId;
+$previewDeploymentOverview = deploymentOverview('preview');
+$productionDeploymentOverview = deploymentOverview('production');
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -881,6 +883,23 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
     .tab-nav { display: flex; gap: 8px; margin-top: 18px; }
     .tab-button { background: #e8f4f8; color: var(--blue); margin: 0; padding: 9px 14px; }
     .tab-button.active { background: var(--blue); color: #fff; }
+    .deployment-panel.production { border: 2px solid #8a1f1f; }
+    .deployment-details { display: grid; gap: 10px 24px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 16px 0; }
+    .deployment-details dt { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    .deployment-details dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+    .deployment-status { border-radius: 999px; display: inline-block; font-size: 12px; font-weight: 700; padding: 5px 10px; text-transform: uppercase; }
+    .deployment-status.pending { background: #edf0f2; color: #56636a; }
+    .deployment-status.running { background: #fff2b8; color: #705900; }
+    .deployment-status.success { background: #e4f6ea; color: #147544; }
+    .deployment-status.failed { background: #fde8e8; color: #8a1f1f; }
+    .deploy-production { background: #a51d1d; border-color: #a51d1d; font-size: 16px; }
+    .deploy-production:hover { background: #801515; }
+    dialog { border: 0; border-radius: 10px; box-shadow: 0 20px 70px #0006; max-width: 720px; padding: 0; width: calc(100% - 32px); }
+    dialog::backdrop { background: #101820aa; }
+    .modal-content { padding: 24px; }
+    .modal-actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; margin-top: 20px; }
+    .change-list { background: #f3f6f7; max-height: 220px; overflow: auto; padding: 12px 12px 12px 30px; }
+    .deployment-error { color: #8a1f1f; font-weight: 700; }
     .environment-block { padding: 14px; }
     .environment-block a { color: var(--blue); }
     .dashboard-header { align-items: baseline; display: flex; gap: 8px; justify-content: space-between; }
@@ -1027,6 +1046,24 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
           </div>
         <?php endif; ?>
       </section>
+
+      <section class="panel deployment-panel" id="previewDeployment">
+        <h2>Preview Deployment</h2>
+        <dl class="deployment-details">
+          <div><dt>Source path</dt><dd><code><?= h($previewDeploymentOverview['source']) ?></code></dd></div>
+          <div><dt>Target path</dt><dd><code><?= h($previewDeploymentOverview['target']) ?></code></dd></div>
+          <div><dt>Preview URL</dt><dd><a href="<?= h($previewDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h($previewDeploymentOverview['url']) ?></a></dd></div>
+          <div><dt>Current Git branch</dt><dd><?= h($previewDeploymentOverview['branch']) ?></dd></div>
+          <div><dt>Development commit</dt><dd><code title="<?= h($previewDeploymentOverview['commit']) ?>"><?= h(shortSha($previewDeploymentOverview['commit'])) ?></code></dd></div>
+          <div><dt>Commit message</dt><dd><?= h($previewDeploymentOverview['message']) ?></dd></div>
+          <div><dt>Preview version</dt><dd><code title="<?= h($previewDeploymentOverview['deployed_commit']) ?>"><?= h($previewDeploymentOverview['deployed_commit'] === '' ? 'Not detected' : shortSha($previewDeploymentOverview['deployed_commit'])) ?></code></dd></div>
+          <div><dt>Last Preview deployment</dt><dd id="previewLastDeploymentTime"><?= h((string)($previewDeploymentOverview['latest']['finish_time'] ?? $previewDeploymentOverview['latest']['start_time'] ?? 'Never')) ?></dd></div>
+          <div><dt>Preview status</dt><dd><span id="previewDeploymentStatus" class="deployment-status <?= h((string)($previewDeploymentOverview['latest']['status'] ?? 'pending')) ?>"><?= h(isset($previewDeploymentOverview['latest']['status']) ? ucfirst((string)$previewDeploymentOverview['latest']['status']) : 'Not started') ?></span></dd></div>
+        </dl>
+        <button type="button" id="deployPreview">Deploy to Preview</button>
+        <p class="deployment-error" id="previewDeploymentError" aria-live="assertive"></p>
+        <pre class="codex-console" id="previewDeploymentLog"><?= h(isset($previewDeploymentOverview['latest']['log_path']) && is_file($previewDeploymentOverview['latest']['log_path']) ? (string)file_get_contents($previewDeploymentOverview['latest']['log_path']) : 'No deployment log yet.') ?></pre>
+      </section>
   </div>
 
   <div class="dashboard-column dashboard-column-right">
@@ -1064,6 +1101,20 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
         </div>
       <?php endif; ?>
     </section>
+
+    <section class="panel deployment-panel production" id="productionDeployment">
+      <h2>Production Deployment</h2>
+      <dl class="deployment-details">
+        <div><dt>Production target</dt><dd><code><?= h($productionDeploymentOverview['target']) ?></code></dd></div>
+        <div><dt>Production URL</dt><dd><a href="<?= h($productionDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h($productionDeploymentOverview['url']) ?></a></dd></div>
+        <div><dt>Production version</dt><dd><code id="productionCommit" title="<?= h($productionDeploymentOverview['deployed_commit']) ?>"><?= h($productionDeploymentOverview['deployed_commit'] === '' ? 'Not detected' : shortSha($productionDeploymentOverview['deployed_commit'])) ?></code></dd></div>
+        <div><dt>Last Production deployment</dt><dd id="productionLastDeploymentTime"><?= h((string)($productionDeploymentOverview['latest']['finish_time'] ?? $productionDeploymentOverview['latest']['start_time'] ?? 'Never')) ?></dd></div>
+        <div><dt>Production status</dt><dd><span id="productionDeploymentStatus" class="deployment-status <?= h((string)($productionDeploymentOverview['latest']['status'] ?? 'pending')) ?>"><?= h(isset($productionDeploymentOverview['latest']['status']) ? ucfirst((string)$productionDeploymentOverview['latest']['status']) : 'Not started') ?></span></dd></div>
+      </dl>
+      <button type="button" class="deploy-production" id="deployProduction">Deploy to Production</button>
+      <p class="deployment-error" id="productionDeploymentError" aria-live="assertive"></p>
+      <pre class="codex-console" id="productionDeploymentLog"><?= h(isset($productionDeploymentOverview['latest']['log_path']) && is_file($productionDeploymentOverview['latest']['log_path']) ? (string)file_get_contents($productionDeploymentOverview['latest']['log_path']) : 'No deployment log yet.') ?></pre>
+    </section>
   </div>
   </div>
 
@@ -1073,6 +1124,35 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
       <p>The requested task file could not be opened.</p>
     </section>
   <?php endif; ?>
+
+  <dialog id="previewDeploymentDialog">
+    <div class="modal-content">
+      <h2>Confirm Preview Deployment</h2>
+      <div id="previewDeploymentSummary"></div>
+      <p class="deployment-error" id="previewModalDeploymentError" aria-live="assertive"></p>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="cancelPreviewDeployment">Cancel</button>
+        <button type="button" id="confirmPreviewDeployment">Deploy to Preview</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="deploymentDialog">
+    <div class="modal-content">
+      <h2>Confirm Production Deployment</h2>
+      <div id="deploymentPreview"></div>
+      <div id="deploymentFinalStep" hidden>
+        <label for="deploymentConfirmation">Type <code>DEPLOY</code> exactly to continue</label>
+        <input id="deploymentConfirmation" type="text" autocomplete="off" spellcheck="false">
+      </div>
+      <p class="deployment-error" id="modalDeploymentError" aria-live="assertive"></p>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="cancelDeployment">Cancel</button>
+        <button type="button" id="continueDeployment">Continue</button>
+        <button type="button" class="deploy-production" id="confirmDeployment" disabled hidden>Confirm Deployment</button>
+      </div>
+    </div>
+  </dialog>
   </section>
 
   <section id="settingsTab" data-tab-panel="settings" hidden>
@@ -1101,6 +1181,7 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
   const refreshCodexLog = document.getElementById('refreshCodexLog');
   const copyCodexLog = document.getElementById('copyCodexLog');
   const copyCodexMessage = document.getElementById('copyCodexMessage');
+  const csrfToken = <?= json_encode($csrfToken, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const draftKey = 'iovon.devConsole.taskDraft';
   const environmentDashboard = document.getElementById('environmentDashboard');
   const dashboardUpdated = document.getElementById('dashboardUpdated');
@@ -1408,6 +1489,117 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
     } catch (error) {
       if (copyCodexMessage) copyCodexMessage.textContent = 'Unable to copy activity.';
     }
+  });
+
+  const deployButton = document.getElementById('deployProduction');
+  const previewDeployButton = document.getElementById('deployPreview');
+  const previewDeployDialog = document.getElementById('previewDeploymentDialog');
+  const previewSummaryBox = document.getElementById('previewDeploymentSummary');
+  const previewConfirmButton = document.getElementById('confirmPreviewDeployment');
+  const previewCancelButton = document.getElementById('cancelPreviewDeployment');
+  const previewModalError = document.getElementById('previewModalDeploymentError');
+  const deployDialog = document.getElementById('deploymentDialog');
+  const previewBox = document.getElementById('deploymentPreview');
+  const finalStep = document.getElementById('deploymentFinalStep');
+  const confirmationInput = document.getElementById('deploymentConfirmation');
+  const continueButton = document.getElementById('continueDeployment');
+  const confirmButton = document.getElementById('confirmDeployment');
+  const cancelButton = document.getElementById('cancelDeployment');
+  const deploymentError = document.getElementById('productionDeploymentError');
+  const modalError = document.getElementById('modalDeploymentError');
+  const deploymentLog = document.getElementById('productionDeploymentLog');
+  const deploymentStatus = document.getElementById('productionDeploymentStatus');
+  const previewDeploymentError = document.getElementById('previewDeploymentError');
+  const previewDeploymentLog = document.getElementById('previewDeploymentLog');
+  const previewDeploymentStatus = document.getElementById('previewDeploymentStatus');
+  let confirmedSummary = null;
+  let previewConfirmedSummary = null;
+  let deploymentStep = 1;
+  const deploymentPolls = { preview: null, production: null };
+  const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]));
+
+  const postDeployment = async (action, values = {}) => {
+    const body = new FormData();
+    body.set('action', action); body.set('csrf_token', csrfToken);
+    Object.entries(values).forEach(([key, value]) => body.set(key, value));
+    const response = await fetch(`?action=${encodeURIComponent(action)}`, { method: 'POST', body });
+    const payload = await response.json();
+    if (!payload.ok) throw new Error(payload.error || 'Deployment request failed.');
+    return payload;
+  };
+  const setDeploymentStatus = (environment, status) => {
+    const element = environment === 'preview' ? previewDeploymentStatus : deploymentStatus;
+    element.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+    element.className = `deployment-status ${status}`;
+  };
+  const pollDeployment = (environment, id) => {
+    clearInterval(deploymentPolls[environment]);
+    const isPreview = environment === 'preview';
+    const button = isPreview ? previewDeployButton : deployButton;
+    const log = isPreview ? previewDeploymentLog : deploymentLog;
+    const errorBox = isPreview ? previewDeploymentError : deploymentError;
+    const update = async () => {
+      const response = await fetch(`?action=deployment-status&environment=${encodeURIComponent(environment)}&id=${encodeURIComponent(id)}`, { cache: 'no-store' });
+      const payload = await response.json();
+      if (!payload.deployment) return;
+      setDeploymentStatus(environment, payload.deployment.status);
+      log.textContent = payload.log || 'Waiting for deployment log...';
+      log.scrollTop = log.scrollHeight;
+      if (['success', 'failed'].includes(payload.deployment.status)) {
+        clearInterval(deploymentPolls[environment]); button.disabled = false;
+        document.getElementById(`${environment}LastDeploymentTime`).textContent = payload.deployment.finish_time || payload.deployment.start_time;
+        if (!isPreview && payload.deployment.status === 'success') {
+          const productionCommit = document.getElementById('productionCommit');
+          productionCommit.textContent = payload.deployment.source_commit.slice(0, 7);
+          productionCommit.title = payload.deployment.source_commit;
+        }
+        if (payload.deployment.error) errorBox.textContent = payload.deployment.error;
+      }
+    };
+    update().catch(() => {}); deploymentPolls[environment] = setInterval(() => update().catch(() => {}), 2000);
+  };
+  const deploymentSummaryHtml = (payload) => {
+    const items = payload.summary.files.length ? payload.summary.files.map((file) => `<li>${escapeHtml(file)}</li>`).join('') : '<li>No file changes.</li>';
+    return `<dl class="deployment-details"><div><dt>Source</dt><dd><code>${escapeHtml(payload.overview.source)}</code></dd></div><div><dt>Target</dt><dd><code>${escapeHtml(payload.overview.target)}</code></dd></div><div><dt>Branch</dt><dd>${escapeHtml(payload.overview.branch)}</dd></div><div><dt>Commit</dt><dd><code>${escapeHtml(payload.overview.commit)}</code></dd></div><div><dt>Message</dt><dd>${escapeHtml(payload.overview.message)}</dd></div><div><dt>Changes</dt><dd>${Number(payload.summary.added)} added · ${Number(payload.summary.updated)} updated · ${Number(payload.summary.deleted)} deleted</dd></div></dl><ul class="change-list">${items}</ul>`;
+  };
+  previewDeployButton?.addEventListener('click', async () => {
+    previewDeploymentError.textContent = ''; previewModalError.textContent = ''; previewDeployButton.disabled = true;
+    previewConfirmButton.disabled = false;
+    try {
+      const payload = await postDeployment('deployment-preview', { environment: 'preview' });
+      previewConfirmedSummary = payload.summary;
+      previewSummaryBox.innerHTML = deploymentSummaryHtml(payload);
+      previewDeployDialog.showModal();
+    } catch (error) { previewDeploymentError.textContent = error.message; previewDeployButton.disabled = false; setDeploymentStatus('preview', 'failed'); }
+  });
+  previewCancelButton?.addEventListener('click', () => { previewDeployDialog.close(); previewDeployButton.disabled = false; });
+  previewConfirmButton?.addEventListener('click', async () => {
+    previewConfirmButton.disabled = true; previewModalError.textContent = '';
+    try {
+      const payload = await postDeployment('deployment-start', { environment: 'preview', summary: JSON.stringify(previewConfirmedSummary) });
+      previewDeployDialog.close(); setDeploymentStatus('preview', 'pending'); pollDeployment('preview', payload.deployment.id);
+    } catch (error) { previewModalError.textContent = error.message; previewConfirmButton.disabled = false; }
+  });
+  deployButton?.addEventListener('click', async () => {
+    deploymentError.textContent = ''; modalError.textContent = ''; deployButton.disabled = true;
+    try {
+      const payload = await postDeployment('deployment-preview', { environment: 'production' });
+      confirmedSummary = payload.summary;
+      previewBox.innerHTML = deploymentSummaryHtml(payload);
+      deploymentStep = 1; finalStep.hidden = true; continueButton.hidden = false; confirmButton.hidden = true; confirmationInput.value = '';
+      deployDialog.showModal();
+    } catch (error) { deploymentError.textContent = error.message; deployButton.disabled = false; setDeploymentStatus('production', 'failed'); }
+  });
+  cancelButton?.addEventListener('click', () => { deploymentStep = 1; deployDialog.close(); deployButton.disabled = false; });
+  continueButton?.addEventListener('click', () => { deploymentStep = 2; finalStep.hidden = false; continueButton.hidden = true; confirmButton.hidden = false; confirmationInput.focus(); });
+  confirmationInput?.addEventListener('input', () => { confirmButton.disabled = confirmationInput.value !== 'DEPLOY'; });
+  confirmButton?.addEventListener('click', async () => {
+    if (deploymentStep !== 2 || confirmationInput.value !== 'DEPLOY') return;
+    confirmButton.disabled = true; modalError.textContent = '';
+    try {
+      const payload = await postDeployment('deployment-start', { environment: 'production', confirmation: confirmationInput.value, summary: JSON.stringify(confirmedSummary) });
+      deployDialog.close(); setDeploymentStatus('production', 'pending'); pollDeployment('production', payload.deployment.id);
+    } catch (error) { modalError.textContent = error.message; confirmButton.disabled = confirmationInput.value !== 'DEPLOY'; }
   });
 
   if (codexRunPanel) {
