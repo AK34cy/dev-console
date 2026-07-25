@@ -7,20 +7,8 @@ function devConsoleRepositoryRoot(): string
 
 function devConsoleDefaultProjectConfiguration(): array
 {
-    $repositoryRoot = devConsoleRepositoryRoot();
-
     return [
-        'project' => [
-            'name' => 'Dev Console',
-            'repository_path' => $repositoryRoot,
-            'staging_path' => '',
-            'production_path' => '',
-            'staging_url' => '',
-            'production_url' => '',
-            'web_server' => 'php',
-            'web_server_config' => '',
-            'branch' => 'main',
-        ],
+        'projects' => [],
     ];
 }
 
@@ -29,29 +17,60 @@ function devConsoleProjectsConfigPath(): string
     return devConsoleRepositoryRoot() . '/config/projects.json';
 }
 
-function devConsoleProjectDefaults(): array
+function devConsoleEmptyProject(): array
 {
-    return devConsoleDefaultProjectConfiguration()['project'];
+    return [
+        'id' => '',
+        'name' => '',
+        'repository_path' => '',
+        'branch' => 'main',
+        'production' => [
+            'domain' => '',
+            'path' => '',
+        ],
+        'preview' => [
+            'domain' => '',
+            'path' => '',
+        ],
+    ];
 }
 
 function devConsoleNormalizeProjectConfiguration(array $configuration): array
 {
-    $projectInput = $configuration['project'] ?? null;
-    if (!is_array($projectInput)) {
+    $projectsInput = $configuration['projects'] ?? null;
+    if (!is_array($projectsInput)) {
         return devConsoleDefaultProjectConfiguration();
     }
 
-    $project = devConsoleProjectDefaults();
-    foreach ($project as $field => $fallback) {
-        if (array_key_exists($field, $projectInput) && !is_array($projectInput[$field]) && !is_object($projectInput[$field])) {
-            $project[$field] = (string)$projectInput[$field];
-        } else {
-            $project[$field] = $fallback;
+    $projects = [];
+    foreach ($projectsInput as $projectInput) {
+        if (!is_array($projectInput)) {
+            continue;
+        }
+
+        $project = devConsoleEmptyProject();
+        foreach (['id', 'name', 'repository_path', 'branch'] as $field) {
+            if (isset($projectInput[$field]) && is_scalar($projectInput[$field])) {
+                $project[$field] = trim((string)$projectInput[$field]);
+            }
+        }
+
+        foreach (['production', 'preview'] as $environment) {
+            $environmentInput = is_array($projectInput[$environment] ?? null) ? $projectInput[$environment] : [];
+            foreach (['domain', 'path'] as $field) {
+                if (isset($environmentInput[$field]) && is_scalar($environmentInput[$field])) {
+                    $project[$environment][$field] = trim((string)$environmentInput[$field]);
+                }
+            }
+        }
+
+        if ($project['id'] !== '') {
+            $projects[] = $project;
         }
     }
 
     return [
-        'project' => $project,
+        'projects' => $projects,
     ];
 }
 
@@ -98,13 +117,220 @@ function devConsoleLoadProjectConfiguration(): array
     return devConsoleNormalizeProjectConfiguration($decoded);
 }
 
-function devConsoleActiveProject(array $configuration): array
+function devConsoleSaveProjectConfiguration(array $configuration): bool
 {
-    if (isset($configuration['project']) && is_array($configuration['project'])) {
-        return $configuration['project'];
+    $path = devConsoleProjectsConfigPath();
+    $configDirectory = dirname($path);
+    if (!is_dir($configDirectory) && !@mkdir($configDirectory, 0750, true) && !is_dir($configDirectory)) {
+        return false;
     }
 
-    return devConsoleDefaultProjectConfiguration()['project'];
+    $normalized = devConsoleNormalizeProjectConfiguration($configuration);
+    $json = json_encode($normalized, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        return false;
+    }
+
+    $temporaryPath = $configDirectory . '/projects.json.tmp.' . bin2hex(random_bytes(8));
+    if (@file_put_contents($temporaryPath, $json . "\n", LOCK_EX) === false) {
+        return false;
+    }
+
+    @chmod($temporaryPath, 0640);
+    if (!@rename($temporaryPath, $path)) {
+        @unlink($temporaryPath);
+        return false;
+    }
+
+    return true;
+}
+
+function devConsoleProjects(array $configuration): array
+{
+    return is_array($configuration['projects'] ?? null) ? $configuration['projects'] : [];
+}
+
+function devConsoleFindProjectById(array $configuration, string $id): ?array
+{
+    foreach (devConsoleProjects($configuration) as $project) {
+        if (($project['id'] ?? '') === $id) {
+            return $project;
+        }
+    }
+
+    return null;
+}
+
+function devConsoleProjectIdFromName(string $name): string
+{
+    $ascii = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $name);
+    $base = is_string($ascii) && $ascii !== '' ? $ascii : $name;
+    $base = strtolower($base);
+    $base = preg_replace('/[^a-z0-9]+/', '-', $base) ?? '';
+    $base = preg_replace('/-+/', '-', $base) ?? '';
+
+    return trim($base, '-');
+}
+
+function devConsoleHasControlCharacters(string $value): bool
+{
+    return preg_match('/[\x00-\x1F\x7F]/', $value) === 1;
+}
+
+function devConsoleIsAbsoluteUnixPath(string $path): bool
+{
+    return $path !== '' && strlen($path) <= 255 && str_starts_with($path, '/') && !devConsoleHasControlCharacters($path);
+}
+
+function devConsoleNormalizeDomain(string $domain): string
+{
+    return strtolower(rtrim(trim($domain), '.'));
+}
+
+function devConsoleIsHostname(string $domain): bool
+{
+    $domain = devConsoleNormalizeDomain($domain);
+    if ($domain === '' || strlen($domain) > 253 || devConsoleHasControlCharacters($domain)) {
+        return false;
+    }
+
+    if (preg_match('~[/:?#@]~', $domain) === 1) {
+        return false;
+    }
+
+    foreach (explode('.', $domain) as $label) {
+        if ($label === '' || strlen($label) > 63 || preg_match('/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/', $label) !== 1) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function devConsoleScalarInput(array $input, string $key): string
+{
+    $value = $input[$key] ?? '';
+    return is_scalar($value) ? trim((string)$value) : '';
+}
+
+function devConsoleValidateNewProject(array $configuration, array $input): array
+{
+    $name = devConsoleScalarInput($input, 'project_name');
+    $repositoryPath = devConsoleScalarInput($input, 'repository_path');
+    $branch = devConsoleScalarInput($input, 'branch');
+    $productionDomain = devConsoleNormalizeDomain(devConsoleScalarInput($input, 'production_domain'));
+    $productionPath = devConsoleScalarInput($input, 'production_path');
+    $previewDomain = devConsoleNormalizeDomain(devConsoleScalarInput($input, 'preview_domain'));
+    $previewPath = devConsoleScalarInput($input, 'preview_path');
+    $projectId = devConsoleProjectIdFromName($name);
+    $errors = [];
+
+    foreach ([
+        'Project name' => $name,
+        'Repository path' => $repositoryPath,
+        'Branch' => $branch,
+        'Production domain' => $productionDomain,
+        'Production path' => $productionPath,
+        'Preview domain' => $previewDomain,
+        'Preview path' => $previewPath,
+    ] as $label => $value) {
+        if ($value === '') {
+            $errors[] = $label . ' is required.';
+        } elseif (strlen($value) > 255 || devConsoleHasControlCharacters($value)) {
+            $errors[] = $label . ' contains invalid characters or is too long.';
+        }
+    }
+
+    if ($projectId === '') {
+        $errors[] = 'Project name must contain at least one letter or number.';
+    } elseif (devConsoleFindProjectById($configuration, $projectId) !== null) {
+        $errors[] = 'A project with this name already exists.';
+    }
+
+    if (!devConsoleIsAbsoluteUnixPath($repositoryPath)) {
+        $errors[] = 'Repository path must be an absolute Unix path.';
+    }
+    if (!devConsoleIsAbsoluteUnixPath($productionPath)) {
+        $errors[] = 'Production path must be an absolute Unix path.';
+    }
+    if (!devConsoleIsAbsoluteUnixPath($previewPath)) {
+        $errors[] = 'Preview path must be an absolute Unix path.';
+    }
+    if (!devConsoleIsHostname($productionDomain)) {
+        $errors[] = 'Production domain must be a hostname without scheme, port, path, query, or fragment.';
+    }
+    if (!devConsoleIsHostname($previewDomain)) {
+        $errors[] = 'Preview domain must be a hostname without scheme, port, path, query, or fragment.';
+    }
+    if ($productionDomain !== '' && $previewDomain !== '' && $productionDomain === $previewDomain) {
+        $errors[] = 'Production and Preview domains must be different.';
+    }
+    if ($productionPath !== '' && $previewPath !== '' && $productionPath === $previewPath) {
+        $errors[] = 'Production and Preview paths must be different.';
+    }
+
+    foreach (devConsoleProjects($configuration) as $project) {
+        foreach (['production', 'preview'] as $environment) {
+            $existingDomain = devConsoleNormalizeDomain((string)($project[$environment]['domain'] ?? ''));
+            $existingPath = (string)($project[$environment]['path'] ?? '');
+            if ($existingDomain !== '' && ($existingDomain === $productionDomain || $existingDomain === $previewDomain)) {
+                $errors[] = 'Domain is already registered by another project environment.';
+            }
+            if ($existingPath !== '' && ($existingPath === $productionPath || $existingPath === $previewPath)) {
+                $errors[] = 'Path is already registered by another project environment.';
+            }
+        }
+    }
+
+    $project = [
+        'id' => $projectId,
+        'name' => $name,
+        'repository_path' => $repositoryPath,
+        'branch' => $branch,
+        'production' => [
+            'domain' => $productionDomain,
+            'path' => $productionPath,
+        ],
+        'preview' => [
+            'domain' => $previewDomain,
+            'path' => $previewPath,
+        ],
+    ];
+
+    return [
+        'valid' => empty($errors),
+        'errors' => array_values(array_unique($errors)),
+        'project' => $project,
+    ];
+}
+
+function devConsoleAppendProjectToConfiguration(array $configuration, array $project): array
+{
+    $configuration = devConsoleNormalizeProjectConfiguration($configuration);
+    $configuration['projects'][] = $project;
+
+    return $configuration;
+}
+
+function devConsoleAppendProject(array $input): array
+{
+    $configuration = devConsoleLoadProjectConfiguration();
+    $validation = devConsoleValidateNewProject($configuration, $input);
+    if (!$validation['valid']) {
+        return $validation + ['saved' => false];
+    }
+
+    $updatedConfiguration = devConsoleAppendProjectToConfiguration($configuration, $validation['project']);
+    if (!devConsoleSaveProjectConfiguration($updatedConfiguration)) {
+        return [
+            'valid' => false,
+            'saved' => false,
+            'errors' => ['Unable to save project configuration.'],
+            'project' => $validation['project'],
+        ];
+    }
+
+    return $validation + ['saved' => true];
 }
 
 function devConsoleApacheDirectiveValue(string $value): string

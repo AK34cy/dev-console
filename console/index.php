@@ -1,6 +1,7 @@
 <?php
 require __DIR__ . '/deployment.php';
 require __DIR__ . '/config.php';
+require __DIR__ . '/apache.php';
 
 const DEV_CONSOLE_VERSION = '0.1';
 
@@ -611,6 +612,18 @@ $attachmentPaths = [];
 $commitHash = '';
 $prompt = '';
 $error = '';
+$apacheActionResult = null;
+$projectFormErrors = [];
+$projectFormValues = [
+    'project_name' => '',
+    'repository_path' => '',
+    'branch' => 'main',
+    'production_domain' => '',
+    'production_path' => '',
+    'preview_domain' => '',
+    'preview_path' => '',
+];
+$projectFlash = '';
 $results = [];
 $requestMethod = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $action = (string)($_GET['action'] ?? $_POST['action'] ?? '');
@@ -710,7 +723,39 @@ if ($action === 'run-codex' && $requestMethod === 'POST') {
     exit;
 }
 
-if ($requestMethod === 'POST') {
+if (in_array($action, apacheAllowedActions(), true)) {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $apacheActionResult = [
+            'success' => false,
+            'message' => 'Invalid Apache management request.',
+            'output' => '',
+        ];
+    } else {
+        $apacheActionResult = apacheRunAction($action);
+    }
+}
+
+if ($action === 'create_project') {
+    foreach ($projectFormValues as $field => $fallback) {
+        $value = $_POST[$field] ?? $fallback;
+        $projectFormValues[$field] = is_scalar($value) ? trim((string)$value) : '';
+    }
+
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $projectFormErrors[] = 'Invalid project request.';
+    } else {
+        $projectResult = devConsoleAppendProject($projectFormValues);
+        if (!empty($projectResult['valid']) && !empty($projectResult['saved'])) {
+            $_SESSION['project_flash'] = 'Project created.';
+            header('Location: /?tab=settings');
+            exit;
+        }
+
+        $projectFormErrors = $projectResult['errors'] ?? ['Unable to create project.'];
+    }
+}
+
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -822,8 +867,12 @@ $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $edi
 $previewDeploymentOverview = deploymentOverview('preview');
 $productionDeploymentOverview = deploymentOverview('production');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
-$activeProject = devConsoleActiveProject($projectConfiguration);
+$projects = devConsoleProjects($projectConfiguration);
 $apacheSites = devConsoleApacheSites();
+$apacheState = apacheState();
+$projectFlash = (string)($_SESSION['project_flash'] ?? '');
+unset($_SESSION['project_flash']);
+$initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '') ? 'settings' : 'dashboard';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -845,6 +894,8 @@ $apacheSites = devConsoleApacheSites();
     label { display: block; font-weight: 700; margin: 18px 0 8px; }
     textarea { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 8px; box-sizing: border-box; color: #10242f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.5; min-height: 390px; padding: 14px; resize: vertical; tab-size: 2; width: 100%; }
     textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
+    input[type="text"] { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 6px; box-sizing: border-box; color: #10242f; font-size: 14px; padding: 9px 10px; width: 100%; }
+    input[type="text"]:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
     button, .button-link { align-items: center; background: var(--blue); border: 0; border-radius: 5px; color: #fff; cursor: pointer; display: inline-flex; font-size: 15px; font-weight: 700; gap: 8px; margin-top: 16px; padding: 11px 18px; text-decoration: none; }
     button:disabled { cursor: not-allowed; opacity: 0.55; }
     [hidden] { display: none !important; }
@@ -953,6 +1004,13 @@ $apacheSites = devConsoleApacheSites();
     .settings-table th, .settings-table td { border-top: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }
     .settings-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
     .settings-table td { overflow-wrap: anywhere; }
+    .subsection { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
+    .project-form { display: grid; gap: 14px; }
+    .project-form fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0; padding: 14px; }
+    .project-form legend { color: var(--blue); font-weight: 700; padding: 0 4px; }
+    .project-form label { margin-top: 12px; }
+    .project-form label:first-of-type { margin-top: 4px; }
+    .success-message { background: #e9f7ef; border: 1px solid #b8dfc7; border-radius: 6px; color: var(--green); padding: 10px 12px; }
     .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 6px; text-align: left; }
     .process-table th { border-top: 0; color: var(--muted); }
@@ -969,11 +1027,11 @@ $apacheSites = devConsoleApacheSites();
   <h1>IOVON Dev Console</h1>
   <p class="meta">Internal task creator. Run only on <code>127.0.0.1:8090</code>.</p>
   <nav class="tab-nav" aria-label="Primary">
-    <button type="button" class="tab-button active" data-tab-target="dashboard">Dashboard</button>
-    <button type="button" class="tab-button" data-tab-target="settings">Settings</button>
+    <button type="button" class="tab-button <?= $initialTab === 'dashboard' ? 'active' : '' ?>" data-tab-target="dashboard">Dashboard</button>
+    <button type="button" class="tab-button <?= $initialTab === 'settings' ? 'active' : '' ?>" data-tab-target="settings">Settings</button>
   </nav>
 
-  <section id="dashboardTab" data-tab-panel="dashboard">
+  <section id="dashboardTab" data-tab-panel="dashboard"<?= $initialTab === 'dashboard' ? '' : ' hidden' ?>>
   <?php if ($error !== ''): ?>
     <section class="panel error">
       <h2>Task creation failed</h2>
@@ -1172,7 +1230,7 @@ $apacheSites = devConsoleApacheSites();
   </dialog>
   </section>
 
-  <section id="settingsTab" data-tab-panel="settings" hidden>
+  <section id="settingsTab" data-tab-panel="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
     <section class="panel">
       <h2>Settings</h2>
       <p class="meta">Project, environment, web server, deployment, and AI settings will be configured here later.</p>
@@ -1180,24 +1238,114 @@ $apacheSites = devConsoleApacheSites();
 
     <div class="settings-grid">
       <section class="panel">
-        <div class="dashboard-header">
-          <h2>Active Project</h2>
-          <button type="button" class="secondary" disabled title="Project editing will be added in the next step.">Edit</button>
-        </div>
-        <p class="meta">Editing will be added in the next step.</p>
+        <h2>Projects</h2>
+        <?php if ($projectFlash !== ''): ?>
+          <p class="success-message"><?= h($projectFlash) ?></p>
+        <?php endif; ?>
+        <?php if (empty($projects)): ?>
+          <p class="meta">No projects configured yet.</p>
+        <?php else: ?>
+          <table class="settings-table">
+            <thead>
+              <tr>
+                <th>Project</th>
+                <th>Production</th>
+                <th>Preview</th>
+                <th>Repository</th>
+                <th>Branch</th>
+              </tr>
+            </thead>
+            <tbody>
+              <?php foreach ($projects as $project): ?>
+                <tr>
+                  <td><strong><?= h(configuredDisplayValue($project['name'] ?? '')) ?></strong><br><span class="meta"><?= h(configuredDisplayValue($project['id'] ?? '')) ?></span></td>
+                  <td><?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?><br><span class="meta"><?= h(configuredDisplayValue($project['production']['path'] ?? '')) ?></span></td>
+                  <td><?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?><br><span class="meta"><?= h(configuredDisplayValue($project['preview']['path'] ?? '')) ?></span></td>
+                  <td><?= h(configuredDisplayValue($project['repository_path'] ?? '')) ?></td>
+                  <td><?= h(configuredDisplayValue($project['branch'] ?? '')) ?></td>
+                </tr>
+              <?php endforeach; ?>
+            </tbody>
+          </table>
+        <?php endif; ?>
+
+        <section class="subsection">
+          <h2>Create Project</h2>
+          <?php if (!empty($projectFormErrors)): ?>
+            <section class="result-block error">
+              <h2>Project not created</h2>
+              <ul>
+                <?php foreach ($projectFormErrors as $formError): ?>
+                  <li><?= h((string)$formError) ?></li>
+                <?php endforeach; ?>
+              </ul>
+            </section>
+          <?php endif; ?>
+          <form method="post" class="project-form">
+            <input type="hidden" name="action" value="create_project">
+            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+
+            <fieldset>
+              <legend>Project</legend>
+              <label for="project_name">Project name</label>
+              <input id="project_name" name="project_name" type="text" required maxlength="120" value="<?= h($projectFormValues['project_name']) ?>">
+              <label for="repository_path">Repository path</label>
+              <input id="repository_path" name="repository_path" type="text" required maxlength="255" value="<?= h($projectFormValues['repository_path']) ?>">
+              <label for="branch">Branch</label>
+              <input id="branch" name="branch" type="text" required maxlength="120" value="<?= h($projectFormValues['branch']) ?>">
+            </fieldset>
+
+            <fieldset>
+              <legend>Production</legend>
+              <label for="production_domain">Domain</label>
+              <input id="production_domain" name="production_domain" type="text" required maxlength="253" value="<?= h($projectFormValues['production_domain']) ?>">
+              <label for="production_path">Path</label>
+              <input id="production_path" name="production_path" type="text" required maxlength="255" value="<?= h($projectFormValues['production_path']) ?>">
+            </fieldset>
+
+            <fieldset>
+              <legend>Preview</legend>
+              <label for="preview_domain">Domain</label>
+              <input id="preview_domain" name="preview_domain" type="text" required maxlength="253" value="<?= h($projectFormValues['preview_domain']) ?>">
+              <label for="preview_path">Path</label>
+              <input id="preview_path" name="preview_path" type="text" required maxlength="255" value="<?= h($projectFormValues['preview_path']) ?>">
+            </fieldset>
+
+            <button type="submit">Create Project</button>
+          </form>
+        </section>
+      </section>
+
+      <section class="panel">
+        <h2>Apache</h2>
         <table class="compact-table">
           <tbody>
-            <tr><th>Project name</th><td><?= h(configuredDisplayValue($activeProject['name'] ?? '')) ?></td></tr>
-            <tr><th>Repository path</th><td><?= h(configuredDisplayValue($activeProject['repository_path'] ?? '')) ?></td></tr>
-            <tr><th>Staging path</th><td><?= h(configuredDisplayValue($activeProject['staging_path'] ?? '')) ?></td></tr>
-            <tr><th>Production path</th><td><?= h(configuredDisplayValue($activeProject['production_path'] ?? '')) ?></td></tr>
-            <tr><th>Staging URL</th><td><?= h(configuredDisplayValue($activeProject['staging_url'] ?? '')) ?></td></tr>
-            <tr><th>Production URL</th><td><?= h(configuredDisplayValue($activeProject['production_url'] ?? '')) ?></td></tr>
-            <tr><th>Web server</th><td><?= h(configuredDisplayValue($activeProject['web_server'] ?? '')) ?></td></tr>
-            <tr><th>Web server config</th><td><?= h(configuredDisplayValue($activeProject['web_server_config'] ?? '')) ?></td></tr>
-            <tr><th>Branch</th><td><?= h(configuredDisplayValue($activeProject['branch'] ?? '')) ?></td></tr>
+            <tr><th>Status</th><td><?= h(apacheStatusLabel($apacheState)) ?></td></tr>
+            <tr><th>Version</th><td><?= h(configuredDisplayValue($apacheState['version'] ?? '')) ?></td></tr>
+            <tr><th>Service enabled</th><td><?= h(apacheEnabledLabel($apacheState)) ?></td></tr>
+            <tr><th>Binary path</th><td><?= h(configuredDisplayValue($apacheState['binary_path'] ?? '')) ?></td></tr>
           </tbody>
         </table>
+        <form method="post" class="form-actions">
+          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+          <?php if (empty($apacheState['installed'])): ?>
+            <input type="hidden" name="action" value="install_apache">
+            <button type="submit">Install Apache</button>
+          <?php elseif (empty($apacheState['running'])): ?>
+            <input type="hidden" name="action" value="start_apache">
+            <button type="submit">Start Apache</button>
+          <?php else: ?>
+            <input type="hidden" name="action" value="restart_apache">
+            <button type="submit">Restart Apache</button>
+          <?php endif; ?>
+        </form>
+        <?php if ($apacheActionResult !== null): ?>
+          <section class="result-block <?= !empty($apacheActionResult['success']) ? '' : 'error' ?>">
+            <h2><?= !empty($apacheActionResult['success']) ? 'Apache action completed' : 'Apache action failed' ?></h2>
+            <p><?= h((string)$apacheActionResult['message']) ?></p>
+            <pre><?= h((string)($apacheActionResult['output'] ?? '')) ?></pre>
+          </section>
+        <?php endif; ?>
       </section>
 
       <section class="panel">
