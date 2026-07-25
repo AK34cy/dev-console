@@ -733,6 +733,9 @@ if (in_array($action, apacheAllowedActions(), true)) {
     } else {
         $apacheActionResult = apacheRunAction($action);
     }
+    $_SESSION['apache_action_result'] = $apacheActionResult;
+    header('Location: /?tab=settings#apache');
+    exit;
 }
 
 if ($action === 'create_project') {
@@ -747,7 +750,7 @@ if ($action === 'create_project') {
         $projectResult = devConsoleAppendProject($projectFormValues);
         if (!empty($projectResult['valid']) && !empty($projectResult['saved'])) {
             $_SESSION['project_flash'] = 'Project created.';
-            header('Location: /?tab=settings');
+            header('Location: /?tab=settings#projects');
             exit;
         }
 
@@ -868,11 +871,14 @@ $previewDeploymentOverview = deploymentOverview('preview');
 $productionDeploymentOverview = deploymentOverview('production');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
 $projects = devConsoleProjects($projectConfiguration);
+$repositorySuggestions = devConsoleDiscoveredGitRepositories();
 $apacheSites = devConsoleApacheSites();
 $apacheState = apacheState();
 $projectFlash = (string)($_SESSION['project_flash'] ?? '');
 unset($_SESSION['project_flash']);
-$initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '') ? 'settings' : 'dashboard';
+$apacheActionResult = is_array($_SESSION['apache_action_result'] ?? null) ? $_SESSION['apache_action_result'] : $apacheActionResult;
+unset($_SESSION['apache_action_result']);
+$initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '' || $apacheActionResult !== null) ? 'settings' : 'dashboard';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -1004,12 +1010,14 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .settings-table th, .settings-table td { border-top: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }
     .settings-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
     .settings-table td { overflow-wrap: anywhere; }
+    #projects, #apache { scroll-margin-top: 18px; }
     .subsection { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
     .project-form { display: grid; gap: 14px; }
     .project-form fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0; padding: 14px; }
     .project-form legend { color: var(--blue); font-weight: 700; padding: 0 4px; }
     .project-form label { margin-top: 12px; }
     .project-form label:first-of-type { margin-top: 4px; }
+    .field-help { color: var(--muted); font-size: 12px; margin: 5px 0 0; }
     .success-message { background: #e9f7ef; border: 1px solid #b8dfc7; border-radius: 6px; color: var(--green); padding: 10px 12px; }
     .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 6px; text-align: left; }
@@ -1237,7 +1245,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     </section>
 
     <div class="settings-grid">
-      <section class="panel">
+      <section class="panel" id="projects">
         <h2>Projects</h2>
         <?php if ($projectFlash !== ''): ?>
           <p class="success-message"><?= h($projectFlash) ?></p>
@@ -1281,42 +1289,59 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
               </ul>
             </section>
           <?php endif; ?>
-          <form method="post" class="project-form">
+          <form method="post" class="project-form" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
             <input type="hidden" name="action" value="create_project">
             <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
 
             <fieldset>
               <legend>Project</legend>
               <label for="project_name">Project name</label>
-              <input id="project_name" name="project_name" type="text" required maxlength="120" value="<?= h($projectFormValues['project_name']) ?>">
+              <input id="project_name" name="project_name" type="text" required maxlength="120" placeholder="IOVON Website" value="<?= h($projectFormValues['project_name']) ?>">
+              <p class="field-help">A short human-readable name.</p>
               <label for="repository_path">Repository path</label>
-              <input id="repository_path" name="repository_path" type="text" required maxlength="255" value="<?= h($projectFormValues['repository_path']) ?>">
+              <input id="repository_path" name="repository_path" type="text" required maxlength="255" list="repositoryPathSuggestions" placeholder="/var/www/iovon" value="<?= h($projectFormValues['repository_path']) ?>">
+              <p class="field-help">Existing local Git repository used as the source.</p>
               <label for="branch">Branch</label>
-              <input id="branch" name="branch" type="text" required maxlength="120" value="<?= h($projectFormValues['branch']) ?>">
+              <input id="branch" name="branch" type="text" required maxlength="120" list="branchSuggestions" value="<?= h($projectFormValues['branch']) ?>">
+              <p class="field-help">Git branch used for deployment.</p>
             </fieldset>
 
             <fieldset>
               <legend>Production</legend>
               <label for="production_domain">Domain</label>
-              <input id="production_domain" name="production_domain" type="text" required maxlength="253" value="<?= h($projectFormValues['production_domain']) ?>">
+              <input id="production_domain" name="production_domain" type="text" required maxlength="253" placeholder="iovon.com" value="<?= h($projectFormValues['production_domain']) ?>">
+              <p class="field-help">Hostname only, without https:// or a path.</p>
               <label for="production_path">Path</label>
-              <input id="production_path" name="production_path" type="text" required maxlength="255" value="<?= h($projectFormValues['production_path']) ?>">
+              <input id="production_path" name="production_path" type="text" required maxlength="255" placeholder="/var/www/projects/iovon/production" value="<?= h($projectFormValues['production_path']) ?>">
+              <p class="field-help">Directory where the production site will be deployed.</p>
             </fieldset>
 
             <fieldset>
               <legend>Preview</legend>
               <label for="preview_domain">Domain</label>
-              <input id="preview_domain" name="preview_domain" type="text" required maxlength="253" value="<?= h($projectFormValues['preview_domain']) ?>">
+              <input id="preview_domain" name="preview_domain" type="text" required maxlength="253" placeholder="preview.iovon.com" value="<?= h($projectFormValues['preview_domain']) ?>">
+              <p class="field-help">Separate hostname for testing changes.</p>
               <label for="preview_path">Path</label>
-              <input id="preview_path" name="preview_path" type="text" required maxlength="255" value="<?= h($projectFormValues['preview_path']) ?>">
+              <input id="preview_path" name="preview_path" type="text" required maxlength="255" placeholder="/var/www/projects/iovon/preview" value="<?= h($projectFormValues['preview_path']) ?>">
+              <p class="field-help">Directory where the preview site will be deployed.</p>
             </fieldset>
 
             <button type="submit">Create Project</button>
           </form>
+          <datalist id="repositoryPathSuggestions">
+            <?php foreach ($repositorySuggestions as $repositorySuggestion): ?>
+              <option value="<?= h($repositorySuggestion) ?>"></option>
+            <?php endforeach; ?>
+          </datalist>
+          <datalist id="branchSuggestions">
+            <option value="main"></option>
+            <option value="master"></option>
+            <option value="develop"></option>
+          </datalist>
         </section>
       </section>
 
-      <section class="panel">
+      <section class="panel" id="apache">
         <h2>Apache</h2>
         <table class="compact-table">
           <tbody>
@@ -1326,7 +1351,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             <tr><th>Binary path</th><td><?= h(configuredDisplayValue($apacheState['binary_path'] ?? '')) ?></td></tr>
           </tbody>
         </table>
-        <form method="post" class="form-actions">
+        <form method="post" class="form-actions" action="/?tab=settings#apache" data-preserve-settings-scroll="1">
           <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
           <?php if (empty($apacheState['installed'])): ?>
             <input type="hidden" name="action" value="install_apache">
@@ -1343,12 +1368,14 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           <section class="result-block <?= !empty($apacheActionResult['success']) ? '' : 'error' ?>">
             <h2><?= !empty($apacheActionResult['success']) ? 'Apache action completed' : 'Apache action failed' ?></h2>
             <p><?= h((string)$apacheActionResult['message']) ?></p>
-            <pre><?= h((string)($apacheActionResult['output'] ?? '')) ?></pre>
+            <details<?= !empty($apacheActionResult['success']) ? '' : ' open' ?>>
+              <summary>Show command output</summary>
+              <pre><?= h((string)($apacheActionResult['output'] ?? '')) ?></pre>
+            </details>
           </section>
         <?php endif; ?>
-      </section>
 
-      <section class="panel">
+        <section class="subsection">
         <h2>Discovered Apache Sites</h2>
         <?php if (empty($apacheSites)): ?>
           <p class="meta">No Apache site configurations detected.</p>
@@ -1379,6 +1406,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             </tbody>
           </table>
         <?php endif; ?>
+        </section>
       </section>
     </div>
   </section>
@@ -1410,6 +1438,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
   const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
   const scrollKey = 'iovon.devConsole.scrollPosition';
+  const settingsScrollKey = 'iovon.devConsole.settingsScrollPosition';
   let scrollSaveFrame = null;
   const activateTab = (target) => {
     tabButtons.forEach((button) => {
@@ -1431,7 +1460,61 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
       requestAnimationFrame(() => window.scrollTo(0, savedPosition));
     }
   };
-  restoreScrollPosition();
+  const restoreSettingsScrollPosition = () => {
+    const settingsPanel = document.getElementById('settingsTab');
+    if (!settingsPanel || settingsPanel.hidden) return false;
+    const savedPosition = Number(sessionStorage.getItem(settingsScrollKey));
+    sessionStorage.removeItem(settingsScrollKey);
+    if (Number.isFinite(savedPosition) && savedPosition >= 0) {
+      requestAnimationFrame(() => window.scrollTo(0, savedPosition));
+      return true;
+    }
+    return false;
+  };
+  if (!restoreSettingsScrollPosition()) {
+    restoreScrollPosition();
+  }
+  document.querySelectorAll('#settingsTab form[data-preserve-settings-scroll="1"]').forEach((settingsForm) => {
+    settingsForm.addEventListener('submit', () => {
+      sessionStorage.setItem(settingsScrollKey, String(window.scrollY));
+    });
+  });
+  const projectNameInput = document.getElementById('project_name');
+  const productionDomainInput = document.getElementById('production_domain');
+  const productionPathInput = document.getElementById('production_path');
+  const previewDomainInput = document.getElementById('preview_domain');
+  const previewPathInput = document.getElementById('preview_path');
+  const touched = {
+    productionPath: false,
+    previewDomain: false,
+    previewPath: false,
+  };
+  const slugFromProjectName = (value) => String(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  productionPathInput?.addEventListener('input', () => { touched.productionPath = true; });
+  previewDomainInput?.addEventListener('input', () => { touched.previewDomain = true; });
+  previewPathInput?.addEventListener('input', () => { touched.previewPath = true; });
+  projectNameInput?.addEventListener('input', () => {
+    const slug = slugFromProjectName(projectNameInput.value);
+    if (!slug) return;
+    if (productionPathInput && !productionPathInput.value && !touched.productionPath) {
+      productionPathInput.value = `/var/www/projects/${slug}/production`;
+    }
+    if (previewPathInput && !previewPathInput.value && !touched.previewPath) {
+      previewPathInput.value = `/var/www/projects/${slug}/preview`;
+    }
+  });
+  productionDomainInput?.addEventListener('input', () => {
+    const domain = productionDomainInput.value.trim().replace(/^https?:\/\//i, '').split(/[/:?#]/)[0];
+    if (domain && previewDomainInput && !previewDomainInput.value && !touched.previewDomain) {
+      previewDomainInput.value = `preview.${domain}`;
+    }
+  });
   window.addEventListener('scroll', () => {
     if (scrollSaveFrame !== null) cancelAnimationFrame(scrollSaveFrame);
     scrollSaveFrame = requestAnimationFrame(() => {

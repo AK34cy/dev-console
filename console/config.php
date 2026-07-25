@@ -333,6 +333,51 @@ function devConsoleAppendProject(array $input): array
     return $validation + ['saved' => true];
 }
 
+function devConsoleDiscoveredGitRepositories(string $baseDirectory = '/var/www', int $limit = 50): array
+{
+    if (!is_dir($baseDirectory) || !is_readable($baseDirectory)) {
+        return [];
+    }
+
+    $repositories = [];
+    $directoriesToInspect = [$baseDirectory];
+
+    foreach (scandir($baseDirectory) ?: [] as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+
+        $path = $baseDirectory . '/' . $entry;
+        if (is_dir($path) && is_readable($path)) {
+            $directoriesToInspect[] = $path;
+            foreach (scandir($path) ?: [] as $childEntry) {
+                if ($childEntry === '.' || $childEntry === '..') {
+                    continue;
+                }
+
+                $childPath = $path . '/' . $childEntry;
+                if (is_dir($childPath) && is_readable($childPath)) {
+                    $directoriesToInspect[] = $childPath;
+                }
+            }
+        }
+    }
+
+    foreach ($directoriesToInspect as $directory) {
+        if (is_dir($directory . '/.git') || is_file($directory . '/.git')) {
+            $realPath = realpath($directory);
+            if (is_string($realPath) && $realPath !== '') {
+                $repositories[$realPath] = $realPath;
+            }
+        }
+    }
+
+    $repositories = array_values($repositories);
+    sort($repositories, SORT_NATURAL | SORT_FLAG_CASE);
+
+    return array_slice($repositories, 0, max(1, $limit));
+}
+
 function devConsoleApacheDirectiveValue(string $value): string
 {
     return trim($value, " \t\n\r\0\x0B\"'");
