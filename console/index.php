@@ -88,7 +88,10 @@ if ($requestMethod === 'GET' && $requestPath === '/health') {
 $sessionDirectory = DEPLOY_STATE_DIR . '/sessions';
 if (!is_dir($sessionDirectory)) mkdir($sessionDirectory, 0700, true);
 session_save_path($sessionDirectory);
-session_set_cookie_params(['secure' => false, 'httponly' => true, 'samesite' => 'Strict']);
+$isHttps = (
+    isset($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off' && (string)$_SERVER['HTTPS'] !== ''
+) || (string)($_SERVER['SERVER_PORT'] ?? '') === '443';
+session_set_cookie_params(['secure' => $isHttps, 'httponly' => true, 'samesite' => 'Strict']);
 session_start();
 
 $consoleToken = (string)getenv('IOVON_DEV_CONSOLE_TOKEN');
@@ -438,7 +441,7 @@ function codexPromptForTask(string $repoRoot, string $taskId): string
 Follow AGENTS.md.
 
 Work in repository:
-/var/www/iovon-ai-dev";
+" . dirname(__DIR__);
 
     $attachmentPrompt = attachmentPromptText($repoRoot, $taskId);
     if ($attachmentPrompt !== '') {
@@ -809,8 +812,6 @@ $taskGitCompleted = $activeTaskId !== '';
 $editorTaskId = $viewTask ? pathinfo($viewTask['filename'], PATHINFO_FILENAME) : '';
 $editorBody = ($createdTaskId === '' && $viewTask) ? $viewTask['body'] : '';
 $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $editorTaskId;
-$previewDeploymentOverview = deploymentOverview('preview');
-$productionDeploymentOverview = deploymentOverview('production');
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -877,68 +878,10 @@ $productionDeploymentOverview = deploymentOverview('production');
     .codex-run-panel strong { color: var(--blue); }
     .codex-status { font-weight: 700; }
     .codex-console { background: #101820; border-radius: 6px; color: #dce7ec; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; line-height: 1.5; max-height: 360px; min-height: 180px; overflow: auto; padding: 14px; white-space: pre-wrap; }
-    .deployment-panel.production { border: 2px solid #8a1f1f; }
-    .deployment-details { display: grid; gap: 10px 24px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 16px 0; }
-    .deployment-details dt { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
-    .deployment-details dd { margin: 3px 0 0; overflow-wrap: anywhere; }
-    .deployment-status { border-radius: 999px; display: inline-block; font-size: 12px; font-weight: 700; padding: 5px 10px; text-transform: uppercase; }
-    .deployment-status.pending { background: #edf0f2; color: #56636a; }
-    .deployment-status.running { background: #fff2b8; color: #705900; }
-    .deployment-status.success { background: #e4f6ea; color: #147544; }
-    .deployment-status.failed { background: #fde8e8; color: #8a1f1f; }
-    .deploy-production { background: #a51d1d; border-color: #a51d1d; font-size: 16px; }
-    .deploy-production:hover { background: #801515; }
-    dialog { border: 0; border-radius: 10px; box-shadow: 0 20px 70px #0006; max-width: 720px; padding: 0; width: calc(100% - 32px); }
-    dialog::backdrop { background: #101820aa; }
-    .modal-content { padding: 24px; }
-    .modal-actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; margin-top: 20px; }
-    .change-list { background: #f3f6f7; max-height: 220px; overflow: auto; padding: 12px 12px 12px 30px; }
-    .deployment-error { color: #8a1f1f; font-weight: 700; }
-    .environment-block { padding: 14px; }
-    .environment-block a { color: var(--blue); }
-    .dashboard-header { align-items: baseline; display: flex; gap: 8px; justify-content: space-between; }
-    .dashboard-header h2 { font-size: 18px; }
-    .dashboard-header .meta { font-size: 11px; white-space: nowrap; }
-    .dashboard-grid { display: grid; gap: 8px; margin-top: 10px; }
-    .summary-grid { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .dashboard-card { background: #f8fbfc; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 9px 10px; }
-    .dashboard-card h3 { color: var(--blue); font-size: 13px; margin: 0 0 6px; }
-    .dashboard-list { display: grid; gap: 4px; margin: 0; }
-    .dashboard-list div { display: grid; gap: 5px; grid-template-columns: minmax(68px, .75fr) minmax(0, 1.25fr); }
-    .dashboard-list dt { color: var(--muted); font-size: 11px; font-weight: 700; }
-    .dashboard-list dd { font-size: 12px; margin: 0; overflow-wrap: anywhere; }
-    .dashboard-list code { padding: 1px 3px; }
-    .status-pill { background: #edf0f2; border-radius: 999px; color: #56636a; display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 8px; text-transform: uppercase; }
-    .status-pill.healthy { background: #e4f6ea; color: var(--green); }
-    .status-pill.warning { background: #fff2b8; color: #705900; }
-    .status-pill.error { background: #fde8e8; color: #8a1f1f; }
-    .health-row { display: flex; flex-wrap: wrap; gap: 6px 12px; }
-    .health-item { align-items: center; display: inline-flex; font-size: 11px; font-weight: 700; gap: 5px; }
-    .health-dot { background: #8a969c; border-radius: 50%; height: 8px; width: 8px; }
-    .health-item.healthy .health-dot { background: #1b9a59; }
-    .health-item.warning .health-dot { background: #d59b00; }
-    .health-item.error .health-dot { background: #c83232; }
-    .resource-grid { display: grid; gap: 9px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .resource-head { display: flex; font-size: 11px; font-weight: 700; justify-content: space-between; margin-bottom: 4px; }
-    .progress-track { background: #dce8ed; border-radius: 999px; height: 7px; overflow: hidden; }
-    .progress-bar { background: #238654; border-radius: inherit; height: 100%; }
-    .progress-bar.warning { background: #d59b00; }
-    .progress-bar.error { background: #c83232; }
-    .resource-value { color: var(--muted); font-size: 10px; margin: 4px 0 0; }
-    .compact-details summary { color: var(--blue); cursor: pointer; font-size: 13px; font-weight: 700; }
-    .compact-table { border-collapse: collapse; font-size: 11px; width: 100%; }
-    .compact-table th, .compact-table td { border-top: 1px solid var(--line); padding: 4px 2px; text-align: left; }
-    .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
-    .compact-table th { color: var(--muted); width: 45%; }
-    .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
-    .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 6px; text-align: left; }
-    .process-table th { border-top: 0; color: var(--muted); }
-    .process-table td:last-child { overflow-wrap: anywhere; }
     @media (max-width: 900px) {
       .dashboard-columns { display: block; }
       main { margin-top: 18px; }
     }
-    @media (max-width: 520px) { .summary-grid, .resource-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1035,35 +978,9 @@ $productionDeploymentOverview = deploymentOverview('production');
           </div>
         <?php endif; ?>
       </section>
-
-      <section class="panel deployment-panel" id="previewDeployment">
-    <h2>Preview Deployment</h2>
-    <dl class="deployment-details">
-      <div><dt>Source path</dt><dd><code><?= h($previewDeploymentOverview['source']) ?></code></dd></div>
-      <div><dt>Target path</dt><dd><code><?= h($previewDeploymentOverview['target']) ?></code></dd></div>
-      <div><dt>Preview URL</dt><dd><a href="<?= h($previewDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h($previewDeploymentOverview['url']) ?></a></dd></div>
-      <div><dt>Current Git branch</dt><dd><?= h($previewDeploymentOverview['branch']) ?></dd></div>
-      <div><dt>Development commit</dt><dd><code title="<?= h($previewDeploymentOverview['commit']) ?>"><?= h(shortSha($previewDeploymentOverview['commit'])) ?></code></dd></div>
-      <div><dt>Commit message</dt><dd><?= h($previewDeploymentOverview['message']) ?></dd></div>
-      <div><dt>Preview version</dt><dd><code title="<?= h($previewDeploymentOverview['deployed_commit']) ?>"><?= h($previewDeploymentOverview['deployed_commit'] === '' ? 'Not detected' : shortSha($previewDeploymentOverview['deployed_commit'])) ?></code></dd></div>
-      <div><dt>Last Preview deployment</dt><dd id="previewLastDeploymentTime"><?= h((string)($previewDeploymentOverview['latest']['finish_time'] ?? $previewDeploymentOverview['latest']['start_time'] ?? 'Never')) ?></dd></div>
-      <div><dt>Preview status</dt><dd><span id="previewDeploymentStatus" class="deployment-status <?= h((string)($previewDeploymentOverview['latest']['status'] ?? 'pending')) ?>"><?= h(isset($previewDeploymentOverview['latest']['status']) ? ucfirst((string)$previewDeploymentOverview['latest']['status']) : 'Not started') ?></span></dd></div>
-    </dl>
-    <button type="button" id="deployPreview">Deploy to Preview</button>
-    <p class="deployment-error" id="previewDeploymentError" aria-live="assertive"></p>
-    <pre class="codex-console" id="previewDeploymentLog"><?= h(isset($previewDeploymentOverview['latest']['log_path']) && is_file($previewDeploymentOverview['latest']['log_path']) ? (string)file_get_contents($previewDeploymentOverview['latest']['log_path']) : 'No deployment log yet.') ?></pre>
-  </section>
   </div>
 
   <div class="dashboard-column dashboard-column-right">
-    <section class="panel environment-block" id="environment">
-      <div class="dashboard-header">
-        <h2>Environment</h2>
-        <span class="meta" id="dashboardUpdated">Loading…</span>
-      </div>
-      <div class="dashboard-grid" id="environmentDashboard" aria-live="polite"></div>
-    </section>
-
     <section class="panel">
       <h2>Tasks</h2>
       <?php if (empty($latestTasks)): ?>
@@ -1090,51 +1007,8 @@ $productionDeploymentOverview = deploymentOverview('production');
         </div>
       <?php endif; ?>
     </section>
-
-  <section class="panel deployment-panel production" id="productionDeployment">
-    <h2>Production Deployment</h2>
-    <dl class="deployment-details">
-      <div><dt>Production target</dt><dd><code><?= h($productionDeploymentOverview['target']) ?></code></dd></div>
-      <div><dt>Production URL</dt><dd><a href="<?= h($productionDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h($productionDeploymentOverview['url']) ?></a></dd></div>
-      <div><dt>Production version</dt><dd><code id="productionCommit" title="<?= h($productionDeploymentOverview['deployed_commit']) ?>"><?= h($productionDeploymentOverview['deployed_commit'] === '' ? 'Not detected' : shortSha($productionDeploymentOverview['deployed_commit'])) ?></code></dd></div>
-      <div><dt>Last Production deployment</dt><dd id="productionLastDeploymentTime"><?= h((string)($productionDeploymentOverview['latest']['finish_time'] ?? $productionDeploymentOverview['latest']['start_time'] ?? 'Never')) ?></dd></div>
-      <div><dt>Production status</dt><dd><span id="productionDeploymentStatus" class="deployment-status <?= h((string)($productionDeploymentOverview['latest']['status'] ?? 'pending')) ?>"><?= h(isset($productionDeploymentOverview['latest']['status']) ? ucfirst((string)$productionDeploymentOverview['latest']['status']) : 'Not started') ?></span></dd></div>
-    </dl>
-    <button type="button" class="deploy-production" id="deployProduction">Deploy to Production</button>
-    <p class="deployment-error" id="productionDeploymentError" aria-live="assertive"></p>
-    <pre class="codex-console" id="productionDeploymentLog"><?= h(isset($productionDeploymentOverview['latest']['log_path']) && is_file($productionDeploymentOverview['latest']['log_path']) ? (string)file_get_contents($productionDeploymentOverview['latest']['log_path']) : 'No deployment log yet.') ?></pre>
-  </section>
   </div>
   </div>
-
-  <dialog id="previewDeploymentDialog">
-    <div class="modal-content">
-      <h2>Confirm Preview Deployment</h2>
-      <div id="previewDeploymentSummary"></div>
-      <p class="deployment-error" id="previewModalDeploymentError" aria-live="assertive"></p>
-      <div class="modal-actions">
-        <button type="button" class="secondary" id="cancelPreviewDeployment">Cancel</button>
-        <button type="button" id="confirmPreviewDeployment">Deploy to Preview</button>
-      </div>
-    </div>
-  </dialog>
-
-  <dialog id="deploymentDialog">
-    <div class="modal-content">
-      <h2>Confirm Production Deployment</h2>
-      <div id="deploymentPreview"></div>
-      <div id="deploymentFinalStep" hidden>
-        <label for="deploymentConfirmation">Type <code>DEPLOY</code> exactly to continue</label>
-        <input id="deploymentConfirmation" type="text" autocomplete="off" spellcheck="false">
-      </div>
-      <p class="deployment-error" id="modalDeploymentError" aria-live="assertive"></p>
-      <div class="modal-actions">
-        <button type="button" class="secondary" id="cancelDeployment">Cancel</button>
-        <button type="button" id="continueDeployment">Continue</button>
-        <button type="button" class="deploy-production" id="confirmDeployment" disabled hidden>Confirm Deployment</button>
-      </div>
-    </div>
-  </dialog>
 
   <?php if (!$viewTask && isset($_GET['task']) && (string)$_GET['task'] !== ''): ?>
     <section class="panel error">
@@ -1162,11 +1036,7 @@ $productionDeploymentOverview = deploymentOverview('production');
   const refreshCodexLog = document.getElementById('refreshCodexLog');
   const copyCodexLog = document.getElementById('copyCodexLog');
   const copyCodexMessage = document.getElementById('copyCodexMessage');
-  const csrfToken = <?= json_encode($csrfToken, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const draftKey = 'iovon.devConsole.taskDraft';
-  const environmentDashboard = document.getElementById('environmentDashboard');
-  const dashboardUpdated = document.getElementById('dashboardUpdated');
-  const activeTask = <?= json_encode($activeTaskId === '' ? 'None' : $activeTaskId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const scrollKey = 'iovon.devConsole.scrollPosition';
   let scrollSaveFrame = null;
   const saveScrollPosition = () => {
@@ -1187,70 +1057,6 @@ $productionDeploymentOverview = deploymentOverview('production');
     });
   }, { passive: true });
   window.addEventListener('pagehide', saveScrollPosition);
-  const dashboardEscape = (value) => String(value).replace(/[&<>"']/g, (character) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]));
-  const formatBytes = (bytes) => {
-    let value = Number(bytes) || 0;
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    let unit = 0;
-    while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
-    return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-  };
-  const statusClass = (status) => {
-    const value = String(status).toLowerCase();
-    if (['running', 'success', 'healthy'].includes(value)) return 'healthy';
-    if (['pending', 'not_started'].includes(value)) return 'warning';
-    return 'error';
-  };
-  const statusLabel = (status) => String(status).replaceAll('_', ' ');
-  const dashboardCard = (title, rows, extraClass = '') => `<section class="dashboard-card ${extraClass}"><h3>${dashboardEscape(title)}</h3><dl class="dashboard-list">${rows.map(([label, value]) => `<div><dt>${dashboardEscape(label)}</dt><dd>${value}</dd></div>`).join('')}</dl></section>`;
-  const dashboardLink = (url) => `<a href="${dashboardEscape(url)}" target="_blank" rel="noopener noreferrer">${dashboardEscape(url)}</a>`;
-  const dashboardStatus = (status) => `<span class="status-pill ${statusClass(status)}">${dashboardEscape(statusLabel(status))}</span>`;
-  const healthItem = (label, state) => `<span class="health-item ${state}"><span class="health-dot" aria-hidden="true"></span>${dashboardEscape(label)}</span>`;
-  const resourceBar = (label, percentage, numericValue) => {
-    const value = Math.max(0, Math.min(100, Number(percentage) || 0));
-    const state = value >= 90 ? 'error' : (value >= 80 ? 'warning' : 'healthy');
-    return `<div><div class="resource-head"><span>${dashboardEscape(label)}</span><span>${dashboardEscape(`${value}%`)}</span></div><div class="progress-track" role="progressbar" aria-label="${dashboardEscape(label)} usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${value}"><div class="progress-bar ${state}" style="width:${value}%"></div></div><p class="resource-value">${dashboardEscape(numericValue)}</p></div>`;
-  };
-  let environmentRefreshInProgress = false;
-  const refreshEnvironmentDashboard = async () => {
-    if (!environmentDashboard || environmentRefreshInProgress) return;
-    environmentRefreshInProgress = true;
-    try {
-      const topProcessesWasOpen = environmentDashboard.querySelector('#topProcesses')?.open ?? false;
-      const response = await fetch('?action=environment-status', { cache: 'no-store' });
-      const payload = await response.json();
-      if (!payload.ok) throw new Error(payload.error || 'Unable to load environment status.');
-      const data = payload.dashboard;
-    const development = data.environment.development;
-    const preview = data.environment.preview;
-    const production = data.environment.production;
-    const memory = data.server.memory;
-    const disk = data.server.disk;
-    const softwareNames = ['PHP', 'Composer', 'Node.js', 'npm', 'Git', 'Codex CLI'];
-    const softwareRows = softwareNames.map((name) => `<tr><th>${dashboardEscape(name.replace('Node.js', 'Node').replace('Codex CLI', 'Codex'))}</th><td>${dashboardEscape(data.software[name])}</td></tr>`).join('');
-    const processes = data.processes.length ? data.processes.map((process) => `<tr><td>${process.pid}</td><td>${dashboardEscape(process.user)}</td><td>${process.cpu.toFixed(1)}</td><td>${process.memory.toFixed(1)}</td><td>${dashboardEscape(process.command)}</td></tr>`).join('') : '<tr><td colspan="5">No process data available.</td></tr>';
-    const previewHealth = statusClass(preview.status);
-    const productionHealth = statusClass(production.status);
-    const consoleHealth = statusClass(data.environment.console.status);
-    const gitHealth = data.software.Git === 'Not installed' ? 'error' : 'healthy';
-    const webHealth = previewHealth === 'error' && productionHealth === 'error' ? 'error' : (previewHealth === 'warning' && productionHealth === 'warning' ? 'warning' : 'healthy');
-      environmentDashboard.innerHTML =
-      `<section class="dashboard-card"><div class="health-row">${healthItem('Preview', previewHealth)}${healthItem('Production', productionHealth)}${healthItem('Dev Console', consoleHealth)}${healthItem('Git', gitHealth)}${healthItem('Apache', webHealth)}${healthItem('Tailscale', consoleHealth)}</div></section>` +
-      `<div class="summary-grid">` +
-      dashboardCard('Development', [['Branch', dashboardEscape(development.branch)], ['Commit', `<code>${dashboardEscape(development.commit)}</code>`], ['Current task', dashboardEscape(activeTask)]]) +
-      dashboardCard('Preview', [['Status', dashboardStatus(preview.status)], ['URL', dashboardLink(preview.url)]]) +
-      dashboardCard('Production', [['Status', dashboardStatus(production.status)], ['URL', dashboardLink(production.url)]]) +
-      dashboardCard('Dev Console', [['Status', dashboardStatus(data.environment.console.status)], ['URL', dashboardLink(data.environment.console.url)]]) +
-      `</div>` +
-      `<section class="dashboard-card"><h3>Resources</h3><div class="resource-grid">${resourceBar('CPU', data.server.load_percentage, `Load ${data.server.load.join(' / ') || 'not detected'}`)}${resourceBar('Memory', memory.percentage, `${formatBytes(memory.used)} / ${formatBytes(memory.total)}`)}${resourceBar('Disk', disk.percentage, `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`)}</div></section>` +
-      `<section class="dashboard-card"><h3>Software Versions</h3><table class="compact-table"><tbody>${softwareRows}</tbody></table></section>` +
-      dashboardCard('Repository', [['Size', formatBytes(data.statistics.development.bytes)], ['File count', data.statistics.development.files.toLocaleString()]]) +
-      `<details class="dashboard-card compact-details" id="topProcesses"${topProcessesWasOpen ? ' open' : ''}><summary>Top Processes</summary><table class="process-table"><thead><tr><th>PID</th><th>User</th><th>CPU %</th><th>Memory %</th><th>Command</th></tr></thead><tbody>${processes}</tbody></table></details>`;
-      dashboardUpdated.textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
-    } finally {
-      environmentRefreshInProgress = false;
-    }
-  };
 
   if (form && form.dataset.created === '1') {
     localStorage.removeItem(draftKey);
@@ -1459,117 +1265,6 @@ $productionDeploymentOverview = deploymentOverview('production');
     }
   });
 
-  const deployButton = document.getElementById('deployProduction');
-  const previewDeployButton = document.getElementById('deployPreview');
-  const previewDeployDialog = document.getElementById('previewDeploymentDialog');
-  const previewSummaryBox = document.getElementById('previewDeploymentSummary');
-  const previewConfirmButton = document.getElementById('confirmPreviewDeployment');
-  const previewCancelButton = document.getElementById('cancelPreviewDeployment');
-  const previewModalError = document.getElementById('previewModalDeploymentError');
-  const deployDialog = document.getElementById('deploymentDialog');
-  const previewBox = document.getElementById('deploymentPreview');
-  const finalStep = document.getElementById('deploymentFinalStep');
-  const confirmationInput = document.getElementById('deploymentConfirmation');
-  const continueButton = document.getElementById('continueDeployment');
-  const confirmButton = document.getElementById('confirmDeployment');
-  const cancelButton = document.getElementById('cancelDeployment');
-  const deploymentError = document.getElementById('productionDeploymentError');
-  const modalError = document.getElementById('modalDeploymentError');
-  const deploymentLog = document.getElementById('productionDeploymentLog');
-  const deploymentStatus = document.getElementById('productionDeploymentStatus');
-  const previewDeploymentError = document.getElementById('previewDeploymentError');
-  const previewDeploymentLog = document.getElementById('previewDeploymentLog');
-  const previewDeploymentStatus = document.getElementById('previewDeploymentStatus');
-  let confirmedSummary = null;
-  let previewConfirmedSummary = null;
-  let deploymentStep = 1;
-  const deploymentPolls = { preview: null, production: null };
-  const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]));
-
-  const postDeployment = async (action, values = {}) => {
-    const body = new FormData();
-    body.set('action', action); body.set('csrf_token', csrfToken);
-    Object.entries(values).forEach(([key, value]) => body.set(key, value));
-    const response = await fetch(`?action=${encodeURIComponent(action)}`, { method: 'POST', body });
-    const payload = await response.json();
-    if (!payload.ok) throw new Error(payload.error || 'Deployment request failed.');
-    return payload;
-  };
-  const setDeploymentStatus = (environment, status) => {
-    const element = environment === 'preview' ? previewDeploymentStatus : deploymentStatus;
-    element.textContent = status.charAt(0).toUpperCase() + status.slice(1);
-    element.className = `deployment-status ${status}`;
-  };
-  const pollDeployment = (environment, id) => {
-    clearInterval(deploymentPolls[environment]);
-    const isPreview = environment === 'preview';
-    const button = isPreview ? previewDeployButton : deployButton;
-    const log = isPreview ? previewDeploymentLog : deploymentLog;
-    const errorBox = isPreview ? previewDeploymentError : deploymentError;
-    const update = async () => {
-      const response = await fetch(`?action=deployment-status&environment=${encodeURIComponent(environment)}&id=${encodeURIComponent(id)}`, { cache: 'no-store' });
-      const payload = await response.json();
-      if (!payload.deployment) return;
-      setDeploymentStatus(environment, payload.deployment.status);
-      log.textContent = payload.log || 'Waiting for deployment log...';
-      log.scrollTop = log.scrollHeight;
-      if (['success', 'failed'].includes(payload.deployment.status)) {
-        clearInterval(deploymentPolls[environment]); button.disabled = false;
-        document.getElementById(`${environment}LastDeploymentTime`).textContent = payload.deployment.finish_time || payload.deployment.start_time;
-        if (!isPreview && payload.deployment.status === 'success') {
-          const productionCommit = document.getElementById('productionCommit');
-          productionCommit.textContent = payload.deployment.source_commit.slice(0, 7);
-          productionCommit.title = payload.deployment.source_commit;
-        }
-        if (payload.deployment.error) errorBox.textContent = payload.deployment.error;
-      }
-    };
-    update().catch(() => {}); deploymentPolls[environment] = setInterval(() => update().catch(() => {}), 2000);
-  };
-  const deploymentSummaryHtml = (payload) => {
-    const items = payload.summary.files.length ? payload.summary.files.map((file) => `<li>${escapeHtml(file)}</li>`).join('') : '<li>No file changes.</li>';
-    return `<dl class="deployment-details"><div><dt>Source</dt><dd><code>${escapeHtml(payload.overview.source)}</code></dd></div><div><dt>Target</dt><dd><code>${escapeHtml(payload.overview.target)}</code></dd></div><div><dt>Branch</dt><dd>${escapeHtml(payload.overview.branch)}</dd></div><div><dt>Commit</dt><dd><code>${escapeHtml(payload.overview.commit)}</code></dd></div><div><dt>Message</dt><dd>${escapeHtml(payload.overview.message)}</dd></div><div><dt>Changes</dt><dd>${Number(payload.summary.added)} added · ${Number(payload.summary.updated)} updated · ${Number(payload.summary.deleted)} deleted</dd></div></dl><ul class="change-list">${items}</ul>`;
-  };
-  previewDeployButton?.addEventListener('click', async () => {
-    previewDeploymentError.textContent = ''; previewModalError.textContent = ''; previewDeployButton.disabled = true;
-    previewConfirmButton.disabled = false;
-    try {
-      const payload = await postDeployment('deployment-preview', { environment: 'preview' });
-      previewConfirmedSummary = payload.summary;
-      previewSummaryBox.innerHTML = deploymentSummaryHtml(payload);
-      previewDeployDialog.showModal();
-    } catch (error) { previewDeploymentError.textContent = error.message; previewDeployButton.disabled = false; setDeploymentStatus('preview', 'failed'); }
-  });
-  previewCancelButton?.addEventListener('click', () => { previewDeployDialog.close(); previewDeployButton.disabled = false; });
-  previewConfirmButton?.addEventListener('click', async () => {
-    previewConfirmButton.disabled = true; previewModalError.textContent = '';
-    try {
-      const payload = await postDeployment('deployment-start', { environment: 'preview', summary: JSON.stringify(previewConfirmedSummary) });
-      previewDeployDialog.close(); setDeploymentStatus('preview', 'pending'); pollDeployment('preview', payload.deployment.id);
-    } catch (error) { previewModalError.textContent = error.message; previewConfirmButton.disabled = false; }
-  });
-  deployButton?.addEventListener('click', async () => {
-    deploymentError.textContent = ''; modalError.textContent = ''; deployButton.disabled = true;
-    try {
-      const payload = await postDeployment('deployment-preview', { environment: 'production' });
-      confirmedSummary = payload.summary;
-      previewBox.innerHTML = deploymentSummaryHtml(payload);
-      deploymentStep = 1; finalStep.hidden = true; continueButton.hidden = false; confirmButton.hidden = true; confirmationInput.value = '';
-      deployDialog.showModal();
-    } catch (error) { deploymentError.textContent = error.message; deployButton.disabled = false; setDeploymentStatus('production', 'failed'); }
-  });
-  cancelButton?.addEventListener('click', () => { deploymentStep = 1; deployDialog.close(); deployButton.disabled = false; });
-  continueButton?.addEventListener('click', () => { deploymentStep = 2; finalStep.hidden = false; continueButton.hidden = true; confirmButton.hidden = false; confirmationInput.focus(); });
-  confirmationInput?.addEventListener('input', () => { confirmButton.disabled = confirmationInput.value !== 'DEPLOY'; });
-  confirmButton?.addEventListener('click', async () => {
-    if (deploymentStep !== 2 || confirmationInput.value !== 'DEPLOY') return;
-    confirmButton.disabled = true; modalError.textContent = '';
-    try {
-      const payload = await postDeployment('deployment-start', { environment: 'production', confirmation: confirmationInput.value, summary: JSON.stringify(confirmedSummary) });
-      deployDialog.close(); setDeploymentStatus('production', 'pending'); pollDeployment('production', payload.deployment.id);
-    } catch (error) { modalError.textContent = error.message; confirmButton.disabled = confirmationInput.value !== 'DEPLOY'; }
-  });
-
   if (codexRunPanel) {
     updateCodexStatus().then((status) => {
       updateCodexLog(status === 'queued' || status === 'running').catch(() => {});
@@ -1578,13 +1273,6 @@ $productionDeploymentOverview = deploymentOverview('production');
       }
     }).catch(() => {});
   }
-
-  refreshEnvironmentDashboard().catch(() => {
-    if (dashboardUpdated) dashboardUpdated.textContent = 'Status unavailable';
-  });
-  window.setInterval(() => refreshEnvironmentDashboard().catch(() => {
-    if (dashboardUpdated) dashboardUpdated.textContent = 'Refresh failed';
-  }), 5000);
 })();
 </script>
 </body>
