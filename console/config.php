@@ -32,6 +32,12 @@ function devConsoleEmptyProject(): array
             'domain' => '',
             'path' => '',
         ],
+        'provisioning' => [
+            'managed' => false,
+            'provisioned_at' => null,
+            'production_vhost' => null,
+            'preview_vhost' => null,
+        ],
     ];
 }
 
@@ -61,6 +67,15 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
                 if (isset($environmentInput[$field]) && is_scalar($environmentInput[$field])) {
                     $project[$environment][$field] = trim((string)$environmentInput[$field]);
                 }
+            }
+        }
+
+        $provisioningInput = is_array($projectInput['provisioning'] ?? null) ? $projectInput['provisioning'] : [];
+        $project['provisioning']['managed'] = !empty($provisioningInput['managed']);
+        foreach (['provisioned_at', 'production_vhost', 'preview_vhost'] as $field) {
+            if (array_key_exists($field, $provisioningInput)) {
+                $value = $provisioningInput[$field];
+                $project['provisioning'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
             }
         }
 
@@ -159,6 +174,29 @@ function devConsoleFindProjectById(array $configuration, string $id): ?array
     }
 
     return null;
+}
+
+function devConsoleReplaceProject(array $configuration, array $updatedProject): array
+{
+    $configuration = devConsoleNormalizeProjectConfiguration($configuration);
+    foreach ($configuration['projects'] as $index => $project) {
+        if (($project['id'] ?? '') === ($updatedProject['id'] ?? null)) {
+            $configuration['projects'][$index] = devConsoleNormalizeProjectConfiguration(['projects' => [$updatedProject]])['projects'][0];
+            return $configuration;
+        }
+    }
+
+    return $configuration;
+}
+
+function devConsoleRemoveProjectFromConfiguration(array $configuration, string $projectId): array
+{
+    $configuration = devConsoleNormalizeProjectConfiguration($configuration);
+    $configuration['projects'] = array_values(array_filter($configuration['projects'], function (array $project) use ($projectId): bool {
+        return ($project['id'] ?? '') !== $projectId;
+    }));
+
+    return $configuration;
 }
 
 function devConsoleProjectIdFromName(string $name): string

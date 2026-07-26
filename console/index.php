@@ -2,6 +2,7 @@
 require __DIR__ . '/deployment.php';
 require __DIR__ . '/config.php';
 require __DIR__ . '/apache.php';
+require __DIR__ . '/projects.php';
 
 const DEV_CONSOLE_VERSION = '0.1';
 
@@ -613,6 +614,7 @@ $commitHash = '';
 $prompt = '';
 $error = '';
 $apacheActionResult = null;
+$projectActionResult = null;
 $projectFormErrors = [];
 $projectFormValues = [
     'project_name' => '',
@@ -758,7 +760,25 @@ if ($action === 'create_project') {
     }
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project']), true)) {
+if (in_array($action, ['provision_project', 'remove_project', 'delete_project'], true)) {
+    $projectConfigurationForAction = devConsoleLoadProjectConfiguration();
+    $projectId = is_scalar($_POST['project_id'] ?? null) ? (string)$_POST['project_id'] : '';
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $projectActionResult = projectActionResult(false, 'Invalid project action request.');
+    } elseif ($action === 'provision_project') {
+        $projectActionResult = projectProvision($projectConfigurationForAction, $projectId);
+    } elseif ($action === 'remove_project') {
+        $projectActionResult = projectRemoveFromConsole($projectConfigurationForAction, $projectId);
+    } else {
+        $confirmation = is_scalar($_POST['confirm_project_id'] ?? null) ? (string)$_POST['confirm_project_id'] : '';
+        $projectActionResult = projectDelete($projectConfigurationForAction, $projectId, $confirmation);
+    }
+    $_SESSION['project_action_result'] = $projectActionResult;
+    header('Location: /?tab=settings#projects');
+    exit;
+}
+
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'provision_project', 'remove_project', 'delete_project']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -876,9 +896,23 @@ $apacheSites = devConsoleApacheSites();
 $apacheState = apacheState();
 $projectFlash = (string)($_SESSION['project_flash'] ?? '');
 unset($_SESSION['project_flash']);
+$projectActionResult = is_array($_SESSION['project_action_result'] ?? null) ? $_SESSION['project_action_result'] : $projectActionResult;
+unset($_SESSION['project_action_result']);
 $apacheActionResult = is_array($_SESSION['apache_action_result'] ?? null) ? $_SESSION['apache_action_result'] : $apacheActionResult;
 unset($_SESSION['apache_action_result']);
-$initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '' || $apacheActionResult !== null) ? 'settings' : 'dashboard';
+$projectStatuses = [];
+foreach ($projects as $project) {
+    try {
+        $projectStatuses[(string)($project['id'] ?? '')] = projectStatus($project);
+    } catch (Throwable) {
+        $projectStatuses[(string)($project['id'] ?? '')] = [
+            'label' => 'Drift detected',
+            'production' => [],
+            'preview' => [],
+        ];
+    }
+}
+$initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '' || $projectActionResult !== null || $apacheActionResult !== null) ? 'settings' : 'dashboard';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -1018,6 +1052,14 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .project-form label { margin-top: 12px; }
     .project-form label:first-of-type { margin-top: 4px; }
     .field-help { color: var(--muted); font-size: 12px; margin: 5px 0 0; }
+    .project-list { display: grid; gap: 12px; }
+    .project-item { background: #f8fbfc; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+    .project-item-header { align-items: flex-start; display: flex; gap: 12px; justify-content: space-between; }
+    .project-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .project-actions form { margin: 0; }
+    .project-actions button { font-size: 13px; margin-top: 0; padding: 8px 11px; }
+    .project-actions .danger { background: #a51d1d; }
+    .project-actions .danger:disabled { background: #a51d1d; }
     .success-message { background: #e9f7ef; border: 1px solid #b8dfc7; border-radius: 6px; color: var(--green); padding: 10px 12px; }
     .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 6px; text-align: left; }
@@ -1250,31 +1292,72 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
         <?php if ($projectFlash !== ''): ?>
           <p class="success-message"><?= h($projectFlash) ?></p>
         <?php endif; ?>
+        <?php if ($projectActionResult !== null): ?>
+          <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
+            <h2><?= !empty($projectActionResult['success']) ? 'Project action completed' : 'Project action failed' ?></h2>
+            <p><?= h((string)$projectActionResult['message']) ?></p>
+            <details<?= !empty($projectActionResult['success']) ? '' : ' open' ?>>
+              <summary>Show operation log</summary>
+              <pre><?= h((string)($projectActionResult['output'] ?? '')) ?></pre>
+            </details>
+          </section>
+        <?php endif; ?>
         <?php if (empty($projects)): ?>
           <p class="meta">No projects configured yet.</p>
         <?php else: ?>
-          <table class="settings-table">
-            <thead>
-              <tr>
-                <th>Project</th>
-                <th>Production</th>
-                <th>Preview</th>
-                <th>Repository</th>
-                <th>Branch</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($projects as $project): ?>
-                <tr>
-                  <td><strong><?= h(configuredDisplayValue($project['name'] ?? '')) ?></strong><br><span class="meta"><?= h(configuredDisplayValue($project['id'] ?? '')) ?></span></td>
-                  <td><?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?><br><span class="meta"><?= h(configuredDisplayValue($project['production']['path'] ?? '')) ?></span></td>
-                  <td><?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?><br><span class="meta"><?= h(configuredDisplayValue($project['preview']['path'] ?? '')) ?></span></td>
-                  <td><?= h(configuredDisplayValue($project['repository_path'] ?? '')) ?></td>
-                  <td><?= h(configuredDisplayValue($project['branch'] ?? '')) ?></td>
-                </tr>
+          <div class="project-list">
+            <?php foreach ($projects as $project): ?>
+              <?php
+                $projectStatus = $projectStatuses[(string)($project['id'] ?? '')] ?? projectStatus($project);
+                $statusLabel = (string)$projectStatus['label'];
+                $statusClass = $statusLabel === 'Provisioned' ? 'healthy' : ($statusLabel === 'Drift detected' ? 'error' : 'warning');
+                $isManaged = !empty($project['provisioning']['managed']);
+              ?>
+              <section class="project-item">
+                <div class="project-item-header">
+                  <div>
+                    <h3><?= h(configuredDisplayValue($project['name'] ?? '')) ?></h3>
+                    <p class="meta"><?= h(configuredDisplayValue($project['id'] ?? '')) ?></p>
+                  </div>
+                  <span class="status-pill <?= h($statusClass) ?>"><?= h($statusLabel) ?></span>
+                </div>
+                <table class="compact-table">
+                  <tbody>
+                    <tr><th>Repository</th><td><?= h(configuredDisplayValue($project['repository_path'] ?? '')) ?></td></tr>
+                    <tr><th>Branch</th><td><?= h(configuredDisplayValue($project['branch'] ?? '')) ?></td></tr>
+                    <tr><th>Production</th><td><?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?><br><span class="meta"><?= h(configuredDisplayValue($project['production']['path'] ?? '')) ?></span></td></tr>
+                    <tr><th>Production status</th><td>Directory: <?= !empty($projectStatus['production']['directory_exists']) ? 'Yes' : 'No' ?> · Vhost: <?= !empty($projectStatus['production']['vhost_exists']) ? 'Yes' : 'No' ?> · Enabled: <?= !empty($projectStatus['production']['site_enabled']) ? 'Yes' : 'No' ?> · ServerName: <?= !empty($projectStatus['production']['server_name_matches']) ? 'OK' : 'Mismatch' ?> · DocumentRoot: <?= !empty($projectStatus['production']['document_root_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
+                    <tr><th>Preview</th><td><?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?><br><span class="meta"><?= h(configuredDisplayValue($project['preview']['path'] ?? '')) ?></span></td></tr>
+                    <tr><th>Preview status</th><td>Directory: <?= !empty($projectStatus['preview']['directory_exists']) ? 'Yes' : 'No' ?> · Vhost: <?= !empty($projectStatus['preview']['vhost_exists']) ? 'Yes' : 'No' ?> · Enabled: <?= !empty($projectStatus['preview']['site_enabled']) ? 'Yes' : 'No' ?> · ServerName: <?= !empty($projectStatus['preview']['server_name_matches']) ? 'OK' : 'Mismatch' ?> · DocumentRoot: <?= !empty($projectStatus['preview']['document_root_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
+                    <tr><th>Managed</th><td><?= $isManaged ? 'Yes' : 'No' ?></td></tr>
+                  </tbody>
+                </table>
+                <div class="project-actions">
+                  <?php if ($statusLabel !== 'Provisioned'): ?>
+                    <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                      <input type="hidden" name="action" value="provision_project">
+                      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                      <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                      <button type="submit">Provision</button>
+                    </form>
+                  <?php endif; ?>
+                  <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove this project from Dev Console?\nServer files will not be deleted.');">
+                    <input type="hidden" name="action" value="remove_project">
+                    <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                    <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                    <button type="submit" class="secondary">Remove from Console</button>
+                  </form>
+                  <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" data-delete-project-form="1" data-project-id="<?= h((string)$project['id']) ?>">
+                    <input type="hidden" name="action" value="delete_project">
+                    <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                    <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                    <input type="hidden" name="confirm_project_id" value="">
+                    <button type="submit" class="danger"<?= $isManaged ? '' : ' disabled title="Delete Project is available only for Dev Console-managed projects."' ?>>Delete Project</button>
+                  </form>
+                </div>
+              </section>
               <?php endforeach; ?>
-            </tbody>
-          </table>
+          </div>
         <?php endif; ?>
 
         <section class="subsection">
@@ -1477,6 +1560,18 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   document.querySelectorAll('#settingsTab form[data-preserve-settings-scroll="1"]').forEach((settingsForm) => {
     settingsForm.addEventListener('submit', () => {
       sessionStorage.setItem(settingsScrollKey, String(window.scrollY));
+    });
+  });
+  document.querySelectorAll('[data-delete-project-form="1"]').forEach((deleteForm) => {
+    deleteForm.addEventListener('submit', (event) => {
+      const projectId = deleteForm.dataset.projectId || '';
+      const confirmation = window.prompt(`Type ${projectId} to delete this Dev Console-managed project.`);
+      if (confirmation !== projectId) {
+        event.preventDefault();
+        return;
+      }
+      const confirmationInput = deleteForm.querySelector('input[name="confirm_project_id"]');
+      if (confirmationInput) confirmationInput.value = confirmation;
     });
   });
   const projectNameInput = document.getElementById('project_name');
