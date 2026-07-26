@@ -176,6 +176,26 @@ function devConsoleFindProjectById(array $configuration, string $id): ?array
     return null;
 }
 
+function devConsoleGeneratedEnvironmentPaths(string $projectId): array
+{
+    return [
+        'production' => '/var/www/projects/' . $projectId . '/production',
+        'preview' => '/var/www/projects/' . $projectId . '/preview',
+    ];
+}
+
+function devConsoleProjectUsesGeneratedEnvironmentPaths(array $project): bool
+{
+    $projectId = (string)($project['id'] ?? '');
+    if ($projectId === '') {
+        return false;
+    }
+
+    $paths = devConsoleGeneratedEnvironmentPaths($projectId);
+    return (string)($project['production']['path'] ?? '') === $paths['production']
+        && (string)($project['preview']['path'] ?? '') === $paths['preview'];
+}
+
 function devConsoleReplaceProject(array $configuration, array $updatedProject): array
 {
     $configuration = devConsoleNormalizeProjectConfiguration($configuration);
@@ -257,10 +277,11 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
     $repositoryPath = devConsoleScalarInput($input, 'repository_path');
     $branch = devConsoleScalarInput($input, 'branch');
     $productionDomain = devConsoleNormalizeDomain(devConsoleScalarInput($input, 'production_domain'));
-    $productionPath = devConsoleScalarInput($input, 'production_path');
     $previewDomain = devConsoleNormalizeDomain(devConsoleScalarInput($input, 'preview_domain'));
-    $previewPath = devConsoleScalarInput($input, 'preview_path');
     $projectId = devConsoleProjectIdFromName($name);
+    $generatedPaths = $projectId === '' ? ['production' => '', 'preview' => ''] : devConsoleGeneratedEnvironmentPaths($projectId);
+    $productionPath = $generatedPaths['production'];
+    $previewPath = $generatedPaths['preview'];
     $errors = [];
 
     foreach ([
@@ -268,9 +289,7 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
         'Repository path' => $repositoryPath,
         'Branch' => $branch,
         'Production domain' => $productionDomain,
-        'Production path' => $productionPath,
         'Preview domain' => $previewDomain,
-        'Preview path' => $previewPath,
     ] as $label => $value) {
         if ($value === '') {
             $errors[] = $label . ' is required.';
@@ -333,6 +352,7 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
             'domain' => $previewDomain,
             'path' => $previewPath,
         ],
+        'provisioning' => devConsoleEmptyProject()['provisioning'],
     ];
 
     return [

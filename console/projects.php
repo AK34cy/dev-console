@@ -254,13 +254,13 @@ function projectStatus(array $project, string $availableDir = '/etc/apache2/site
         }
     }
 
-    $label = 'Not provisioned';
+    $label = 'Not set up';
     if ($drift) {
         $label = 'Drift detected';
     } elseif ($allProvisioned) {
-        $label = 'Provisioned';
+        $label = 'Ready';
     } elseif ($anyResources) {
-        $label = 'Partially provisioned';
+        $label = 'Incomplete';
     }
 
     return ['label' => $label, 'production' => $production, 'preview' => $preview];
@@ -303,6 +303,9 @@ function projectProvision(array $configuration, string $projectId, array $option
     $siteStateChanged = false;
 
     try {
+        if (!devConsoleProjectUsesGeneratedEnvironmentPaths($project)) {
+            throw new RuntimeException('This project uses custom environment paths and cannot be set up automatically.');
+        }
         projectValidateStoredConfiguration($configuration, $project);
         if ($runCommands) {
             $apacheState = apacheState();
@@ -392,7 +395,7 @@ function projectProvision(array $configuration, string $projectId, array $option
             }
         }
 
-        return projectActionResult(true, 'Project provisioned.', $log);
+        return projectActionResult(true, 'Project set up.', $log);
     } catch (Throwable $exception) {
         foreach (array_reverse($enabledSites) as $environment) {
             if ($runCommands) {

@@ -621,9 +621,7 @@ $projectFormValues = [
     'repository_path' => '',
     'branch' => 'main',
     'production_domain' => '',
-    'production_path' => '',
     'preview_domain' => '',
-    'preview_path' => '',
 ];
 $projectFlash = '';
 $results = [];
@@ -773,6 +771,7 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project'],
         $confirmation = is_scalar($_POST['confirm_project_id'] ?? null) ? (string)$_POST['confirm_project_id'] : '';
         $projectActionResult = projectDelete($projectConfigurationForAction, $projectId, $confirmation);
     }
+    $projectActionResult['action'] = $action;
     $_SESSION['project_action_result'] = $projectActionResult;
     header('Location: /?tab=settings#projects');
     exit;
@@ -1293,8 +1292,19 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           <p class="success-message"><?= h($projectFlash) ?></p>
         <?php endif; ?>
         <?php if ($projectActionResult !== null): ?>
+          <?php
+            $projectAction = (string)($projectActionResult['action'] ?? '');
+            $projectActionTitle = !empty($projectActionResult['success']) ? 'Project action completed' : 'Project action failed';
+            if ($projectAction === 'provision_project') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Project set up' : 'Project setup failed';
+            } elseif ($projectAction === 'remove_project') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Project removed' : 'Project removal failed';
+            } elseif ($projectAction === 'delete_project') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Project deleted' : 'Project deletion failed';
+            }
+          ?>
           <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
-            <h2><?= !empty($projectActionResult['success']) ? 'Project action completed' : 'Project action failed' ?></h2>
+            <h2><?= h($projectActionTitle) ?></h2>
             <p><?= h((string)$projectActionResult['message']) ?></p>
             <details<?= !empty($projectActionResult['success']) ? '' : ' open' ?>>
               <summary>Show operation log</summary>
@@ -1310,8 +1320,10 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
               <?php
                 $projectStatus = $projectStatuses[(string)($project['id'] ?? '')] ?? projectStatus($project);
                 $statusLabel = (string)$projectStatus['label'];
-                $statusClass = $statusLabel === 'Provisioned' ? 'healthy' : ($statusLabel === 'Drift detected' ? 'error' : 'warning');
+                $statusClass = $statusLabel === 'Ready' ? 'healthy' : ($statusLabel === 'Drift detected' ? 'error' : 'warning');
                 $isManaged = !empty($project['provisioning']['managed']);
+                $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
+                $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
               ?>
               <section class="project-item">
                 <div class="project-item-header">
@@ -1332,27 +1344,30 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                     <tr><th>Managed</th><td><?= $isManaged ? 'Yes' : 'No' ?></td></tr>
                   </tbody>
                 </table>
+                <?php if (!$usesGeneratedPaths): ?>
+                  <p class="error">This project uses custom environment paths and cannot be set up automatically. Remove it from Console and create it again.</p>
+                <?php endif; ?>
                 <div class="project-actions">
-                  <?php if ($statusLabel !== 'Provisioned'): ?>
+                  <?php if ($statusLabel !== 'Ready'): ?>
                     <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
                       <input type="hidden" name="action" value="provision_project">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                      <button type="submit">Provision</button>
+                      <button type="submit"<?= $canSetUp ? '' : ' disabled title="This project cannot be set up automatically with its current environment paths."' ?>>Set up</button>
                     </form>
                   <?php endif; ?>
                   <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove this project from Dev Console?\nServer files will not be deleted.');">
                     <input type="hidden" name="action" value="remove_project">
                     <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                     <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                    <button type="submit" class="secondary">Remove from Console</button>
+                    <button type="submit" class="secondary" title="Removes only this project record.">Remove from Console</button>
                   </form>
                   <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" data-delete-project-form="1" data-project-id="<?= h((string)$project['id']) ?>">
                     <input type="hidden" name="action" value="delete_project">
                     <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                     <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
                     <input type="hidden" name="confirm_project_id" value="">
-                    <button type="submit" class="danger"<?= $isManaged ? '' : ' disabled title="Delete Project is available only for Dev Console-managed projects."' ?>>Delete Project</button>
+                    <button type="submit" class="danger" title="Removes directories and Apache configuration created by Dev Console."<?= $isManaged ? '' : ' disabled' ?>>Delete Project</button>
                   </form>
                 </div>
               </section>
@@ -1394,8 +1409,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
               <label for="production_domain">Domain</label>
               <input id="production_domain" name="production_domain" type="text" required maxlength="253" placeholder="iovon.com" value="<?= h($projectFormValues['production_domain']) ?>">
               <p class="field-help">Hostname only, without https:// or a path.</p>
-              <label for="production_path">Path</label>
-              <input id="production_path" name="production_path" type="text" required maxlength="255" placeholder="/var/www/projects/iovon/production" value="<?= h($projectFormValues['production_path']) ?>">
+              <label>Production directory</label>
+              <p class="field-help" id="productionDirectoryPreview">Enter a project name to preview the directory.</p>
               <p class="field-help">Directory where the production site will be deployed.</p>
             </fieldset>
 
@@ -1404,8 +1419,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
               <label for="preview_domain">Domain</label>
               <input id="preview_domain" name="preview_domain" type="text" required maxlength="253" placeholder="preview.iovon.com" value="<?= h($projectFormValues['preview_domain']) ?>">
               <p class="field-help">Separate hostname for testing changes.</p>
-              <label for="preview_path">Path</label>
-              <input id="preview_path" name="preview_path" type="text" required maxlength="255" placeholder="/var/www/projects/iovon/preview" value="<?= h($projectFormValues['preview_path']) ?>">
+              <label>Preview directory</label>
+              <p class="field-help" id="previewDirectoryPreview">Enter a project name to preview the directory.</p>
               <p class="field-help">Directory where the preview site will be deployed.</p>
             </fieldset>
 
@@ -1576,13 +1591,11 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   });
   const projectNameInput = document.getElementById('project_name');
   const productionDomainInput = document.getElementById('production_domain');
-  const productionPathInput = document.getElementById('production_path');
   const previewDomainInput = document.getElementById('preview_domain');
-  const previewPathInput = document.getElementById('preview_path');
+  const productionDirectoryPreview = document.getElementById('productionDirectoryPreview');
+  const previewDirectoryPreview = document.getElementById('previewDirectoryPreview');
   const touched = {
-    productionPath: false,
     previewDomain: false,
-    previewPath: false,
   };
   const slugFromProjectName = (value) => String(value)
     .normalize('NFD')
@@ -1591,19 +1604,19 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
-  productionPathInput?.addEventListener('input', () => { touched.productionPath = true; });
   previewDomainInput?.addEventListener('input', () => { touched.previewDomain = true; });
-  previewPathInput?.addEventListener('input', () => { touched.previewPath = true; });
-  projectNameInput?.addEventListener('input', () => {
-    const slug = slugFromProjectName(projectNameInput.value);
-    if (!slug) return;
-    if (productionPathInput && !productionPathInput.value && !touched.productionPath) {
-      productionPathInput.value = `/var/www/projects/${slug}/production`;
+  const updateDirectoryPreviews = () => {
+    const slug = slugFromProjectName(projectNameInput?.value || '');
+    if (!slug) {
+      if (productionDirectoryPreview) productionDirectoryPreview.textContent = 'Enter a project name to preview the directory.';
+      if (previewDirectoryPreview) previewDirectoryPreview.textContent = 'Enter a project name to preview the directory.';
+      return;
     }
-    if (previewPathInput && !previewPathInput.value && !touched.previewPath) {
-      previewPathInput.value = `/var/www/projects/${slug}/preview`;
-    }
-  });
+    if (productionDirectoryPreview) productionDirectoryPreview.textContent = `/var/www/projects/${slug}/production`;
+    if (previewDirectoryPreview) previewDirectoryPreview.textContent = `/var/www/projects/${slug}/preview`;
+  };
+  projectNameInput?.addEventListener('input', updateDirectoryPreviews);
+  updateDirectoryPreviews();
   productionDomainInput?.addEventListener('input', () => {
     const domain = productionDomainInput.value.trim().replace(/^https?:\/\//i, '').split(/[/:?#]/)[0];
     if (domain && previewDomainInput && !previewDomainInput.value && !touched.previewDomain) {
