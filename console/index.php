@@ -618,10 +618,7 @@ $projectActionResult = null;
 $projectFormErrors = [];
 $projectFormValues = [
     'project_name' => '',
-    'repository_path' => '',
-    'branch' => 'main',
     'production_domain' => '',
-    'preview_domain' => '',
 ];
 $projectFlash = '';
 $results = [];
@@ -890,7 +887,6 @@ $previewDeploymentOverview = deploymentOverview('preview');
 $productionDeploymentOverview = deploymentOverview('production');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
 $projects = devConsoleProjects($projectConfiguration);
-$repositorySuggestions = devConsoleDiscoveredGitRepositories();
 $apacheSites = devConsoleApacheSites();
 $apacheState = apacheState();
 $projectFlash = (string)($_SESSION['project_flash'] ?? '');
@@ -905,11 +901,15 @@ foreach ($projects as $project) {
         $projectStatuses[(string)($project['id'] ?? '')] = projectStatus($project);
     } catch (Throwable) {
         $projectStatuses[(string)($project['id'] ?? '')] = [
-            'label' => 'Drift detected',
+            'label' => 'Configuration drift',
             'production' => [],
             'preview' => [],
         ];
     }
+}
+$serverAddress = (string)($_SERVER['SERVER_ADDR'] ?? '');
+if ($serverAddress === '' || in_array($serverAddress, ['127.0.0.1', '::1'], true)) {
+    $serverAddress = 'SERVER_IP';
 }
 $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '' || $projectActionResult !== null || $apacheActionResult !== null) ? 'settings' : 'dashboard';
 ?>
@@ -1038,7 +1038,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .compact-table th, .compact-table td { border-top: 1px solid var(--line); padding: 4px 2px; text-align: left; }
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
     .compact-table th { color: var(--muted); width: 45%; }
-    .settings-grid { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+    .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) 390px; }
+    .settings-column { display: grid; gap: 14px; min-width: 0; }
     .settings-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .settings-table th, .settings-table td { border-top: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }
     .settings-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
@@ -1059,6 +1060,11 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .project-actions button { font-size: 13px; margin-top: 0; padding: 8px 11px; }
     .project-actions .danger { background: #a51d1d; }
     .project-actions .danger:disabled { background: #a51d1d; }
+    .environment-grid, .generated-preview { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .environment-block, .generated-item { background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 10px; }
+    .environment-block h4, .generated-item dt { color: var(--blue); font-size: 12px; margin: 0 0 6px; }
+    .generated-item dd { margin: 0; overflow-wrap: anywhere; }
+    .local-hosts { background: #edf7fb; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; overflow-wrap: anywhere; padding: 8px; }
     .success-message { background: #e9f7ef; border: 1px solid #b8dfc7; border-radius: 6px; color: var(--green); padding: 10px 12px; }
     .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 6px; text-align: left; }
@@ -1066,9 +1072,10 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .process-table td:last-child { overflow-wrap: anywhere; }
     @media (max-width: 900px) {
       .dashboard-columns { display: block; }
+      .settings-layout { grid-template-columns: 1fr; }
       main { margin-top: 18px; }
     }
-    @media (max-width: 520px) { .summary-grid, .resource-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 520px) { .summary-grid, .resource-grid, .environment-grid, .generated-preview { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1285,7 +1292,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
       <p class="meta">Project, environment, web server, deployment, and AI settings will be configured here later.</p>
     </section>
 
-    <div class="settings-grid">
+    <div class="settings-layout">
+      <div class="settings-column">
       <section class="panel" id="projects">
         <h2>Projects</h2>
         <?php if ($projectFlash !== ''): ?>
@@ -1320,7 +1328,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
               <?php
                 $projectStatus = $projectStatuses[(string)($project['id'] ?? '')] ?? projectStatus($project);
                 $statusLabel = (string)$projectStatus['label'];
-                $statusClass = $statusLabel === 'Ready' ? 'healthy' : ($statusLabel === 'Drift detected' ? 'error' : 'warning');
+                $statusClass = $statusLabel === 'Ready' ? 'healthy' : ($statusLabel === 'Configuration drift' ? 'error' : 'warning');
                 $isManaged = !empty($project['provisioning']['managed']);
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
                 $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
@@ -1337,13 +1345,41 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   <tbody>
                     <tr><th>Repository</th><td><?= h(configuredDisplayValue($project['repository_path'] ?? '')) ?></td></tr>
                     <tr><th>Branch</th><td><?= h(configuredDisplayValue($project['branch'] ?? '')) ?></td></tr>
-                    <tr><th>Production</th><td><?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?><br><span class="meta"><?= h(configuredDisplayValue($project['production']['path'] ?? '')) ?></span></td></tr>
-                    <tr><th>Production status</th><td>Directory: <?= !empty($projectStatus['production']['directory_exists']) ? 'Yes' : 'No' ?> · Vhost: <?= !empty($projectStatus['production']['vhost_exists']) ? 'Yes' : 'No' ?> · Enabled: <?= !empty($projectStatus['production']['site_enabled']) ? 'Yes' : 'No' ?> · ServerName: <?= !empty($projectStatus['production']['server_name_matches']) ? 'OK' : 'Mismatch' ?> · DocumentRoot: <?= !empty($projectStatus['production']['document_root_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
-                    <tr><th>Preview</th><td><?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?><br><span class="meta"><?= h(configuredDisplayValue($project['preview']['path'] ?? '')) ?></span></td></tr>
-                    <tr><th>Preview status</th><td>Directory: <?= !empty($projectStatus['preview']['directory_exists']) ? 'Yes' : 'No' ?> · Vhost: <?= !empty($projectStatus['preview']['vhost_exists']) ? 'Yes' : 'No' ?> · Enabled: <?= !empty($projectStatus['preview']['site_enabled']) ? 'Yes' : 'No' ?> · ServerName: <?= !empty($projectStatus['preview']['server_name_matches']) ? 'OK' : 'Mismatch' ?> · DocumentRoot: <?= !empty($projectStatus['preview']['document_root_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
                     <tr><th>Managed</th><td><?= $isManaged ? 'Yes' : 'No' ?></td></tr>
                   </tbody>
                 </table>
+                <div class="environment-grid">
+                  <?php foreach (['production' => 'Production', 'preview' => 'Preview'] as $environmentKey => $environmentLabel): ?>
+                    <?php
+                      $environmentStatus = $projectStatus[$environmentKey] ?? [];
+                      $environmentReady = !empty($environmentStatus['directory_exists']) && !empty($environmentStatus['vhost_exists']) && !empty($environmentStatus['site_enabled']) && !empty($environmentStatus['server_name_matches']) && !empty($environmentStatus['document_root_matches']);
+                      $environmentHasAny = !empty($environmentStatus['directory_exists']) || !empty($environmentStatus['vhost_exists']) || !empty($environmentStatus['site_enabled']);
+                      $environmentLabelStatus = $statusLabel === 'Configuration drift' ? 'Configuration drift' : ($environmentReady ? 'Ready' : ($environmentHasAny ? 'Incomplete' : 'Not set up'));
+                    ?>
+                    <section class="environment-block">
+                      <h4><?= h($environmentLabel) ?></h4>
+                      <dl class="dashboard-list">
+                        <div><dt>Domain</dt><dd><?= h(configuredDisplayValue($project[$environmentKey]['domain'] ?? '')) ?></dd></div>
+                        <div><dt>Directory</dt><dd><?= h(configuredDisplayValue($project[$environmentKey]['path'] ?? '')) ?></dd></div>
+                        <div><dt>Status</dt><dd><?= h($environmentLabelStatus) ?></dd></div>
+                      </dl>
+                      <details class="compact-details">
+                        <summary>Details</summary>
+                        <table class="compact-table">
+                          <tbody>
+                            <tr><th>Directory</th><td><?= !empty($environmentStatus['directory_exists']) ? 'Yes' : 'No' ?></td></tr>
+                            <tr><th>Vhost</th><td><?= !empty($environmentStatus['vhost_exists']) ? 'Yes' : 'No' ?></td></tr>
+                            <tr><th>Enabled</th><td><?= !empty($environmentStatus['site_enabled']) ? 'Yes' : 'No' ?></td></tr>
+                            <tr><th>ServerName</th><td><?= !empty($environmentStatus['server_name_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
+                            <tr><th>DocumentRoot</th><td><?= !empty($environmentStatus['document_root_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
+                          </tbody>
+                        </table>
+                      </details>
+                    </section>
+                  <?php endforeach; ?>
+                </div>
+                <p class="field-help">Add this line to your local hosts file when DNS is not configured.</p>
+                <p class="local-hosts"><?= h($serverAddress . ' ' . (string)($project['production']['domain'] ?? '') . ' ' . (string)($project['preview']['domain'] ?? '')) ?></p>
                 <?php if (!$usesGeneratedPaths): ?>
                   <p class="error">This project uses custom environment paths and cannot be set up automatically. Remove it from Console and create it again.</p>
                 <?php endif; ?>
@@ -1394,51 +1430,33 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             <fieldset>
               <legend>Project</legend>
               <label for="project_name">Project name</label>
-              <input id="project_name" name="project_name" type="text" required maxlength="120" placeholder="IOVON Website" value="<?= h($projectFormValues['project_name']) ?>">
-              <p class="field-help">A short human-readable name.</p>
-              <label for="repository_path">Repository path</label>
-              <input id="repository_path" name="repository_path" type="text" required maxlength="255" list="repositoryPathSuggestions" placeholder="/var/www/iovon" value="<?= h($projectFormValues['repository_path']) ?>">
-              <p class="field-help">Existing local Git repository used as the source.</p>
-              <label for="branch">Branch</label>
-              <input id="branch" name="branch" type="text" required maxlength="120" list="branchSuggestions" value="<?= h($projectFormValues['branch']) ?>">
-              <p class="field-help">Git branch used for deployment.</p>
+              <input id="project_name" name="project_name" type="text" required maxlength="120" placeholder="Client Website" value="<?= h($projectFormValues['project_name']) ?>">
+              <p class="field-help">Used to generate the project ID and server directories.</p>
             </fieldset>
 
             <fieldset>
               <legend>Production</legend>
               <label for="production_domain">Domain</label>
-              <input id="production_domain" name="production_domain" type="text" required maxlength="253" placeholder="iovon.com" value="<?= h($projectFormValues['production_domain']) ?>">
-              <p class="field-help">Hostname only, without https:// or a path.</p>
-              <label>Production directory</label>
-              <p class="field-help" id="productionDirectoryPreview">Enter a project name to preview the directory.</p>
-              <p class="field-help">Directory where the production site will be deployed.</p>
+              <input id="production_domain" name="production_domain" type="text" required maxlength="253" placeholder="example.com" value="<?= h($projectFormValues['production_domain']) ?>">
+              <p class="field-help">Main hostname, without https:// or a path.</p>
             </fieldset>
 
-            <fieldset>
-              <legend>Preview</legend>
-              <label for="preview_domain">Domain</label>
-              <input id="preview_domain" name="preview_domain" type="text" required maxlength="253" placeholder="preview.iovon.com" value="<?= h($projectFormValues['preview_domain']) ?>">
-              <p class="field-help">Separate hostname for testing changes.</p>
-              <label>Preview directory</label>
-              <p class="field-help" id="previewDirectoryPreview">Enter a project name to preview the directory.</p>
-              <p class="field-help">Directory where the preview site will be deployed.</p>
-            </fieldset>
+            <dl class="generated-preview">
+              <div class="generated-item"><dt>Project ID</dt><dd id="projectIdPreview">-</dd></div>
+              <div class="generated-item"><dt>Repository</dt><dd id="repositoryPreview">-</dd></div>
+              <div class="generated-item"><dt>Production</dt><dd id="productionDomainPreview">-</dd></div>
+              <div class="generated-item"><dt>Preview</dt><dd id="previewDomainPreview">-</dd></div>
+              <div class="generated-item"><dt>Production directory</dt><dd id="productionDirectoryPreview">-</dd></div>
+              <div class="generated-item"><dt>Preview directory</dt><dd id="previewDirectoryPreview">-</dd></div>
+            </dl>
 
             <button type="submit">Create Project</button>
           </form>
-          <datalist id="repositoryPathSuggestions">
-            <?php foreach ($repositorySuggestions as $repositorySuggestion): ?>
-              <option value="<?= h($repositorySuggestion) ?>"></option>
-            <?php endforeach; ?>
-          </datalist>
-          <datalist id="branchSuggestions">
-            <option value="main"></option>
-            <option value="master"></option>
-            <option value="develop"></option>
-          </datalist>
         </section>
       </section>
+      </div>
 
+      <div class="settings-column">
       <section class="panel" id="apache">
         <h2>Apache</h2>
         <table class="compact-table">
@@ -1506,6 +1524,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
         <?php endif; ?>
         </section>
       </section>
+      </div>
     </div>
   </section>
 
@@ -1591,12 +1610,12 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   });
   const projectNameInput = document.getElementById('project_name');
   const productionDomainInput = document.getElementById('production_domain');
-  const previewDomainInput = document.getElementById('preview_domain');
+  const projectIdPreview = document.getElementById('projectIdPreview');
+  const repositoryPreview = document.getElementById('repositoryPreview');
+  const productionDomainPreview = document.getElementById('productionDomainPreview');
+  const previewDomainPreview = document.getElementById('previewDomainPreview');
   const productionDirectoryPreview = document.getElementById('productionDirectoryPreview');
   const previewDirectoryPreview = document.getElementById('previewDirectoryPreview');
-  const touched = {
-    previewDomain: false,
-  };
   const slugFromProjectName = (value) => String(value)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -1604,25 +1623,28 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
-  previewDomainInput?.addEventListener('input', () => { touched.previewDomain = true; });
-  const updateDirectoryPreviews = () => {
-    const slug = slugFromProjectName(projectNameInput?.value || '');
-    if (!slug) {
-      if (productionDirectoryPreview) productionDirectoryPreview.textContent = 'Enter a project name to preview the directory.';
-      if (previewDirectoryPreview) previewDirectoryPreview.textContent = 'Enter a project name to preview the directory.';
-      return;
-    }
-    if (productionDirectoryPreview) productionDirectoryPreview.textContent = `/var/www/projects/${slug}/production`;
-    if (previewDirectoryPreview) previewDirectoryPreview.textContent = `/var/www/projects/${slug}/preview`;
+  const normalizeDomainPreview = (value) => String(value)
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .split(/[/:?#]/)[0]
+    .replace(/\.$/, '')
+    .toLowerCase();
+  const setPreviewText = (element, value) => {
+    if (element) element.textContent = value || '-';
   };
-  projectNameInput?.addEventListener('input', updateDirectoryPreviews);
-  updateDirectoryPreviews();
-  productionDomainInput?.addEventListener('input', () => {
-    const domain = productionDomainInput.value.trim().replace(/^https?:\/\//i, '').split(/[/:?#]/)[0];
-    if (domain && previewDomainInput && !previewDomainInput.value && !touched.previewDomain) {
-      previewDomainInput.value = `preview.${domain}`;
-    }
-  });
+  const updateGeneratedPreview = () => {
+    const slug = slugFromProjectName(projectNameInput?.value || '');
+    const domain = normalizeDomainPreview(productionDomainInput?.value || '');
+    setPreviewText(projectIdPreview, slug);
+    setPreviewText(repositoryPreview, slug ? `/var/www/git/${slug}` : '');
+    setPreviewText(productionDomainPreview, domain);
+    setPreviewText(previewDomainPreview, domain ? `preview.${domain}` : '');
+    setPreviewText(productionDirectoryPreview, slug ? `/var/www/projects/${slug}/production` : '');
+    setPreviewText(previewDirectoryPreview, slug ? `/var/www/projects/${slug}/preview` : '');
+  };
+  projectNameInput?.addEventListener('input', updateGeneratedPreview);
+  productionDomainInput?.addEventListener('input', updateGeneratedPreview);
+  updateGeneratedPreview();
   window.addEventListener('scroll', () => {
     if (scrollSaveFrame !== null) cancelAnimationFrame(scrollSaveFrame);
     scrollSaveFrame = requestAnimationFrame(() => {

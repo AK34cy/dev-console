@@ -112,16 +112,16 @@ function projectDirectoryAcceptableForProvisioning(string $path): bool
 
 function projectIsPlaceholderFile(string $path): bool
 {
-    return is_file($path) && str_contains((string)@file_get_contents($path), 'Temporary Dev Console placeholder');
+    $contents = (string)@file_get_contents($path);
+    return is_file($path) && (str_contains($contents, 'Temporary Dev Console placeholder') || str_contains($contents, 'Dev Console placeholder'));
 }
 
 function projectPlaceholderContent(array $project, string $environment): string
 {
-    return "<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>" .
-        htmlspecialchars((string)$project['name'], ENT_QUOTES, 'UTF-8') . ' ' . ucfirst($environment) .
-        "</title></head>\n<body><h1>Temporary Dev Console placeholder</h1><p>Project: " .
-        htmlspecialchars((string)$project['id'], ENT_QUOTES, 'UTF-8') . "</p><p>Environment: " .
-        htmlspecialchars($environment, ENT_QUOTES, 'UTF-8') . "</p></body>\n</html>\n";
+    $projectName = htmlspecialchars((string)$project['name'], ENT_QUOTES, 'UTF-8');
+    $environmentName = htmlspecialchars(ucfirst($environment), ENT_QUOTES, 'UTF-8');
+
+    return "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>" . $projectName . ' ' . $environmentName . "</title>\n<style>body{margin:0;background:#f4f8fb;color:#1d2a32;font-family:Arial,sans-serif;display:grid;min-height:100vh;place-items:center}.wrap{background:#fff;border:1px solid #d8eef5;border-radius:10px;box-shadow:0 10px 28px rgba(0,83,133,.09);max-width:560px;padding:32px;width:calc(100% - 48px)}h1{color:#005385;margin:0 0 18px}dl{display:grid;gap:10px;margin:0}dt{color:#536b78;font-size:12px;font-weight:700;text-transform:uppercase}dd{margin:2px 0 0}.badge{background:#e3f5f9;border-radius:999px;color:#005385;display:inline-block;font-weight:700;padding:6px 10px}</style>\n</head>\n<body>\n<main class=\"wrap\">\n<h1>IOVON Dev Console</h1>\n<dl>\n<dt>Project</dt><dd>" . $projectName . "</dd>\n<dt>Environment</dt><dd>" . $environmentName . "</dd>\n<dt>Status</dt><dd><span class=\"badge\">Waiting for deployment</span></dd>\n</dl>\n<p>Dev Console placeholder page.</p>\n</main>\n</body>\n</html>\n";
 }
 
 function projectVhostPath(array $project, string $environment, string $availableDir = '/etc/apache2/sites-available'): string
@@ -256,7 +256,7 @@ function projectStatus(array $project, string $availableDir = '/etc/apache2/site
 
     $label = 'Not set up';
     if ($drift) {
-        $label = 'Drift detected';
+        $label = 'Configuration drift';
     } elseif ($allProvisioned) {
         $label = 'Ready';
     } elseif ($anyResources) {
@@ -268,19 +268,30 @@ function projectStatus(array $project, string $availableDir = '/etc/apache2/site
 
 function projectValidateStoredConfiguration(array $configuration, array $project): void
 {
-    $input = [
-        'project_name' => (string)$project['name'],
-        'repository_path' => (string)$project['repository_path'],
-        'branch' => (string)$project['branch'],
-        'production_domain' => (string)$project['production']['domain'],
-        'production_path' => (string)$project['production']['path'],
-        'preview_domain' => (string)$project['preview']['domain'],
-        'preview_path' => (string)$project['preview']['path'],
-    ];
-    $withoutProject = devConsoleRemoveProjectFromConfiguration($configuration, (string)$project['id']);
-    $validation = devConsoleValidateNewProject($withoutProject, $input);
-    if (!$validation['valid'] || ($validation['project']['id'] ?? '') !== ($project['id'] ?? null)) {
+    if (!projectSafeId((string)($project['id'] ?? ''))
+        || trim((string)($project['name'] ?? '')) === ''
+        || trim((string)($project['branch'] ?? '')) === ''
+        || !devConsoleIsAbsoluteUnixPath((string)($project['repository_path'] ?? ''))
+        || !devConsoleIsHostname((string)($project['production']['domain'] ?? ''))
+        || !devConsoleIsHostname((string)($project['preview']['domain'] ?? ''))
+        || !devConsoleIsAbsoluteUnixPath((string)($project['production']['path'] ?? ''))
+        || !devConsoleIsAbsoluteUnixPath((string)($project['preview']['path'] ?? ''))
+        || devConsoleNormalizeDomain((string)$project['production']['domain']) === devConsoleNormalizeDomain((string)$project['preview']['domain'])
+        || (string)$project['production']['path'] === (string)$project['preview']['path']) {
         throw new RuntimeException('Stored project configuration is invalid.');
+    }
+
+    foreach (devConsoleProjects(devConsoleRemoveProjectFromConfiguration($configuration, (string)$project['id'])) as $existingProject) {
+        foreach (['production', 'preview'] as $environment) {
+            $existingDomain = devConsoleNormalizeDomain((string)($existingProject[$environment]['domain'] ?? ''));
+            $existingPath = (string)($existingProject[$environment]['path'] ?? '');
+            if ($existingDomain !== '' && ($existingDomain === devConsoleNormalizeDomain((string)$project['production']['domain']) || $existingDomain === devConsoleNormalizeDomain((string)$project['preview']['domain']))) {
+                throw new RuntimeException('Stored project domain conflicts with another project.');
+            }
+            if ($existingPath !== '' && ($existingPath === (string)$project['production']['path'] || $existingPath === (string)$project['preview']['path'])) {
+                throw new RuntimeException('Stored project path conflicts with another project.');
+            }
+        }
     }
 }
 

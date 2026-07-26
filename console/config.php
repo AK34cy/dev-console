@@ -184,6 +184,16 @@ function devConsoleGeneratedEnvironmentPaths(string $projectId): array
     ];
 }
 
+function devConsoleGeneratedRepositoryPath(string $projectId): string
+{
+    return '/var/www/git/' . $projectId;
+}
+
+function devConsoleGeneratedPreviewDomain(string $productionDomain): string
+{
+    return 'preview.' . devConsoleNormalizeDomain($productionDomain);
+}
+
 function devConsoleProjectUsesGeneratedEnvironmentPaths(array $project): bool
 {
     $projectId = (string)($project['id'] ?? '');
@@ -274,11 +284,11 @@ function devConsoleScalarInput(array $input, string $key): string
 function devConsoleValidateNewProject(array $configuration, array $input): array
 {
     $name = devConsoleScalarInput($input, 'project_name');
-    $repositoryPath = devConsoleScalarInput($input, 'repository_path');
-    $branch = devConsoleScalarInput($input, 'branch');
     $productionDomain = devConsoleNormalizeDomain(devConsoleScalarInput($input, 'production_domain'));
-    $previewDomain = devConsoleNormalizeDomain(devConsoleScalarInput($input, 'preview_domain'));
     $projectId = devConsoleProjectIdFromName($name);
+    $repositoryPath = $projectId === '' ? '' : devConsoleGeneratedRepositoryPath($projectId);
+    $branch = 'main';
+    $previewDomain = $productionDomain === '' ? '' : devConsoleGeneratedPreviewDomain($productionDomain);
     $generatedPaths = $projectId === '' ? ['production' => '', 'preview' => ''] : devConsoleGeneratedEnvironmentPaths($projectId);
     $productionPath = $generatedPaths['production'];
     $previewPath = $generatedPaths['preview'];
@@ -286,10 +296,7 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
 
     foreach ([
         'Project name' => $name,
-        'Repository path' => $repositoryPath,
-        'Branch' => $branch,
         'Production domain' => $productionDomain,
-        'Preview domain' => $previewDomain,
     ] as $label => $value) {
         if ($value === '') {
             $errors[] = $label . ' is required.';
@@ -315,9 +322,11 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
     }
     if (!devConsoleIsHostname($productionDomain)) {
         $errors[] = 'Production domain must be a hostname without scheme, port, path, query, or fragment.';
+    } elseif (str_starts_with($productionDomain, 'preview.')) {
+        $errors[] = 'Production domain must not begin with preview.';
     }
     if (!devConsoleIsHostname($previewDomain)) {
-        $errors[] = 'Preview domain must be a hostname without scheme, port, path, query, or fragment.';
+        $errors[] = 'Generated Preview domain is too long or invalid.';
     }
     if ($productionDomain !== '' && $previewDomain !== '' && $productionDomain === $previewDomain) {
         $errors[] = 'Production and Preview domains must be different.';
