@@ -39,6 +39,10 @@ Date:
 - Reliable PAT authentication for Git push, fetch, and pull
 - Recovery of incomplete repository initialization
 - GitHub API and Git transport separation
+- Verified local and remote Git state
+- Correct incomplete repository recovery
+- Reliable Push, Fetch, and Pull workflow
+- Removed false CONNECTED status
 - Preview and Production deployment binding
 - DNS and SSL support
 - UI refinement

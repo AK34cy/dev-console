@@ -216,6 +216,20 @@ function gitExpectedCloneUrl(array $project, ?array $githubConfiguration = null)
     return 'https://github.com/' . $owner . '/' . $name . '.git';
 }
 
+function gitRemoteUrlMatchesExpected(string $actualRemote, array $project, array $githubConfiguration): bool
+{
+    return in_array($actualRemote, [gitExpectedCloneUrl($project, $githubConfiguration), gitExpectedRemoteUrl($project, $githubConfiguration)], true);
+}
+
+function gitStatusClassName(string $status): string
+{
+    return match ($status) {
+        'CONNECTED' => 'healthy',
+        'INVALID REPOSITORY', 'REMOTE UNAVAILABLE' => 'error',
+        default => 'warning',
+    };
+}
+
 function gitValidateProjectRepositoryPath(array $project): ?string
 {
     $path = gitProjectRepositoryPath($project);
@@ -235,11 +249,6 @@ function gitValidateProjectRepositoryPath(array $project): ?string
 function gitDirectoryIsEmpty(string $path): bool
 {
     return is_dir($path) && count(array_diff(scandir($path) ?: [], ['.', '..'])) === 0;
-}
-
-function gitProjectConnected(array $project): bool
-{
-    return !empty($project['git']['connected']) && (string)($project['git']['remote_url'] ?? '') !== '';
 }
 
 function gitDirectoryPath(string $repositoryPath): string
@@ -283,53 +292,99 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
         'remote_url' => (string)($project['git']['remote_url'] ?? ''),
         'branch' => (string)($project['branch'] ?? ''),
         'commit' => '',
+        'local_commit' => '',
+        'remote_commit' => (string)($project['git']['remote_head'] ?? ''),
         'subject' => '',
         'working_tree' => 'Unknown',
         'ahead' => null,
         'behind' => null,
+        'remote_verified_at' => (string)($project['git']['remote_verified_at'] ?? ''),
         'last_fetch_at' => (string)($project['git']['last_fetch_at'] ?? ''),
         'last_pull_at' => (string)($project['git']['last_pull_at'] ?? ''),
+        'can_initialize' => $githubConfigured,
+        'can_fetch' => false,
+        'can_pull' => false,
+        'pull_disabled_reason' => '',
+        'diagnostic' => '',
     ];
 
     if (!file_exists($path)) {
         return $status;
     }
     if (is_link($path) || !is_dir($path)) {
-        $status['status'] = 'Invalid repository';
+        $status['status'] = 'INVALID REPOSITORY';
+        $status['diagnostic'] = 'Repository path is not a safe directory.';
         return $status;
     }
 
     $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5);
     if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') {
-        $status['status'] = gitDirectoryIsEmpty($path) ? $status['status'] : 'Invalid repository';
+        $status['status'] = gitDirectoryIsEmpty($path) ? $status['status'] : 'INVALID REPOSITORY';
+        $status['diagnostic'] = gitDirectoryIsEmpty($path) ? '' : 'Repository path is not a valid Git working tree.';
         return $status;
     }
 
+    $status['status'] = 'INITIALIZATION INCOMPLETE';
+    $status['branch'] = gitCurrentBranch($path);
     $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5);
     if ($remote['exit_code'] !== 0) {
-        $status['status'] = 'Remote unavailable';
+        $status['diagnostic'] = 'Origin remote is not configured.';
         return $status;
     }
     $actualRemote = trim((string)$remote['stdout']);
-    if ($expectedClone === '' || $actualRemote !== $expectedClone || (string)($project['git']['clone_url'] ?? '') !== $expectedClone || (string)($project['git']['remote_url'] ?? '') !== $expectedRemote) {
-        $status['status'] = 'Remote unavailable';
+    $status['remote_url'] = $actualRemote;
+    if ($githubConfiguration === null || $expectedClone === '' || !gitRemoteUrlMatchesExpected($actualRemote, $project, $githubConfiguration)) {
+        $status['status'] = 'INVALID REPOSITORY';
+        $status['diagnostic'] = 'Origin remote does not match the expected GitHub repository.';
         return $status;
     }
     $status['remote_url'] = $expectedRemote;
+    $status['can_fetch'] = $githubConfigured;
 
-    $commit = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--short', 'HEAD'], 5);
-    if ($commit['exit_code'] === 0) $status['commit'] = trim((string)$commit['stdout']);
+    $head = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', 'HEAD'], 5);
+    if ($head['exit_code'] === 0) {
+        $status['local_commit'] = trim((string)$head['stdout']);
+        $status['commit'] = substr($status['local_commit'], 0, 12);
+    }
     $subject = gitRunFixedCommand(['git', '-C', $path, 'log', '-1', '--pretty=%s'], 5);
     if ($subject['exit_code'] === 0) $status['subject'] = trim((string)$subject['stdout']);
     $porcelain = gitRunFixedCommand(['git', '-C', $path, 'status', '--porcelain'], 5);
     $dirty = $porcelain['exit_code'] === 0 && trim((string)$porcelain['stdout']) !== '';
     $status['working_tree'] = $dirty ? 'Dirty' : 'Clean';
-    $status['status'] = $dirty ? 'Changes present' : 'CONNECTED';
 
-    $counts = gitRunFixedCommand(['git', '-C', $path, 'rev-list', '--left-right', '--count', 'HEAD...origin/' . (string)$project['branch']], 5);
+    $originHead = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', 'origin/main'], 5);
+    if ($originHead['exit_code'] !== 0) {
+        $status['diagnostic'] = 'Remote branch origin/main has not been verified.';
+        return $status;
+    }
+    $status['remote_commit'] = trim((string)$originHead['stdout']);
+    $status['can_pull'] = $githubConfigured;
+    if ($dirty) {
+        $status['pull_disabled_reason'] = 'Working tree must be clean before pulling.';
+    }
+
+    $counts = gitRunFixedCommand(['git', '-C', $path, 'rev-list', '--left-right', '--count', 'HEAD...origin/main'], 5);
     if ($counts['exit_code'] === 0 && preg_match('/^(\d+)\s+(\d+)$/', trim((string)$counts['stdout']), $matches) === 1) {
         $status['ahead'] = (int)$matches[1];
         $status['behind'] = (int)$matches[2];
+    }
+    if (empty($project['git']['remote_verified']) && (string)($project['git']['last_error_at'] ?? '') !== '' && $bootstrapStatus === 'ready') {
+        $status['status'] = 'REMOTE UNAVAILABLE';
+        $status['diagnostic'] = 'Last authenticated remote access failed.';
+        return $status;
+    }
+    if (!empty($project['git']['remote_verified']) && (string)($project['git']['remote_head'] ?? '') === $status['remote_commit'] && (string)($project['git']['local_head'] ?? '') === $status['local_commit']) {
+        if ($dirty) {
+            $status['status'] = 'CHANGES PRESENT';
+        } elseif (($status['ahead'] ?? 0) > 0 && ($status['behind'] ?? 0) > 0) {
+            $status['status'] = 'AHEAD / BEHIND';
+        } elseif (($status['ahead'] ?? 0) > 0) {
+            $status['status'] = 'AHEAD';
+        } elseif (($status['behind'] ?? 0) > 0) {
+            $status['status'] = 'BEHIND';
+        } elseif ($status['branch'] === 'main' && $status['local_commit'] === $status['remote_commit']) {
+            $status['status'] = 'CONNECTED';
+        }
     }
 
     return $status;
@@ -658,23 +713,20 @@ function gitVerifyInitializedRepository(array $project, array $githubConfigurati
     return null;
 }
 
-function gitWorkingTreeSafeForBootstrap(string $path): bool
+function gitReadVerifiedRepositoryMetadata(string $path): ?array
 {
-    $status = gitRunFixedCommand(['git', '-C', $path, 'status', '--porcelain'], 5, [], false);
-    if ($status['exit_code'] !== 0) {
-        return false;
-    }
-    foreach (explode("\n", trim((string)$status['stdout'])) as $line) {
-        if ($line === '') {
-            continue;
-        }
-        $file = trim(substr($line, 3));
-        if (!in_array($file, ['README.md', '.gitignore'], true)) {
-            return false;
-        }
+    $local = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', 'HEAD'], 5, [], false);
+    $remote = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', 'origin/main'], 5, [], false);
+    if ($local['exit_code'] !== 0 || $remote['exit_code'] !== 0) {
+        return null;
     }
 
-    return true;
+    return [
+        'local_head' => trim((string)$local['stdout']),
+        'remote_head' => trim((string)$remote['stdout']),
+        'remote_verified' => true,
+        'remote_verified_at' => date('c'),
+    ];
 }
 
 function gitSaveBootstrapFailure(array $configuration, array $project, string $message): void
@@ -761,17 +813,17 @@ function gitInitializeRepository(array $configuration, string $projectId): array
     $createdLocalThisAction = false;
     $phase = 'preflight';
 
-    if ((string)($project['git']['bootstrap_status'] ?? '') === 'ready' && gitExpectedLocalRepositoryValid($project, $github, $log)) {
+    if ((string)($project['git']['bootstrap_status'] ?? '') === 'ready' && gitStatus($project, $github)['status'] === 'CONNECTED') {
         return gitActionResult(true, 'Repository is already initialized.', $log);
     }
     if (file_exists($path) && is_link($path)) {
         return gitActionResult(false, 'Local repository path must not be a symlink.');
     }
     if (is_dir($path . '/.git') || is_file($path . '/.git')) {
-        if (!$matchingBootstrapMetadata && !$bootstrapAttempted && !gitProjectConnected($project)) {
+        if (!$matchingBootstrapMetadata && !$bootstrapAttempted) {
             return gitActionResult(false, 'An existing repository was found, but it cannot be verified as a repository created by this Dev Console initialization process.');
         }
-        if (!gitLocalBootstrapRepositoryValid($project, $log) && !gitExpectedLocalRepositoryValid($project, $github, $log)) {
+        if (!gitLocalBootstrapRepositoryValid($project, $log)) {
             return gitActionResult(false, 'An existing repository was found, but it cannot be verified as a repository created by this Dev Console initialization process.', $log);
         }
     } elseif (file_exists($path) && (!is_dir($path) || !gitDirectoryIsEmpty($path))) {
@@ -885,6 +937,10 @@ function gitInitializeRepository(array $configuration, string $projectId): array
         if ($verificationError = gitVerifyInitializedRepository($project, $github, $log)) {
             throw new RuntimeException($verificationError);
         }
+        $verified = gitReadVerifiedRepositoryMetadata($path);
+        if ($verified === null || $verified['local_head'] !== $verified['remote_head']) {
+            throw new RuntimeException('Local and remote commits do not match');
+        }
         $project = gitSetMetadata($project, [
             'provider' => 'github',
             'repository_owner' => (string)$github['account'],
@@ -894,7 +950,7 @@ function gitInitializeRepository(array $configuration, string $projectId): array
             'connected' => true,
             'connected_at' => date('c'),
             'created_at' => date('c'),
-        ]);
+        ] + $verified);
         if (!gitSetBootstrapState($configuration, $project, 'ready')) {
             throw new RuntimeException('Unable to save Git metadata.');
         }
@@ -916,18 +972,17 @@ function gitInitializeRepository(array $configuration, string $projectId): array
 function gitAssertConnectedRepository(array $project, array $githubConfiguration): ?string
 {
     if (!devConsoleGithubConfigured($githubConfiguration)) return 'GitHub is not configured.';
-    if (!gitProjectConnected($project)) return 'Repository has not been created.';
     if ($error = gitValidateProjectRepositoryPath($project)) return $error;
     $path = gitProjectRepositoryPath($project);
     if (!is_dir($path) || is_link($path)) return 'Repository is missing or invalid.';
     $expectedRemote = gitExpectedRemoteUrl($project, $githubConfiguration);
     $expectedClone = gitExpectedCloneUrl($project, $githubConfiguration);
-    if ((string)($project['git']['remote_url'] ?? '') !== $expectedRemote) return 'Repository metadata does not match the configured GitHub account.';
-    if ((string)($project['git']['clone_url'] ?? '') !== $expectedClone) return 'Repository clone metadata does not match the configured GitHub account.';
     $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
     if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') return 'Repository is not a valid Git working tree.';
+    if (gitCurrentBranch($path) !== 'main') return 'Current branch does not match project branch.';
     $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5, [], false);
-    if ($remote['exit_code'] !== 0 || trim((string)$remote['stdout']) !== $expectedClone) return 'Repository origin no longer matches the GitHub repository.';
+    if ($remote['exit_code'] !== 0 || !gitRemoteUrlMatchesExpected(trim((string)$remote['stdout']), $project, $githubConfiguration)) return 'Repository origin no longer matches the GitHub repository.';
+    if ($expectedRemote === '' || $expectedClone === '') return 'Repository metadata does not match the configured GitHub account.';
     return null;
 }
 
@@ -938,10 +993,36 @@ function gitFetchRepository(array $configuration, string $projectId): array
     $github = devConsoleLoadGithubConfiguration();
     if ($error = gitAssertConnectedRepository($project, $github)) return gitActionResult(false, $error);
     $log = [];
+    $remoteSet = gitRunFixedCommand(['git', '-C', gitProjectRepositoryPath($project), 'remote', 'set-url', 'origin', gitExpectedCloneUrl($project, $github)], 10, [], false);
+    gitAppendCommandLog($log, $remoteSet);
+    if ($remoteSet['exit_code'] !== 0) return gitActionResult(false, 'Git remote configuration failed', $log);
     $fetch = gitRunAuthenticatedCommand(['git', '-C', gitProjectRepositoryPath($project), 'fetch', '--prune', 'origin'], $github, 120);
     gitAppendCommandLog($log, $fetch);
-    if ($fetch['exit_code'] !== 0) return gitActionResult(false, 'Git fetch failed.', $log);
-    $project = gitSetMetadata($project, ['last_fetch_at' => date('c')]);
+    if ($fetch['exit_code'] !== 0) {
+        gitSaveProject($configuration, gitSetMetadata($project, ['remote_verified' => false, 'connected' => false, 'last_error_at' => date('c')]));
+        return gitActionResult(false, 'Git fetch failed.', $log);
+    }
+    $baseMetadata = [
+        'provider' => 'github',
+        'repository_owner' => (string)$github['account'],
+        'repository_name' => (string)$project['id'],
+        'remote_url' => gitExpectedRemoteUrl($project, $github),
+        'clone_url' => gitExpectedCloneUrl($project, $github),
+        'last_fetch_at' => date('c'),
+        'connected' => false,
+        'remote_verified' => false,
+        'last_error_at' => null,
+    ];
+    $verified = gitReadVerifiedRepositoryMetadata(gitProjectRepositoryPath($project));
+    if ($verified === null) {
+        gitSaveProject($configuration, gitSetMetadata($project, $baseMetadata));
+        return gitActionResult(false, 'Remote branch verification failed', $log);
+    }
+    $baseMetadata['connected'] = true;
+    if (($verified['local_head'] ?? '') === ($verified['remote_head'] ?? '') && (string)($project['git']['bootstrap_status'] ?? '') !== 'ready') {
+        $baseMetadata['bootstrap_status'] = 'ready';
+    }
+    $project = gitSetMetadata($project, $verified + $baseMetadata);
     if (!gitSaveProject($configuration, $project)) return gitActionResult(false, 'Unable to save Git fetch metadata.', $log);
     return gitActionResult(true, 'Git fetch completed.', $log);
 }
@@ -953,18 +1034,39 @@ function gitPullRepository(array $configuration, string $projectId): array
     $github = devConsoleLoadGithubConfiguration();
     if ($error = gitAssertConnectedRepository($project, $github)) return gitActionResult(false, $error);
     $path = gitProjectRepositoryPath($project);
-    if (gitCurrentBranch($path) !== (string)$project['branch']) return gitActionResult(false, 'Current branch does not match project branch.');
+    if (gitCurrentBranch($path) !== 'main') return gitActionResult(false, 'Current branch does not match project branch.');
     $porcelain = gitRunFixedCommand(['git', '-C', $path, 'status', '--porcelain'], 5, [], false);
     if ($porcelain['exit_code'] !== 0 || trim((string)$porcelain['stdout']) !== '') return gitActionResult(false, 'Working tree must be clean before pulling.');
 
     $log = [];
+    $remoteSet = gitRunFixedCommand(['git', '-C', $path, 'remote', 'set-url', 'origin', gitExpectedCloneUrl($project, $github)], 10, [], false);
+    gitAppendCommandLog($log, $remoteSet);
+    if ($remoteSet['exit_code'] !== 0) return gitActionResult(false, 'Git remote configuration failed', $log);
     $fetch = gitRunAuthenticatedCommand(['git', '-C', $path, 'fetch', '--prune', 'origin'], $github, 120);
     gitAppendCommandLog($log, $fetch);
-    if ($fetch['exit_code'] !== 0) return gitActionResult(false, 'Git fetch failed.', $log);
-    $pull = gitRunAuthenticatedCommand(['git', '-C', $path, 'pull', '--ff-only', 'origin', (string)$project['branch']], $github, 120);
+    if ($fetch['exit_code'] !== 0) {
+        gitSaveProject($configuration, gitSetMetadata($project, ['remote_verified' => false, 'connected' => false, 'last_error_at' => date('c')]));
+        return gitActionResult(false, 'Git fetch failed.', $log);
+    }
+    $pull = gitRunAuthenticatedCommand(['git', '-C', $path, 'pull', '--ff-only', 'origin', 'main'], $github, 120);
     gitAppendCommandLog($log, $pull);
     if ($pull['exit_code'] !== 0) return gitActionResult(false, 'Git pull failed.', $log);
-    $project = gitSetMetadata($project, ['last_fetch_at' => date('c'), 'last_pull_at' => date('c')]);
+    $verified = gitReadVerifiedRepositoryMetadata($path);
+    if ($verified === null || ($verified['local_head'] ?? '') !== ($verified['remote_head'] ?? '')) {
+        return gitActionResult(false, 'Local and remote commits do not match', $log);
+    }
+    $project = gitSetMetadata($project, $verified + [
+        'provider' => 'github',
+        'repository_owner' => (string)$github['account'],
+        'repository_name' => (string)$project['id'],
+        'remote_url' => gitExpectedRemoteUrl($project, $github),
+        'clone_url' => gitExpectedCloneUrl($project, $github),
+        'bootstrap_status' => 'ready',
+        'connected' => true,
+        'last_error_at' => null,
+        'last_fetch_at' => date('c'),
+        'last_pull_at' => date('c'),
+    ]);
     if (!gitSaveProject($configuration, $project)) return gitActionResult(false, 'Unable to save Git pull metadata.', $log);
     return gitActionResult(true, 'Git pull completed.', $log);
 }

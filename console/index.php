@@ -1381,8 +1381,10 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
                 $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
                 $gitStatus = $gitStatuses[(string)($project['id'] ?? '')] ?? gitStatus($project, $githubConfiguration);
-                $gitConnected = gitProjectConnected($project);
-                $gitStatusClass = $gitStatus['status'] === 'CONNECTED' ? 'healthy' : (in_array($gitStatus['status'], ['GitHub not configured', 'NOT INITIALIZED', 'INITIALIZATION INCOMPLETE', 'Changes present'], true) ? 'warning' : 'error');
+                $gitStatusClass = gitStatusClassName((string)$gitStatus['status']);
+                $gitCanInitialize = in_array($gitStatus['status'], ['NOT INITIALIZED', 'INITIALIZATION INCOMPLETE', 'REMOTE UNAVAILABLE'], true);
+                $gitCanFetch = !empty($gitStatus['can_fetch']) && in_array($gitStatus['status'], ['INITIALIZATION INCOMPLETE', 'CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND', 'REMOTE UNAVAILABLE'], true);
+                $gitCanPull = !empty($gitStatus['can_pull']) && in_array($gitStatus['status'], ['CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND'], true);
               ?>
               <section class="project-item">
                 <div class="project-item-header">
@@ -1444,38 +1446,46 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                       <tr><th>Repository path</th><td><?= h(configuredDisplayValue($gitStatus['repository_path'] ?? '')) ?></td></tr>
                       <tr><th>Remote</th><td><?= h(configuredDisplayValue($gitStatus['remote_url'] ?? '')) ?></td></tr>
                       <tr><th>Branch</th><td><?= h(configuredDisplayValue($gitStatus['branch'] ?? '')) ?></td></tr>
-                      <?php if ($gitConnected): ?>
-                        <tr><th>Commit</th><td><?= h(configuredDisplayValue($gitStatus['subject'] ?? '')) ?><?= ($gitStatus['commit'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$gitStatus['commit']) . '</span>' : '' ?></td></tr>
-                        <tr><th>Working tree</th><td><?= h(configuredDisplayValue($gitStatus['working_tree'] ?? '')) ?></td></tr>
-                        <tr><th>Ahead / Behind</th><td><?= h(($gitStatus['ahead'] ?? null) === null || ($gitStatus['behind'] ?? null) === null ? 'Not available' : ((string)$gitStatus['ahead'] . ' / ' . (string)$gitStatus['behind'])) ?></td></tr>
-                        <tr><th>Last fetch</th><td><?= h(configuredDisplayValue($gitStatus['last_fetch_at'] ?? '')) ?></td></tr>
-                        <tr><th>Last pull</th><td><?= h(configuredDisplayValue($gitStatus['last_pull_at'] ?? '')) ?></td></tr>
-                      <?php endif; ?>
+                      <tr><th>Local commit</th><td><?= h(configuredDisplayValue($gitStatus['subject'] ?? '')) ?><?= ($gitStatus['local_commit'] ?? '') !== '' ? '<br><span class="meta">' . h(substr((string)$gitStatus['local_commit'], 0, 12)) . '</span>' : '' ?></td></tr>
+                      <tr><th>Remote commit</th><td><?= h(($gitStatus['remote_commit'] ?? '') !== '' ? substr((string)$gitStatus['remote_commit'], 0, 12) : 'Not verified') ?></td></tr>
+                      <tr><th>Working tree</th><td><?= h(configuredDisplayValue($gitStatus['working_tree'] ?? '')) ?></td></tr>
+                      <tr><th>Ahead / Behind</th><td><?= h(($gitStatus['ahead'] ?? null) === null || ($gitStatus['behind'] ?? null) === null ? 'Not available' : ((string)$gitStatus['ahead'] . ' / ' . (string)$gitStatus['behind'])) ?></td></tr>
+                      <tr><th>Last remote verification</th><td><?= h(configuredDisplayValue($gitStatus['remote_verified_at'] ?? '')) ?></td></tr>
+                      <tr><th>Last fetch</th><td><?= h(configuredDisplayValue($gitStatus['last_fetch_at'] ?? '')) ?></td></tr>
+                      <tr><th>Last pull</th><td><?= h(configuredDisplayValue($gitStatus['last_pull_at'] ?? '')) ?></td></tr>
                     </tbody>
                   </table>
+                  <?php if (($gitStatus['diagnostic'] ?? '') !== ''): ?>
+                    <p class="field-help"><?= h((string)$gitStatus['diagnostic']) ?></p>
+                  <?php endif; ?>
                   <?php if ($gitStatus['status'] === 'GitHub not configured'): ?>
                     <p class="field-help">Configure GitHub in Settings to create this repository.</p>
-                  <?php elseif (in_array($gitStatus['status'], ['NOT INITIALIZED', 'INITIALIZATION INCOMPLETE'], true)): ?>
-                    <form method="post" class="project-form" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
-                      <input type="hidden" name="action" value="initialize_repository">
-                      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                      <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                      <button type="submit"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub in Settings before initializing repositories."' ?>><?= $gitStatus['status'] === 'INITIALIZATION INCOMPLETE' ? 'Retry Initialization' : 'Initialize Repository' ?></button>
-                    </form>
-                  <?php elseif ($gitConnected): ?>
+                  <?php elseif ($gitStatus['status'] !== 'INVALID REPOSITORY'): ?>
                     <div class="project-actions">
-                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
-                        <input type="hidden" name="action" value="fetch_git_repository">
-                        <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                        <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                        <button type="submit" class="secondary"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub before network Git actions."' ?>>Fetch</button>
-                      </form>
-                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
-                        <input type="hidden" name="action" value="pull_git_repository">
-                        <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                        <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                        <button type="submit" class="secondary"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub before network Git actions."' ?>>Pull</button>
-                      </form>
+                      <?php if ($gitCanInitialize): ?>
+                        <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                          <input type="hidden" name="action" value="initialize_repository">
+                          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                          <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                          <button type="submit"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub in Settings before initializing repositories."' ?>><?= $gitStatus['status'] === 'NOT INITIALIZED' ? 'Initialize Repository' : ($gitStatus['status'] === 'REMOTE UNAVAILABLE' ? 'Retry remote verification' : 'Retry Initialization') ?></button>
+                        </form>
+                      <?php endif; ?>
+                      <?php if ($gitCanFetch): ?>
+                        <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                          <input type="hidden" name="action" value="fetch_git_repository">
+                          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                          <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                          <button type="submit" class="secondary"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub before network Git actions."' ?>>Fetch</button>
+                        </form>
+                      <?php endif; ?>
+                      <?php if ($gitCanPull): ?>
+                        <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                          <input type="hidden" name="action" value="pull_git_repository">
+                          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                          <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                          <button type="submit" class="secondary"<?= $githubConfigured && ($gitStatus['pull_disabled_reason'] ?? '') === '' ? '' : ' disabled title="' . h((string)($gitStatus['pull_disabled_reason'] ?: 'Configure GitHub before network Git actions.')) . '"' ?>>Pull</button>
+                        </form>
+                      <?php endif; ?>
                     </div>
                   <?php endif; ?>
                 </section>

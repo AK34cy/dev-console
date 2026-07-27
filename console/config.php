@@ -62,6 +62,10 @@ function devConsoleEmptyProject(): array
             'connected' => false,
             'connected_at' => null,
             'created_at' => null,
+            'local_head' => null,
+            'remote_head' => null,
+            'remote_verified' => false,
+            'remote_verified_at' => null,
             'last_fetch_at' => null,
             'last_pull_at' => null,
         ],
@@ -108,7 +112,8 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
 
         $gitInput = is_array($projectInput['git'] ?? null) ? $projectInput['git'] : [];
         $project['git']['connected'] = !empty($gitInput['connected']);
-        foreach (['provider', 'repository_owner', 'repository_name', 'remote_url', 'clone_url', 'remote_created_at', 'last_error_at', 'connected_at', 'created_at', 'last_fetch_at', 'last_pull_at'] as $field) {
+        $project['git']['remote_verified'] = !empty($gitInput['remote_verified']);
+        foreach (['provider', 'repository_owner', 'repository_name', 'remote_url', 'clone_url', 'remote_created_at', 'last_error_at', 'connected_at', 'created_at', 'local_head', 'remote_head', 'remote_verified_at', 'last_fetch_at', 'last_pull_at'] as $field) {
             if (array_key_exists($field, $gitInput)) {
                 $value = $gitInput[$field];
                 $project['git'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
