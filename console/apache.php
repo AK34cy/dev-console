@@ -1,5 +1,8 @@
 <?php
 
+const DEV_CONSOLE_APACHE_SERVERNAME_CONF = 'iovon-dev-console-servername.conf';
+const DEV_CONSOLE_APACHE_SERVERNAME_CONTENT = "# Managed by IOVON Dev Console\nServerName localhost\n";
+
 function apacheBinaryPath(): string
 {
     foreach (['/usr/sbin/apache2', '/usr/sbin/httpd'] as $path) {
@@ -104,6 +107,101 @@ function apacheAllowedActions(): array
     return ['install_apache', 'start_apache', 'restart_apache'];
 }
 
+function apacheCommandPath(string $binary): string
+{
+    foreach (['/usr/sbin/' . $binary, '/usr/bin/' . $binary, '/bin/' . $binary] as $path) {
+        if (is_file($path) && is_executable($path)) {
+            return $path;
+        }
+    }
+
+    return $binary;
+}
+
+function apacheServerNameAvailablePath(string $confAvailableDir = '/etc/apache2/conf-available'): string
+{
+    return rtrim($confAvailableDir, '/') . '/' . DEV_CONSOLE_APACHE_SERVERNAME_CONF;
+}
+
+function apacheServerNameEnabledPath(string $confEnabledDir = '/etc/apache2/conf-enabled'): string
+{
+    return rtrim($confEnabledDir, '/') . '/' . DEV_CONSOLE_APACHE_SERVERNAME_CONF;
+}
+
+function apacheServerNameConfigMatches(string $path): bool
+{
+    return is_file($path) && trim((string)@file_get_contents($path)) === trim(DEV_CONSOLE_APACHE_SERVERNAME_CONTENT);
+}
+
+function apacheEnsureServerNameConfig(array $options = []): array
+{
+    if (empty($options['assume_installed']) && !apacheState()['installed']) {
+        return apacheFormatResult(false, 'Apache is not installed.', []);
+    }
+
+    $confAvailableDir = (string)($options['conf_available_dir'] ?? '/etc/apache2/conf-available');
+    $confEnabledDir = (string)($options['conf_enabled_dir'] ?? '/etc/apache2/conf-enabled');
+    $runCommands = $options['run_commands'] ?? true;
+    $commands = [];
+    $changed = false;
+    $path = apacheServerNameAvailablePath($confAvailableDir);
+
+    if (is_file($path) && !apacheServerNameConfigMatches($path)) {
+        return apacheFormatResult(false, 'Refusing to overwrite unrelated Apache ServerName config.', []);
+    }
+
+    if (!is_file($path)) {
+        if (!is_dir($confAvailableDir) && !@mkdir($confAvailableDir, 0755, true) && !is_dir($confAvailableDir)) {
+            return apacheFormatResult(false, 'Unable to access Apache conf-available directory.', []);
+        }
+        if (@file_put_contents($path, DEV_CONSOLE_APACHE_SERVERNAME_CONTENT, LOCK_EX) === false) {
+            return apacheFormatResult(false, 'Unable to write Apache ServerName config.', []);
+        }
+        @chmod($path, 0644);
+        $changed = true;
+    }
+
+    if ($runCommands) {
+        if (!file_exists(apacheServerNameEnabledPath($confEnabledDir))) {
+            $commands[] = apacheRunFixedCommand([apacheCommandPath('a2enconf'), 'iovon-dev-console-servername']);
+            if (end($commands)['exit_code'] !== 0) {
+                return apacheFormatResult(false, 'Unable to enable Apache ServerName config.', $commands);
+            }
+            $changed = true;
+        }
+
+        $commands[] = apacheRunFixedCommand([apacheCommandPath('apache2ctl'), 'configtest']);
+        if (end($commands)['exit_code'] !== 0) {
+            return apacheFormatResult(false, 'Apache configtest failed.', $commands);
+        }
+
+        if ($changed) {
+            $commands[] = apacheSystemctlCommand('reload');
+            if (end($commands)['exit_code'] !== 0) {
+                return apacheFormatResult(false, 'Apache reload failed.', $commands);
+            }
+        }
+    }
+
+    return apacheFormatResult(true, $changed ? 'Apache ServerName config enabled.' : 'Apache ServerName config already enabled.', $commands);
+}
+
+function apacheAppendFormattedResultCommands(array &$commands, array $formattedResult): void
+{
+    $output = trim((string)($formattedResult['output'] ?? ''));
+    if ($output === '') {
+        return;
+    }
+
+    $commands[] = [
+        'command' => 'ensure Apache ServerName config',
+        'exit_code' => !empty($formattedResult['success']) ? 0 : 1,
+        'stdout' => '',
+        'stderr' => '',
+        'output' => $output,
+    ];
+}
+
 function apacheFormatResult(bool $success, string $message, array $commands): array
 {
     $output = [];
@@ -126,7 +224,12 @@ function apacheFormatResult(bool $success, string $message, array $commands): ar
 function apacheInstall(): array
 {
     if (apacheState()['installed']) {
-        return apacheFormatResult(true, 'Apache is already installed.', []);
+        $serverNameResult = apacheEnsureServerNameConfig();
+        return [
+            'success' => !empty($serverNameResult['success']),
+            'message' => !empty($serverNameResult['success']) ? 'Apache is already installed.' : 'Apache ServerName config failed.',
+            'output' => (string)($serverNameResult['output'] ?? ''),
+        ];
     }
 
     $commands = [];
@@ -140,6 +243,10 @@ function apacheInstall(): array
     if (end($commands)['exit_code'] === 0) {
         $commands[] = apacheSystemctlCommand('start');
     }
+    if (end($commands)['exit_code'] === 0) {
+        $serverNameResult = apacheEnsureServerNameConfig();
+        apacheAppendFormattedResultCommands($commands, $serverNameResult);
+    }
 
     $success = end($commands)['exit_code'] === 0;
     return apacheFormatResult($success, $success ? 'Apache installed and started.' : 'Apache installation failed.', $commands);
@@ -152,7 +259,14 @@ function apacheStart(): array
     }
 
     $result = apacheSystemctlCommand('start');
-    return apacheFormatResult($result['exit_code'] === 0, $result['exit_code'] === 0 ? 'Apache started.' : 'Apache start failed.', [$result]);
+    $commands = [$result];
+    if ($result['exit_code'] === 0) {
+        $serverNameResult = apacheEnsureServerNameConfig();
+        apacheAppendFormattedResultCommands($commands, $serverNameResult);
+    }
+
+    $success = end($commands)['exit_code'] === 0;
+    return apacheFormatResult($success, $success ? 'Apache started.' : 'Apache start failed.', $commands);
 }
 
 function apacheRestart(): array
@@ -161,8 +275,15 @@ function apacheRestart(): array
         return apacheFormatResult(false, 'Apache is not installed.', []);
     }
 
-    $result = apacheSystemctlCommand('restart');
-    return apacheFormatResult($result['exit_code'] === 0, $result['exit_code'] === 0 ? 'Apache restarted.' : 'Apache restart failed.', [$result]);
+    $commands = [];
+    $serverNameResult = apacheEnsureServerNameConfig();
+    apacheAppendFormattedResultCommands($commands, $serverNameResult);
+    if (!empty($serverNameResult['success'])) {
+        $commands[] = apacheSystemctlCommand('restart');
+    }
+
+    $success = !empty($commands) && end($commands)['exit_code'] === 0;
+    return apacheFormatResult($success, $success ? 'Apache restarted.' : 'Apache restart failed.', $commands);
 }
 
 function apacheRunAction(string $action): array

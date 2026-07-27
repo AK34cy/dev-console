@@ -755,13 +755,15 @@ if ($action === 'create_project') {
     }
 }
 
-if (in_array($action, ['provision_project', 'remove_project', 'delete_project'], true)) {
+if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing'], true)) {
     $projectConfigurationForAction = devConsoleLoadProjectConfiguration();
     $projectId = is_scalar($_POST['project_id'] ?? null) ? (string)$_POST['project_id'] : '';
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $projectActionResult = projectActionResult(false, 'Invalid project action request.');
     } elseif ($action === 'provision_project') {
         $projectActionResult = projectProvision($projectConfigurationForAction, $projectId);
+    } elseif ($action === 'verify_project_routing') {
+        $projectActionResult = projectVerifyRoutingAction($projectConfigurationForAction, $projectId, ['require_apache_running' => true]);
     } elseif ($action === 'remove_project') {
         $projectActionResult = projectRemoveFromConsole($projectConfigurationForAction, $projectId);
     } else {
@@ -774,7 +776,7 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project'],
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'provision_project', 'remove_project', 'delete_project']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -1343,6 +1345,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Project removed' : 'Project removal failed';
             } elseif ($projectAction === 'delete_project') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Project deleted' : 'Project deletion failed';
+            } elseif ($projectAction === 'verify_project_routing') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Project routing verified' : 'Project routing verification failed';
             }
           ?>
           <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
@@ -1406,6 +1410,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                             <tr><th>Enabled</th><td><?= !empty($environmentStatus['site_enabled']) ? 'Yes' : 'No' ?></td></tr>
                             <tr><th>ServerName</th><td><?= !empty($environmentStatus['server_name_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
                             <tr><th>DocumentRoot</th><td><?= !empty($environmentStatus['document_root_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
+                            <tr><th>Routing</th><td><?= h(configuredDisplayValue($environmentStatus['routing_status'] ?? '')) ?></td></tr>
+                            <tr><th>Last verified</th><td><?= h(configuredDisplayValue($environmentStatus['routing_verified_at'] ?? '')) ?></td></tr>
                           </tbody>
                         </table>
                       </details>
@@ -1424,6 +1430,14 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
                       <button type="submit"<?= $canSetUp ? '' : ' disabled title="This project cannot be set up automatically with its current environment paths."' ?>>Set up</button>
+                    </form>
+                  <?php endif; ?>
+                  <?php if ($statusLabel === 'Ready'): ?>
+                    <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                      <input type="hidden" name="action" value="verify_project_routing">
+                      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                      <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                      <button type="submit" class="secondary">Verify routing</button>
                     </form>
                   <?php endif; ?>
                   <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove this project from Dev Console?\nServer files will not be deleted.');">

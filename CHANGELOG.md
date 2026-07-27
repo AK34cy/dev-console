@@ -25,3 +25,7 @@ Date:
 - Preview and Production deployment binding
 - DNS and SSL support
 - UI refinement
+
+## Unreleased
+
+- Added local Apache routing verification for managed Production and Preview hosts.

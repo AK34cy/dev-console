@@ -2,6 +2,7 @@
 
 const DEV_CONSOLE_MANAGED_MARKER = '# Managed by IOVON Dev Console';
 const DEV_CONSOLE_PLACEHOLDER_FILE = 'index.html';
+const DEV_CONSOLE_HTTP_VERIFY_TIMEOUT = 3;
 
 function projectActionResult(bool $success, string $message, array $log = []): array
 {
@@ -116,12 +117,27 @@ function projectIsPlaceholderFile(string $path): bool
     return is_file($path) && (str_contains($contents, 'Temporary Dev Console placeholder') || str_contains($contents, 'Dev Console placeholder'));
 }
 
+function projectPlaceholderMarker(array $project, string $environment): string
+{
+    $projectId = htmlspecialchars((string)$project['id'], ENT_QUOTES, 'UTF-8');
+    $environmentName = htmlspecialchars($environment, ENT_QUOTES, 'UTF-8');
+
+    return '<meta name="iovon-dev-console-project" content="' . $projectId . '">' . "\n" .
+        '<meta name="iovon-dev-console-environment" content="' . $environmentName . '">';
+}
+
+function projectPlaceholderMatches(string $contents, array $project, string $environment): bool
+{
+    return str_contains($contents, '<meta name="iovon-dev-console-project" content="' . htmlspecialchars((string)$project['id'], ENT_QUOTES, 'UTF-8') . '">')
+        && str_contains($contents, '<meta name="iovon-dev-console-environment" content="' . htmlspecialchars($environment, ENT_QUOTES, 'UTF-8') . '">');
+}
+
 function projectPlaceholderContent(array $project, string $environment): string
 {
     $projectName = htmlspecialchars((string)$project['name'], ENT_QUOTES, 'UTF-8');
     $environmentName = htmlspecialchars(ucfirst($environment), ENT_QUOTES, 'UTF-8');
 
-    return "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>" . $projectName . ' ' . $environmentName . "</title>\n<style>body{margin:0;background:#f4f8fb;color:#1d2a32;font-family:Arial,sans-serif;display:grid;min-height:100vh;place-items:center}.wrap{background:#fff;border:1px solid #d8eef5;border-radius:10px;box-shadow:0 10px 28px rgba(0,83,133,.09);max-width:560px;padding:32px;width:calc(100% - 48px)}h1{color:#005385;margin:0 0 18px}dl{display:grid;gap:10px;margin:0}dt{color:#536b78;font-size:12px;font-weight:700;text-transform:uppercase}dd{margin:2px 0 0}.badge{background:#e3f5f9;border-radius:999px;color:#005385;display:inline-block;font-weight:700;padding:6px 10px}</style>\n</head>\n<body>\n<main class=\"wrap\">\n<h1>IOVON Dev Console</h1>\n<dl>\n<dt>Project</dt><dd>" . $projectName . "</dd>\n<dt>Environment</dt><dd>" . $environmentName . "</dd>\n<dt>Status</dt><dd><span class=\"badge\">Waiting for deployment</span></dd>\n</dl>\n<p>Dev Console placeholder page.</p>\n</main>\n</body>\n</html>\n";
+    return "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n" . projectPlaceholderMarker($project, $environment) . "\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>" . $projectName . ' ' . $environmentName . "</title>\n<style>body{margin:0;background:#f4f8fb;color:#1d2a32;font-family:Arial,sans-serif;display:grid;min-height:100vh;place-items:center}.wrap{background:#fff;border:1px solid #d8eef5;border-radius:10px;box-shadow:0 10px 28px rgba(0,83,133,.09);max-width:560px;padding:32px;width:calc(100% - 48px)}h1{color:#005385;margin:0 0 18px}dl{display:grid;gap:10px;margin:0}dt{color:#536b78;font-size:12px;font-weight:700;text-transform:uppercase}dd{margin:2px 0 0}.badge{background:#e3f5f9;border-radius:999px;color:#005385;display:inline-block;font-weight:700;padding:6px 10px}</style>\n</head>\n<body>\n<main class=\"wrap\">\n<h1>IOVON Dev Console</h1>\n<dl>\n<dt>Project</dt><dd>" . $projectName . "</dd>\n<dt>Environment</dt><dd>" . $environmentName . "</dd>\n<dt>Status</dt><dd><span class=\"badge\">Waiting for deployment</span></dd>\n</dl>\n<p>Dev Console placeholder page.</p>\n</main>\n</body>\n</html>\n";
 }
 
 function projectVhostPath(array $project, string $environment, string $availableDir = '/etc/apache2/sites-available'): string
@@ -203,6 +219,160 @@ function projectAppendCommandLog(array &$log, array $result): void
     }
 }
 
+function projectRoutingStatusLabel(array $project, string $environment): string
+{
+    $field = $environment . '_routing_verified';
+    if (!array_key_exists($field, $project['provisioning'] ?? []) || ($project['provisioning'][$field] ?? null) === null) {
+        return 'Not verified';
+    }
+
+    return !empty($project['provisioning'][$field]) ? 'Verified' : 'Failed';
+}
+
+function projectVerifyEnvironmentRouting(array $project, string $environment, array $options = []): array
+{
+    if (!in_array($environment, ['production', 'preview'], true)) {
+        throw new RuntimeException('Invalid environment.');
+    }
+
+    $domain = devConsoleNormalizeDomain((string)($project[$environment]['domain'] ?? ''));
+    if (!devConsoleIsHostname($domain)) {
+        return [
+            'request_completed' => false,
+            'status_code' => null,
+            'matched' => false,
+            'message' => ucfirst($environment) . ' domain is invalid.',
+        ];
+    }
+
+    $client = $options['http_client'] ?? null;
+    if (is_callable($client)) {
+        $response = $client($domain, $environment, $project);
+    } else {
+        $response = projectLocalHttpRequest($domain, (float)($options['timeout'] ?? DEV_CONSOLE_HTTP_VERIFY_TIMEOUT));
+    }
+
+    $completed = !empty($response['request_completed']);
+    $statusCode = isset($response['status_code']) ? (int)$response['status_code'] : null;
+    $body = (string)($response['body'] ?? '');
+    $matched = $completed && projectPlaceholderMatches($body, $project, $environment);
+    $message = (string)($response['message'] ?? '');
+    if ($matched) {
+        $message = ucfirst($environment) . ' routing verified for ' . $domain . '.';
+    } elseif ($completed) {
+        $message = ucfirst($environment) . ' routing did not return the expected Dev Console placeholder markers.';
+    } elseif ($message === '') {
+        $message = ucfirst($environment) . ' routing request failed.';
+    }
+
+    return [
+        'request_completed' => $completed,
+        'status_code' => $statusCode,
+        'matched' => $matched,
+        'message' => $message,
+    ];
+}
+
+function projectLocalHttpRequest(string $host, float $timeout = DEV_CONSOLE_HTTP_VERIFY_TIMEOUT): array
+{
+    $errorCode = 0;
+    $errorMessage = '';
+    $socket = @fsockopen('127.0.0.1', 80, $errorCode, $errorMessage, $timeout);
+    if (!is_resource($socket)) {
+        return [
+            'request_completed' => false,
+            'status_code' => null,
+            'body' => '',
+            'message' => 'Unable to connect to 127.0.0.1:80: ' . ($errorMessage !== '' ? $errorMessage : 'connection failed'),
+        ];
+    }
+
+    stream_set_timeout($socket, max(1, (int)ceil($timeout)));
+    fwrite($socket, "GET / HTTP/1.1\r\nHost: " . $host . "\r\nConnection: close\r\nUser-Agent: IOVON Dev Console routing verifier\r\n\r\n");
+    $response = '';
+    while (!feof($socket) && strlen($response) < 1048576) {
+        $chunk = fread($socket, 8192);
+        if ($chunk === false) {
+            break;
+        }
+        $response .= $chunk;
+        $metadata = stream_get_meta_data($socket);
+        if (!empty($metadata['timed_out'])) {
+            fclose($socket);
+            return [
+                'request_completed' => false,
+                'status_code' => null,
+                'body' => '',
+                'message' => 'Local HTTP routing request timed out.',
+            ];
+        }
+    }
+    fclose($socket);
+
+    $statusCode = null;
+    if (preg_match('/^HTTP\/\d(?:\.\d)?\s+(\d{3})/i', $response, $matches) === 1) {
+        $statusCode = (int)$matches[1];
+    }
+    $bodyOffset = strpos($response, "\r\n\r\n");
+    $body = $bodyOffset === false ? '' : substr($response, $bodyOffset + 4);
+
+    return [
+        'request_completed' => $response !== '',
+        'status_code' => $statusCode,
+        'body' => $body,
+        'message' => $response === '' ? 'Local HTTP routing request returned an empty response.' : 'Local HTTP routing request completed.',
+    ];
+}
+
+function projectVerifyRouting(array $project, array $options = []): array
+{
+    $results = [];
+    $log = [];
+    foreach (['production', 'preview'] as $environment) {
+        $result = projectVerifyEnvironmentRouting($project, $environment, $options);
+        $results[$environment] = $result;
+        $log[] = ucfirst($environment) . ': ' . $result['message'] . ' HTTP ' . ($result['status_code'] === null ? '-' : (string)$result['status_code']);
+    }
+
+    return [
+        'success' => !empty($results['production']['matched']) && !empty($results['preview']['matched']),
+        'results' => $results,
+        'log' => $log,
+    ];
+}
+
+function projectApplyRoutingVerificationMetadata(array $project, array $verification): array
+{
+    $success = !empty($verification['success']);
+    $project['provisioning']['routing_verified_at'] = date('c');
+    $project['provisioning']['production_routing_verified'] = $success && !empty($verification['results']['production']['matched']);
+    $project['provisioning']['preview_routing_verified'] = $success && !empty($verification['results']['preview']['matched']);
+
+    return $project;
+}
+
+function projectVerifyRoutingAction(array $configuration, string $projectId, array $options = []): array
+{
+    $project = devConsoleFindProjectById($configuration, $projectId);
+    if ($project === null) {
+        return projectActionResult(false, 'Project not found.');
+    }
+    if (!empty($options['require_apache_running'])) {
+        $apacheState = apacheState();
+        if (empty($apacheState['installed']) || empty($apacheState['running'])) {
+            return projectActionResult(false, 'Apache must be installed and running before routing verification.');
+        }
+    }
+
+    $verification = projectVerifyRouting($project, $options);
+    $updatedProject = projectApplyRoutingVerificationMetadata($project, $verification);
+    if (empty($options['skip_save']) && !devConsoleSaveProjectConfiguration(devConsoleReplaceProject($configuration, $updatedProject))) {
+        return projectActionResult(false, 'Unable to save routing verification metadata.', $verification['log']);
+    }
+
+    return projectActionResult($verification['success'], $verification['success'] ? 'Project routing verified.' : 'Project routing verification failed.', $verification['log']);
+}
+
 function projectEnvironmentStatus(array $project, string $environment, string $availableDir = '/etc/apache2/sites-available', string $enabledDir = '/etc/apache2/sites-enabled'): array
 {
     $path = projectNormalizePath((string)$project[$environment]['path']);
@@ -224,6 +394,8 @@ function projectEnvironmentStatus(array $project, string $environment, string $a
         'server_name_matches' => $serverNameMatches,
         'document_root_matches' => $documentRootMatches,
         'vhost_name' => basename($vhostPath),
+        'routing_status' => projectRoutingStatusLabel($project, $environment),
+        'routing_verified_at' => (string)($project['provisioning']['routing_verified_at'] ?? ''),
     ];
 }
 
@@ -309,6 +481,7 @@ function projectProvision(array $configuration, string $projectId, array $option
     $log = [];
     $createdDirectories = [];
     $createdPlaceholders = [];
+    $updatedPlaceholders = [];
     $createdVhosts = [];
     $enabledSites = [];
     $siteStateChanged = false;
@@ -349,6 +522,16 @@ function projectProvision(array $configuration, string $projectId, array $option
                 }
                 $createdPlaceholders[] = $placeholder;
                 $log[] = 'Created placeholder: ' . $placeholder;
+            } elseif (count($entries) === 1 && $entries[0] === DEV_CONSOLE_PLACEHOLDER_FILE) {
+                $placeholder = $path . '/' . DEV_CONSOLE_PLACEHOLDER_FILE;
+                $existingPlaceholder = (string)@file_get_contents($placeholder);
+                if (projectIsPlaceholderFile($placeholder) && !projectPlaceholderMatches($existingPlaceholder, $project, $environment)) {
+                    if (@file_put_contents($placeholder, projectPlaceholderContent($project, $environment), LOCK_EX) === false) {
+                        throw new RuntimeException('Unable to update placeholder for ' . $environment . '.');
+                    }
+                    $updatedPlaceholders[$placeholder] = $existingPlaceholder;
+                    $log[] = 'Updated placeholder markers: ' . $placeholder;
+                }
             }
         }
 
@@ -373,6 +556,15 @@ function projectProvision(array $configuration, string $projectId, array $option
         }
 
         if ($runCommands) {
+            $serverNameResult = apacheEnsureServerNameConfig();
+            $log[] = $serverNameResult['message'];
+            if (trim((string)$serverNameResult['output']) !== '') {
+                $log[] = trim((string)$serverNameResult['output']);
+            }
+            if (empty($serverNameResult['success'])) {
+                throw new RuntimeException('Apache ServerName config failed.');
+            }
+
             $result = projectRunFixedCommand([projectApacheCommandPath('apache2ctl'), 'configtest']);
             projectAppendCommandLog($log, $result);
             if ($result['exit_code'] !== 0) throw new RuntimeException('Apache configtest failed.');
@@ -391,6 +583,16 @@ function projectProvision(array $configuration, string $projectId, array $option
             $result = projectRunFixedCommand([apacheSystemctlPath() ?: 'systemctl', 'reload', 'apache2']);
             projectAppendCommandLog($log, $result);
             if ($result['exit_code'] !== 0) throw new RuntimeException('Apache reload failed.');
+
+            $verification = projectVerifyRouting($project, $options);
+            foreach ($verification['log'] as $verificationLine) {
+                $log[] = $verificationLine;
+            }
+            if (empty($verification['success'])) {
+                throw new RuntimeException('Project routing verification failed.');
+            }
+        } else {
+            $verification = ['success' => false, 'results' => []];
         }
 
         $project['provisioning'] = [
@@ -398,6 +600,9 @@ function projectProvision(array $configuration, string $projectId, array $option
             'provisioned_at' => date('c'),
             'production_vhost' => projectEnvironmentVhostName($project, 'production'),
             'preview_vhost' => projectEnvironmentVhostName($project, 'preview'),
+            'routing_verified_at' => !empty($verification['success']) ? date('c') : null,
+            'production_routing_verified' => !empty($verification['results']['production']['matched']),
+            'preview_routing_verified' => !empty($verification['results']['preview']['matched']),
         ];
         if (empty($options['skip_save'])) {
             $updatedConfiguration = devConsoleReplaceProject($configuration, $project);
@@ -425,6 +630,12 @@ function projectProvision(array $configuration, string $projectId, array $option
             if (is_file($path)) {
                 @unlink($path);
                 $log[] = 'Rolled back placeholder: ' . $path;
+            }
+        }
+        foreach ($updatedPlaceholders as $path => $contents) {
+            if (is_file($path)) {
+                @file_put_contents($path, $contents, LOCK_EX);
+                $log[] = 'Restored previous placeholder: ' . $path;
             }
         }
         foreach (array_reverse($createdDirectories) as $path) {

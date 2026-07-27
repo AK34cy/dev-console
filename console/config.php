@@ -37,6 +37,9 @@ function devConsoleEmptyProject(): array
             'provisioned_at' => null,
             'production_vhost' => null,
             'preview_vhost' => null,
+            'routing_verified_at' => null,
+            'production_routing_verified' => null,
+            'preview_routing_verified' => null,
         ],
     ];
 }
@@ -72,10 +75,15 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
 
         $provisioningInput = is_array($projectInput['provisioning'] ?? null) ? $projectInput['provisioning'] : [];
         $project['provisioning']['managed'] = !empty($provisioningInput['managed']);
-        foreach (['provisioned_at', 'production_vhost', 'preview_vhost'] as $field) {
+        foreach (['provisioned_at', 'production_vhost', 'preview_vhost', 'routing_verified_at'] as $field) {
             if (array_key_exists($field, $provisioningInput)) {
                 $value = $provisioningInput[$field];
                 $project['provisioning'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
+            }
+        }
+        foreach (['production_routing_verified', 'preview_routing_verified'] as $field) {
+            if (array_key_exists($field, $provisioningInput)) {
+                $project['provisioning'][$field] = $provisioningInput[$field] === null ? null : !empty($provisioningInput[$field]);
             }
         }
 
