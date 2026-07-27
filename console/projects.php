@@ -826,6 +826,9 @@ function projectDelete(array $configuration, string $projectId, string $confirma
         foreach (['production', 'preview'] as $environment) {
             projectSafeRecursiveDelete($paths[$environment], $paths[$environment], (string)$project['repository_path'], $log, $allowedBase);
         }
+        if (!empty($project['git']['connected'])) {
+            $log[] = 'Git repository preserved: ' . (string)$project['repository_path'];
+        }
         if (empty($options['skip_save'])) {
             if (!devConsoleSaveProjectConfiguration(devConsoleRemoveProjectFromConfiguration($configuration, $projectId))) {
                 throw new RuntimeException('Unable to save project configuration.');

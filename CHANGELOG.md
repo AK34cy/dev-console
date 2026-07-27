@@ -22,6 +22,9 @@ Date:
 ## Next
 
 - Git repository integration
+- Git repository connection
+- Fetch and fast-forward-only Pull
+- Local Git status reporting
 - Preview and Production deployment binding
 - DNS and SSL support
 - UI refinement

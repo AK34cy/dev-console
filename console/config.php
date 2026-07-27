@@ -32,6 +32,13 @@ function devConsoleEmptyProject(): array
             'domain' => '',
             'path' => '',
         ],
+        'git' => [
+            'remote_url' => null,
+            'connected' => false,
+            'connected_at' => null,
+            'last_fetch_at' => null,
+            'last_pull_at' => null,
+        ],
         'provisioning' => [
             'managed' => false,
             'provisioned_at' => null,
@@ -70,6 +77,15 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
                 if (isset($environmentInput[$field]) && is_scalar($environmentInput[$field])) {
                     $project[$environment][$field] = trim((string)$environmentInput[$field]);
                 }
+            }
+        }
+
+        $gitInput = is_array($projectInput['git'] ?? null) ? $projectInput['git'] : [];
+        $project['git']['connected'] = !empty($gitInput['connected']);
+        foreach (['remote_url', 'connected_at', 'last_fetch_at', 'last_pull_at'] as $field) {
+            if (array_key_exists($field, $gitInput)) {
+                $value = $gitInput[$field];
+                $project['git'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
             }
         }
 
@@ -370,6 +386,7 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
             'path' => $previewPath,
         ],
         'provisioning' => devConsoleEmptyProject()['provisioning'],
+        'git' => devConsoleEmptyProject()['git'],
     ];
 
     return [

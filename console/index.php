@@ -3,6 +3,7 @@ require __DIR__ . '/deployment.php';
 require __DIR__ . '/config.php';
 require __DIR__ . '/apache.php';
 require __DIR__ . '/projects.php';
+require __DIR__ . '/git.php';
 
 const DEV_CONSOLE_VERSION = '0.1';
 
@@ -755,7 +756,7 @@ if ($action === 'create_project') {
     }
 }
 
-if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing'], true)) {
+if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'connect_git_repository', 'fetch_git_repository', 'pull_git_repository', 'remove_git_connection'], true)) {
     $projectConfigurationForAction = devConsoleLoadProjectConfiguration();
     $projectId = is_scalar($_POST['project_id'] ?? null) ? (string)$_POST['project_id'] : '';
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
@@ -764,6 +765,15 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
         $projectActionResult = projectProvision($projectConfigurationForAction, $projectId);
     } elseif ($action === 'verify_project_routing') {
         $projectActionResult = projectVerifyRoutingAction($projectConfigurationForAction, $projectId, ['require_apache_running' => true]);
+    } elseif ($action === 'connect_git_repository') {
+        $remoteUrl = is_scalar($_POST['remote_url'] ?? null) ? trim((string)$_POST['remote_url']) : '';
+        $projectActionResult = gitConnectRepository($projectConfigurationForAction, $projectId, $remoteUrl);
+    } elseif ($action === 'fetch_git_repository') {
+        $projectActionResult = gitFetchRepository($projectConfigurationForAction, $projectId);
+    } elseif ($action === 'pull_git_repository') {
+        $projectActionResult = gitPullRepository($projectConfigurationForAction, $projectId);
+    } elseif ($action === 'remove_git_connection') {
+        $projectActionResult = gitRemoveConnection($projectConfigurationForAction, $projectId);
     } elseif ($action === 'remove_project') {
         $projectActionResult = projectRemoveFromConsole($projectConfigurationForAction, $projectId);
     } else {
@@ -776,7 +786,7 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'connect_git_repository', 'fetch_git_repository', 'pull_git_repository', 'remove_git_connection']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -900,6 +910,7 @@ unset($_SESSION['project_action_result']);
 $apacheActionResult = is_array($_SESSION['apache_action_result'] ?? null) ? $_SESSION['apache_action_result'] : $apacheActionResult;
 unset($_SESSION['apache_action_result']);
 $projectStatuses = [];
+$gitStatuses = [];
 foreach ($projects as $project) {
     try {
         $projectStatuses[(string)($project['id'] ?? '')] = projectStatus($project);
@@ -910,6 +921,7 @@ foreach ($projects as $project) {
             'preview' => [],
         ];
     }
+    $gitStatuses[(string)($project['id'] ?? '')] = gitStatus($project);
 }
 $serverAddress = (string)($_SERVER['SERVER_ADDR'] ?? '');
 if ($serverAddress === '' || in_array($serverAddress, ['127.0.0.1', '::1'], true)) {
@@ -1347,6 +1359,14 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Project deleted' : 'Project deletion failed';
             } elseif ($projectAction === 'verify_project_routing') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Project routing verified' : 'Project routing verification failed';
+            } elseif ($projectAction === 'connect_git_repository') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Git repository connected' : 'Git connection failed';
+            } elseif ($projectAction === 'fetch_git_repository') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Git fetch completed' : 'Git fetch failed';
+            } elseif ($projectAction === 'pull_git_repository') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Git pull completed' : 'Git pull failed';
+            } elseif ($projectAction === 'remove_git_connection') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Git connection removed' : 'Git connection removal failed';
             }
           ?>
           <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
@@ -1370,6 +1390,9 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $isManaged = !empty($project['provisioning']['managed']);
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
                 $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
+                $gitStatus = $gitStatuses[(string)($project['id'] ?? '')] ?? gitStatus($project);
+                $gitConnected = gitProjectConnected($project);
+                $gitStatusClass = $gitStatus['status'] === 'Ready' ? 'healthy' : (in_array($gitStatus['status'], ['Not connected', 'Repository missing'], true) ? 'warning' : 'error');
               ?>
               <section class="project-item">
                 <div class="project-item-header">
@@ -1423,6 +1446,56 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 <?php if (!$usesGeneratedPaths): ?>
                   <p class="error">This project uses custom environment paths and cannot be set up automatically. Remove it from Console and create it again.</p>
                 <?php endif; ?>
+                <section class="environment-block">
+                  <h4>Git</h4>
+                  <table class="compact-table">
+                    <tbody>
+                      <tr><th>Status</th><td><span class="status-pill <?= h($gitStatusClass) ?>"><?= h($gitStatus['status']) ?></span></td></tr>
+                      <tr><th>Repository path</th><td><?= h(configuredDisplayValue($gitStatus['repository_path'] ?? '')) ?></td></tr>
+                      <tr><th>Remote URL</th><td><?= h(configuredDisplayValue($gitStatus['remote_url'] ?? '')) ?></td></tr>
+                      <tr><th>Branch</th><td><?= h(configuredDisplayValue($gitStatus['branch'] ?? '')) ?></td></tr>
+                      <?php if ($gitConnected): ?>
+                        <tr><th>Commit</th><td><?= h(configuredDisplayValue($gitStatus['commit'] ?? '')) ?><?= ($gitStatus['subject'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$gitStatus['subject']) . '</span>' : '' ?></td></tr>
+                        <tr><th>Working tree</th><td><?= h(configuredDisplayValue($gitStatus['working_tree'] ?? '')) ?></td></tr>
+                        <tr><th>Ahead / Behind</th><td><?= h(($gitStatus['ahead'] ?? null) === null || ($gitStatus['behind'] ?? null) === null ? 'Not available' : ((string)$gitStatus['ahead'] . ' / ' . (string)$gitStatus['behind'])) ?></td></tr>
+                        <tr><th>Last fetch</th><td><?= h(configuredDisplayValue($gitStatus['last_fetch_at'] ?? '')) ?></td></tr>
+                        <tr><th>Last pull</th><td><?= h(configuredDisplayValue($gitStatus['last_pull_at'] ?? '')) ?></td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                  <?php if (!$gitConnected): ?>
+                    <form method="post" class="project-form" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                      <input type="hidden" name="action" value="connect_git_repository">
+                      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                      <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                      <label for="remote_url_<?= h((string)$project['id']) ?>">Remote repository URL</label>
+                      <input id="remote_url_<?= h((string)$project['id']) ?>" name="remote_url" type="text" maxlength="512" placeholder="git@github.com:AK34cy/example.git">
+                      <p class="field-help">Supports git@host:owner/repository.git, ssh://, and public https:// repositories.</p>
+                      <button type="submit">Connect</button>
+                    </form>
+                  <?php else: ?>
+                    <div class="project-actions">
+                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                        <input type="hidden" name="action" value="fetch_git_repository">
+                        <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                        <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                        <button type="submit" class="secondary">Fetch</button>
+                      </form>
+                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                        <input type="hidden" name="action" value="pull_git_repository">
+                        <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                        <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                        <button type="submit" class="secondary">Pull</button>
+                      </form>
+                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove Git connection?\nRepository files will remain on the server.');">
+                        <input type="hidden" name="action" value="remove_git_connection">
+                        <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                        <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                        <button type="submit" class="secondary">Remove connection</button>
+                      </form>
+                    </div>
+                  <?php endif; ?>
+                </section>
                 <div class="project-actions">
                   <?php if ($statusLabel !== 'Ready'): ?>
                     <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
