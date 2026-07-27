@@ -132,6 +132,57 @@ function projectPlaceholderMatches(string $contents, array $project, string $env
         && str_contains($contents, '<meta name="iovon-dev-console-environment" content="' . htmlspecialchars($environment, ENT_QUOTES, 'UTF-8') . '">');
 }
 
+function projectAtomicWrite(string $path, string $contents): bool
+{
+    $directory = dirname($path);
+    $temporaryPath = $directory . '/.' . basename($path) . '.tmp.' . bin2hex(random_bytes(8));
+    if (@file_put_contents($temporaryPath, $contents, LOCK_EX) === false) {
+        return false;
+    }
+    @chmod($temporaryPath, 0644);
+    if (!@rename($temporaryPath, $path)) {
+        @unlink($temporaryPath);
+        return false;
+    }
+
+    return true;
+}
+
+function projectUpgradeEnvironmentPlaceholder(array $project, string $environment, array &$log = []): bool
+{
+    if (!in_array($environment, ['production', 'preview'], true)) {
+        throw new RuntimeException('Invalid environment.');
+    }
+
+    $path = rtrim(projectNormalizePath((string)($project[$environment]['path'] ?? '')), '/') . '/' . DEV_CONSOLE_PLACEHOLDER_FILE;
+    if (!is_file($path)) {
+        $log[] = ucfirst($environment) . ' placeholder not found: ' . $path;
+        return false;
+    }
+    if (!projectIsPlaceholderFile($path)) {
+        $log[] = ucfirst($environment) . ' index.html is not a Dev Console placeholder; it was not changed.';
+        return false;
+    }
+
+    $contents = (string)@file_get_contents($path);
+    if (projectPlaceholderMatches($contents, $project, $environment)) {
+        return false;
+    }
+    if (!projectAtomicWrite($path, projectPlaceholderContent($project, $environment))) {
+        throw new RuntimeException('Unable to upgrade ' . $environment . ' placeholder markers.');
+    }
+
+    $log[] = 'Upgraded ' . $environment . ' placeholder markers: ' . $path;
+    return true;
+}
+
+function projectUpgradePlaceholders(array $project, array &$log = []): void
+{
+    foreach (['production', 'preview'] as $environment) {
+        projectUpgradeEnvironmentPlaceholder($project, $environment, $log);
+    }
+}
+
 function projectPlaceholderContent(array $project, string $environment): string
 {
     $projectName = htmlspecialchars((string)$project['name'], ENT_QUOTES, 'UTF-8');
@@ -364,13 +415,30 @@ function projectVerifyRoutingAction(array $configuration, string $projectId, arr
         }
     }
 
-    $verification = projectVerifyRouting($project, $options);
-    $updatedProject = projectApplyRoutingVerificationMetadata($project, $verification);
-    if (empty($options['skip_save']) && !devConsoleSaveProjectConfiguration(devConsoleReplaceProject($configuration, $updatedProject))) {
-        return projectActionResult(false, 'Unable to save routing verification metadata.', $verification['log']);
+    $log = [];
+    $serverNameResult = apacheEnsureServerNameConfig($options['apache_options'] ?? []);
+    $log[] = $serverNameResult['message'];
+    if (trim((string)($serverNameResult['output'] ?? '')) !== '') {
+        $log[] = trim((string)$serverNameResult['output']);
+    }
+    if (empty($serverNameResult['success'])) {
+        return projectActionResult(false, 'Apache ServerName configuration failed.', $log);
     }
 
-    return projectActionResult($verification['success'], $verification['success'] ? 'Project routing verified.' : 'Project routing verification failed.', $verification['log']);
+    try {
+        projectUpgradePlaceholders($project, $log);
+    } catch (Throwable $exception) {
+        return projectActionResult(false, $exception->getMessage(), $log);
+    }
+
+    $verification = projectVerifyRouting($project, $options);
+    $log = array_merge($log, $verification['log']);
+    $updatedProject = projectApplyRoutingVerificationMetadata($project, $verification);
+    if (empty($options['skip_save']) && !devConsoleSaveProjectConfiguration(devConsoleReplaceProject($configuration, $updatedProject))) {
+        return projectActionResult(false, 'Unable to save routing verification metadata.', $log);
+    }
+
+    return projectActionResult($verification['success'], $verification['success'] ? 'Project routing verified.' : 'Project routing verification failed.', $log);
 }
 
 function projectEnvironmentStatus(array $project, string $environment, string $availableDir = '/etc/apache2/sites-available', string $enabledDir = '/etc/apache2/sites-enabled'): array
@@ -517,7 +585,7 @@ function projectProvision(array $configuration, string $projectId, array $option
             $entries = array_values(array_filter(scandir($path) ?: [], fn(string $entry): bool => $entry !== '.' && $entry !== '..'));
             if (empty($entries)) {
                 $placeholder = $path . '/' . DEV_CONSOLE_PLACEHOLDER_FILE;
-                if (@file_put_contents($placeholder, projectPlaceholderContent($project, $environment), LOCK_EX) === false) {
+                if (!projectAtomicWrite($placeholder, projectPlaceholderContent($project, $environment))) {
                     throw new RuntimeException('Unable to write placeholder for ' . $environment . '.');
                 }
                 $createdPlaceholders[] = $placeholder;
@@ -526,7 +594,7 @@ function projectProvision(array $configuration, string $projectId, array $option
                 $placeholder = $path . '/' . DEV_CONSOLE_PLACEHOLDER_FILE;
                 $existingPlaceholder = (string)@file_get_contents($placeholder);
                 if (projectIsPlaceholderFile($placeholder) && !projectPlaceholderMatches($existingPlaceholder, $project, $environment)) {
-                    if (@file_put_contents($placeholder, projectPlaceholderContent($project, $environment), LOCK_EX) === false) {
+                    if (!projectAtomicWrite($placeholder, projectPlaceholderContent($project, $environment))) {
                         throw new RuntimeException('Unable to update placeholder for ' . $environment . '.');
                     }
                     $updatedPlaceholders[$placeholder] = $existingPlaceholder;
@@ -556,7 +624,7 @@ function projectProvision(array $configuration, string $projectId, array $option
         }
 
         if ($runCommands) {
-            $serverNameResult = apacheEnsureServerNameConfig();
+            $serverNameResult = apacheEnsureServerNameConfig($options['apache_options'] ?? []);
             $log[] = $serverNameResult['message'];
             if (trim((string)$serverNameResult['output']) !== '') {
                 $log[] = trim((string)$serverNameResult['output']);

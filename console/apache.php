@@ -142,6 +142,7 @@ function apacheEnsureServerNameConfig(array $options = []): array
     $confAvailableDir = (string)($options['conf_available_dir'] ?? '/etc/apache2/conf-available');
     $confEnabledDir = (string)($options['conf_enabled_dir'] ?? '/etc/apache2/conf-enabled');
     $runCommands = $options['run_commands'] ?? true;
+    $commandRunner = $options['command_runner'] ?? null;
     $commands = [];
     $changed = false;
     $path = apacheServerNameAvailablePath($confAvailableDir);
@@ -163,20 +164,26 @@ function apacheEnsureServerNameConfig(array $options = []): array
 
     if ($runCommands) {
         if (!file_exists(apacheServerNameEnabledPath($confEnabledDir))) {
-            $commands[] = apacheRunFixedCommand([apacheCommandPath('a2enconf'), 'iovon-dev-console-servername']);
+            $commands[] = is_callable($commandRunner)
+                ? $commandRunner([apacheCommandPath('a2enconf'), 'iovon-dev-console-servername'])
+                : apacheRunFixedCommand([apacheCommandPath('a2enconf'), 'iovon-dev-console-servername']);
             if (end($commands)['exit_code'] !== 0) {
                 return apacheFormatResult(false, 'Unable to enable Apache ServerName config.', $commands);
             }
             $changed = true;
         }
 
-        $commands[] = apacheRunFixedCommand([apacheCommandPath('apache2ctl'), 'configtest']);
+        $commands[] = is_callable($commandRunner)
+            ? $commandRunner([apacheCommandPath('apache2ctl'), 'configtest'])
+            : apacheRunFixedCommand([apacheCommandPath('apache2ctl'), 'configtest']);
         if (end($commands)['exit_code'] !== 0) {
             return apacheFormatResult(false, 'Apache configtest failed.', $commands);
         }
 
         if ($changed) {
-            $commands[] = apacheSystemctlCommand('reload');
+            $commands[] = is_callable($commandRunner)
+                ? $commandRunner([apacheSystemctlPath() ?: 'systemctl', 'reload', 'apache2'])
+                : apacheSystemctlCommand('reload');
             if (end($commands)['exit_code'] !== 0) {
                 return apacheFormatResult(false, 'Apache reload failed.', $commands);
             }

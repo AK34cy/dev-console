@@ -29,3 +29,4 @@ Date:
 ## Unreleased
 
 - Added local Apache routing verification for managed Production and Preview hosts.
+- Fixed routing verification upgrades for projects created before placeholder markers existed.
