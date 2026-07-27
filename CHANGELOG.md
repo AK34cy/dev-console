@@ -25,6 +25,8 @@ Date:
 - Git repository connection
 - Fetch and fast-forward-only Pull
 - Local Git status reporting
+- Shared robust external command execution
+- Reliable exit-code and timeout handling
 - Preview and Production deployment binding
 - DNS and SSL support
 - UI refinement

@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/process.php';
+
 const DEV_CONSOLE_GIT_BASE = '/var/www/git';
 
 function gitActionResult(bool $success, string $message, array $log = []): array
@@ -13,72 +15,16 @@ function gitActionResult(bool $success, string $message, array $log = []): array
 
 function gitRunFixedCommand(array $arguments, int $timeoutSeconds = 10): array
 {
-    $descriptorSpec = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
-    $pipes = [];
-    $environment = ['GIT_TERMINAL_PROMPT' => '0'];
-    $process = @proc_open($arguments, $descriptorSpec, $pipes, devConsoleRepositoryRoot(), $environment);
-    if (!is_resource($process)) {
-        return [
-            'command' => implode(' ', $arguments),
-            'exit_code' => 127,
-            'stdout' => '',
-            'stderr' => 'Unable to start command.',
-            'output' => 'Unable to start command.',
-            'timed_out' => false,
-        ];
-    }
-
-    fclose($pipes[0]);
-    stream_set_blocking($pipes[1], false);
-    stream_set_blocking($pipes[2], false);
-    $stdout = '';
-    $stderr = '';
-    $deadline = time() + max(1, $timeoutSeconds);
-    $timedOut = false;
-
-    while (true) {
-        $stdout .= stream_get_contents($pipes[1]) ?: '';
-        $stderr .= stream_get_contents($pipes[2]) ?: '';
-        $status = proc_get_status($process);
-        if (!$status['running']) {
-            break;
-        }
-        if (time() >= $deadline) {
-            $timedOut = true;
-            proc_terminate($process);
-            usleep(200000);
-            $status = proc_get_status($process);
-            if ($status['running']) {
-                proc_terminate($process, 9);
-            }
-            break;
-        }
-        usleep(100000);
-    }
-
-    $stdout .= stream_get_contents($pipes[1]) ?: '';
-    $stderr .= stream_get_contents($pipes[2]) ?: '';
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    $exitCode = proc_close($process);
-    if ($timedOut) {
-        $exitCode = 124;
-        $stderr = trim($stderr . "\nCommand timed out.");
-    }
-
-    return [
-        'command' => implode(' ', $arguments),
-        'exit_code' => $exitCode,
-        'stdout' => trim($stdout),
-        'stderr' => trim($stderr),
-        'output' => trim($stdout . ($stderr === '' ? '' : "\n" . $stderr)),
-        'timed_out' => $timedOut,
-    ];
+    return processRunCommand($arguments, [
+        'cwd' => devConsoleRepositoryRoot(),
+        'env' => ['GIT_TERMINAL_PROMPT' => '0'],
+        'timeout' => $timeoutSeconds,
+    ]);
 }
 
 function gitAppendCommandLog(array &$log, array $result): void
 {
-    $log[] = '$ ' . (string)$result['command'];
+    $log[] = '$ ' . (string)$result['command_display'];
     $log[] = 'Exit code: ' . (string)$result['exit_code'];
     if (!empty($result['timed_out'])) {
         $log[] = 'Command timed out.';
@@ -269,7 +215,8 @@ function gitConnectRepository(array $configuration, string $projectId, string $r
 
     $gitVersion = gitRunFixedCommand(['git', '--version'], 5);
     gitAppendCommandLog($log, $gitVersion);
-    if ($gitVersion['exit_code'] !== 0) return gitActionResult(false, 'Git is not installed.', $log);
+    if (!empty($gitVersion['timed_out'])) return gitActionResult(false, 'Unable to determine whether Git is installed.', $log);
+    if ($gitVersion['exit_code'] !== 0) return gitActionResult(false, trim((string)$gitVersion['stdout']) !== '' ? 'Unable to determine whether Git is installed.' : 'Git is not installed.', $log);
 
     $path = gitProjectRepositoryPath($project);
     $createdBase = false;

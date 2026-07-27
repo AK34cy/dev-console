@@ -1,6 +1,7 @@
 <?php
 require __DIR__ . '/deployment.php';
 require __DIR__ . '/config.php';
+require __DIR__ . '/process.php';
 require __DIR__ . '/apache.php';
 require __DIR__ . '/projects.php';
 require __DIR__ . '/git.php';
@@ -13,20 +14,9 @@ $devConsoleRoot = dirname(__DIR__);
 
 function commandOutputOrNull(array $arguments, string $cwd): ?string
 {
-    $command = implode(' ', array_map('escapeshellarg', $arguments));
-    $pipes = [];
-    $process = @proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $cwd);
-    if (!is_resource($process)) {
-        return null;
-    }
+    $result = processRunCommand($arguments, ['cwd' => $cwd, 'timeout' => 5]);
 
-    fclose($pipes[0]);
-    $stdout = stream_get_contents($pipes[1]) ?: '';
-    stream_get_contents($pipes[2]);
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-
-    return proc_close($process) === 0 ? trim($stdout) : null;
+    return !empty($result['success']) ? trim((string)$result['stdout']) : null;
 }
 
 function processUptime(): string
@@ -41,7 +31,8 @@ function processUptime(): string
             }
         }
 
-        $ticksPerSecond = (int)trim((string)shell_exec('getconf CLK_TCK 2>/dev/null'));
+        $ticksResult = processRunCommand(['getconf', 'CLK_TCK'], ['timeout' => 2]);
+        $ticksPerSecond = !empty($ticksResult['success']) ? (int)trim((string)$ticksResult['stdout']) : 0;
         if ($bootTime !== null && $ticksPerSecond > 0) {
             $startedAt = $bootTime + ((int)$matches[1] / $ticksPerSecond);
             $seconds = max(0, time() - (int)$startedAt);
@@ -537,38 +528,16 @@ function sendJson(array $payload): void
 
 function runCommand(array $arguments, string $cwd): array
 {
-    $command = implode(' ', array_map('escapeshellarg', $arguments));
-    $descriptorSpec = [
-        0 => ['pipe', 'r'],
-        1 => ['pipe', 'w'],
-        2 => ['pipe', 'w'],
-    ];
-    $environment = getenv();
-    if (!is_array($environment)) {
-        $environment = [];
-    }
-    $environment['GIT_AUTHOR_NAME'] = 'IOVON Dev Console';
-    $environment['GIT_AUTHOR_EMAIL'] = 'iovon@iovon.com';
-    $environment['GIT_COMMITTER_NAME'] = 'IOVON Dev Console';
-    $environment['GIT_COMMITTER_EMAIL'] = 'iovon@iovon.com';
-    $process = proc_open($command, $descriptorSpec, $pipes, $cwd, $environment);
-
-    if (!is_resource($process)) {
-        throw new RuntimeException('Unable to run command.');
-    }
-
-    fclose($pipes[0]);
-    $stdout = stream_get_contents($pipes[1]) ?: '';
-    $stderr = stream_get_contents($pipes[2]) ?: '';
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    $exitCode = proc_close($process);
-
-    return [
-        'command' => implode(' ', $arguments),
-        'exit_code' => $exitCode,
-        'output' => trim($stdout . ($stderr === '' ? '' : "\n" . $stderr)),
-    ];
+    return processRunCommand($arguments, [
+        'cwd' => $cwd,
+        'env' => [
+            'GIT_AUTHOR_NAME' => 'IOVON Dev Console',
+            'GIT_AUTHOR_EMAIL' => 'iovon@iovon.com',
+            'GIT_COMMITTER_NAME' => 'IOVON Dev Console',
+            'GIT_COMMITTER_EMAIL' => 'iovon@iovon.com',
+        ],
+        'timeout' => 120,
+    ]);
 }
 
 function extractCommitHash(string $output): string

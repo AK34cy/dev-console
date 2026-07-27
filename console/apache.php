@@ -1,5 +1,7 @@
 <?php
 
+require_once __DIR__ . '/process.php';
+
 const DEV_CONSOLE_APACHE_SERVERNAME_CONF = 'iovon-dev-console-servername.conf';
 const DEV_CONSOLE_APACHE_SERVERNAME_CONTENT = "# Managed by IOVON Dev Console\nServerName localhost\n";
 
@@ -23,33 +25,11 @@ function apacheSystemctlPath(): string
 
 function apacheRunFixedCommand(array $arguments, array $environment = []): array
 {
-    $pipes = [];
-    $command = implode(' ', array_map('escapeshellarg', $arguments));
-    $process = @proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $environment ?: null);
-    if (!is_resource($process)) {
-        return [
-            'command' => implode(' ', $arguments),
-            'exit_code' => 127,
-            'stdout' => '',
-            'stderr' => 'Unable to start command.',
-            'output' => 'Unable to start command.',
-        ];
-    }
-
-    fclose($pipes[0]);
-    $stdout = stream_get_contents($pipes[1]) ?: '';
-    $stderr = stream_get_contents($pipes[2]) ?: '';
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    $exitCode = proc_close($process);
-
-    return [
-        'command' => implode(' ', $arguments),
-        'exit_code' => $exitCode,
-        'stdout' => trim($stdout),
-        'stderr' => trim($stderr),
-        'output' => trim($stdout . ($stderr === '' ? '' : "\n" . $stderr)),
-    ];
+    return processRunCommand($arguments, [
+        'cwd' => '/',
+        'env' => $environment,
+        'timeout' => 120,
+    ]);
 }
 
 function apacheSystemctlCommand(string $operation): array
@@ -57,11 +37,15 @@ function apacheSystemctlCommand(string $operation): array
     $systemctl = apacheSystemctlPath();
     if ($systemctl === '') {
         return [
-            'command' => 'systemctl ' . $operation . ' apache2',
+            'command_display' => processCommandDisplay(['systemctl', $operation, 'apache2']),
+            'command' => processCommandDisplay(['systemctl', $operation, 'apache2']),
             'exit_code' => 127,
             'stdout' => '',
             'stderr' => 'systemctl is not available.',
             'output' => 'systemctl is not available.',
+            'timed_out' => false,
+            'duration_ms' => 0,
+            'success' => false,
         ];
     }
 
@@ -213,7 +197,7 @@ function apacheFormatResult(bool $success, string $message, array $commands): ar
 {
     $output = [];
     foreach ($commands as $result) {
-        $output[] = '$ ' . (string)$result['command'];
+        $output[] = '$ ' . (string)($result['command_display'] ?? $result['command']);
         $output[] = 'Exit code: ' . (string)$result['exit_code'];
         $commandOutput = trim((string)$result['output']);
         if ($commandOutput !== '') {
