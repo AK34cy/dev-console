@@ -888,6 +888,8 @@ $productionDeploymentOverview = deploymentOverview('production');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
 $projects = devConsoleProjects($projectConfiguration);
 $apacheSites = devConsoleApacheSites();
+$managedApacheSites = array_values(array_filter($apacheSites, fn(array $site): bool => str_starts_with((string)($site['name'] ?? ''), 'dev-console-')));
+$otherApacheSites = array_values(array_filter($apacheSites, fn(array $site): bool => !str_starts_with((string)($site['name'] ?? ''), 'dev-console-')));
 $apacheState = apacheState();
 $projectFlash = (string)($_SESSION['project_flash'] ?? '');
 unset($_SESSION['project_flash']);
@@ -981,6 +983,11 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .codex-run-panel strong { color: var(--blue); }
     .codex-status { font-weight: 700; }
     .codex-console { background: #101820; border-radius: 6px; color: #dce7ec; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; line-height: 1.5; max-height: 360px; min-height: 180px; overflow: auto; padding: 14px; white-space: pre-wrap; }
+    .page-header { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; margin-bottom: 20px; }
+    .page-header h1 { margin-bottom: 8px; }
+    .page-context { color: var(--muted); min-width: 220px; text-align: right; }
+    .page-context strong { color: var(--ink); display: block; font-size: 16px; }
+    .page-context span { font-size: 13px; }
     .tab-nav { display: flex; gap: 8px; margin-top: 18px; }
     .tab-button { background: #e8f4f8; color: var(--blue); margin: 0; padding: 9px 14px; }
     .tab-button.active { background: var(--blue); color: #fff; }
@@ -1038,13 +1045,19 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .compact-table th, .compact-table td { border-top: 1px solid var(--line); padding: 4px 2px; text-align: left; }
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
     .compact-table th { color: var(--muted); width: 45%; }
-    .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) 390px; }
-    .settings-column { display: grid; gap: 14px; min-width: 0; }
+    .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr); }
+    .settings-layout > #apache { grid-column: 1 / -1; }
     .settings-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .settings-table th, .settings-table td { border-top: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }
     .settings-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
-    .settings-table td { overflow-wrap: anywhere; }
+    .settings-table td { overflow-wrap: normal; }
+    .table-scroll { overflow-x: auto; width: 100%; }
+    .table-scroll .settings-table { min-width: 680px; }
+    .table-scroll .settings-table.compact-sites { min-width: 560px; }
+    .site-path, .path-value { overflow-wrap: anywhere; word-break: normal; }
     #projects, #apache { scroll-margin-top: 18px; }
+    #createProject { scroll-margin-top: 18px; }
+    #createProject button[type="submit"] { width: 100%; }
     .subsection { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
     .project-form { display: grid; gap: 14px; }
     .project-form fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0; padding: 14px; }
@@ -1060,10 +1073,17 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .project-actions button { font-size: 13px; margin-top: 0; padding: 8px 11px; }
     .project-actions .danger { background: #a51d1d; }
     .project-actions .danger:disabled { background: #a51d1d; }
-    .environment-grid, .generated-preview { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .environment-block, .generated-item { background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 10px; }
-    .environment-block h4, .generated-item dt { color: var(--blue); font-size: 12px; margin: 0 0 6px; }
-    .generated-item dd { margin: 0; overflow-wrap: anywhere; }
+    .environment-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .environment-block, .generated-summary { background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 10px; }
+    .environment-block h4, .generated-summary h3 { color: var(--blue); font-size: 12px; margin: 0 0 8px; }
+    .generated-preview { display: grid; gap: 5px; margin: 0; }
+    .generated-preview div, .apache-summary-grid div { display: grid; gap: 8px; grid-template-columns: minmax(112px, .8fr) minmax(0, 1.2fr); }
+    .generated-preview dt, .apache-summary-grid dt { color: var(--muted); font-size: 11px; font-weight: 700; }
+    .generated-preview dd, .apache-summary-grid dd { margin: 0; overflow-wrap: anywhere; }
+    .apache-summary { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) auto; }
+    .apache-summary-grid { display: grid; gap: 6px 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
+    .apache-summary .form-actions { align-self: start; margin: 0; }
+    .apache-sites { display: grid; gap: 12px; margin-top: 16px; }
     .local-hosts { background: #edf7fb; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; overflow-wrap: anywhere; padding: 8px; }
     .success-message { background: #e9f7ef; border: 1px solid #b8dfc7; border-radius: 6px; color: var(--green); padding: 10px 12px; }
     .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
@@ -1073,19 +1093,39 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     @media (max-width: 900px) {
       .dashboard-columns { display: block; }
       .settings-layout { grid-template-columns: 1fr; }
+      .apache-summary { grid-template-columns: 1fr; }
+      .page-header { display: block; }
+      .page-context { margin-top: 12px; text-align: left; }
       main { margin-top: 18px; }
     }
-    @media (max-width: 520px) { .summary-grid, .resource-grid, .environment-grid, .generated-preview { grid-template-columns: 1fr; } }
+    @media (max-width: 520px) {
+      .summary-grid, .resource-grid, .environment-grid, .apache-summary-grid { grid-template-columns: 1fr; }
+      .generated-preview div, .apache-summary-grid div { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
 <main>
-  <h1>IOVON Dev Console</h1>
-  <p class="meta">Internal task creator. Run only on <code>127.0.0.1:8090</code>.</p>
-  <nav class="tab-nav" aria-label="Primary">
-    <button type="button" class="tab-button <?= $initialTab === 'dashboard' ? 'active' : '' ?>" data-tab-target="dashboard">Dashboard</button>
-    <button type="button" class="tab-button <?= $initialTab === 'settings' ? 'active' : '' ?>" data-tab-target="settings">Settings</button>
-  </nav>
+  <header class="page-header">
+    <div>
+      <h1>IOVON Dev Console</h1>
+      <p class="meta">Internal task creator. Run only on <code>127.0.0.1:8090</code>.</p>
+      <nav class="tab-nav" aria-label="Primary">
+        <button type="button" class="tab-button <?= $initialTab === 'dashboard' ? 'active' : '' ?>" data-tab-target="dashboard">Dashboard</button>
+        <button type="button" class="tab-button <?= $initialTab === 'settings' ? 'active' : '' ?>" data-tab-target="settings">Settings</button>
+      </nav>
+    </div>
+    <div class="page-context" aria-live="polite">
+      <div data-page-context="dashboard"<?= $initialTab === 'dashboard' ? '' : ' hidden' ?>>
+        <strong>Dashboard</strong>
+        <span>Tasks and deployments</span>
+      </div>
+      <div data-page-context="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
+        <strong>Settings</strong>
+        <span>Projects and server configuration</span>
+      </div>
+    </div>
+  </header>
 
   <section id="dashboardTab" data-tab-panel="dashboard"<?= $initialTab === 'dashboard' ? '' : ' hidden' ?>>
   <?php if ($error !== ''): ?>
@@ -1287,13 +1327,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   </section>
 
   <section id="settingsTab" data-tab-panel="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
-    <section class="panel">
-      <h2>Settings</h2>
-      <p class="meta">Project, environment, web server, deployment, and AI settings will be configured here later.</p>
-    </section>
-
     <div class="settings-layout">
-      <div class="settings-column">
       <section class="panel" id="projects">
         <h2>Projects</h2>
         <?php if ($projectFlash !== ''): ?>
@@ -1407,11 +1441,12 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   </form>
                 </div>
               </section>
-              <?php endforeach; ?>
+            <?php endforeach; ?>
           </div>
         <?php endif; ?>
+      </section>
 
-        <section class="subsection">
+      <section class="panel" id="createProject">
           <h2>Create Project</h2>
           <?php if (!empty($projectFormErrors)): ?>
             <section class="result-block error">
@@ -1441,45 +1476,45 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
               <p class="field-help">Main hostname, without https:// or a path.</p>
             </fieldset>
 
-            <dl class="generated-preview">
-              <div class="generated-item"><dt>Project ID</dt><dd id="projectIdPreview">-</dd></div>
-              <div class="generated-item"><dt>Repository</dt><dd id="repositoryPreview">-</dd></div>
-              <div class="generated-item"><dt>Production</dt><dd id="productionDomainPreview">-</dd></div>
-              <div class="generated-item"><dt>Preview</dt><dd id="previewDomainPreview">-</dd></div>
-              <div class="generated-item"><dt>Production directory</dt><dd id="productionDirectoryPreview">-</dd></div>
-              <div class="generated-item"><dt>Preview directory</dt><dd id="previewDirectoryPreview">-</dd></div>
-            </dl>
+            <section class="generated-summary">
+              <h3>Generated configuration</h3>
+              <dl class="generated-preview">
+                <div><dt>Project ID</dt><dd id="projectIdPreview">-</dd></div>
+                <div><dt>Repository</dt><dd id="repositoryPreview">-</dd></div>
+                <div><dt>Production</dt><dd id="productionDomainPreview">-</dd></div>
+                <div><dt>Preview</dt><dd id="previewDomainPreview">-</dd></div>
+                <div><dt>Production directory</dt><dd id="productionDirectoryPreview">-</dd></div>
+                <div><dt>Preview directory</dt><dd id="previewDirectoryPreview">-</dd></div>
+              </dl>
+            </section>
 
             <button type="submit">Create Project</button>
           </form>
-        </section>
       </section>
-      </div>
 
-      <div class="settings-column">
       <section class="panel" id="apache">
         <h2>Apache</h2>
-        <table class="compact-table">
-          <tbody>
-            <tr><th>Status</th><td><?= h(apacheStatusLabel($apacheState)) ?></td></tr>
-            <tr><th>Version</th><td><?= h(configuredDisplayValue($apacheState['version'] ?? '')) ?></td></tr>
-            <tr><th>Service enabled</th><td><?= h(apacheEnabledLabel($apacheState)) ?></td></tr>
-            <tr><th>Binary path</th><td><?= h(configuredDisplayValue($apacheState['binary_path'] ?? '')) ?></td></tr>
-          </tbody>
-        </table>
-        <form method="post" class="form-actions" action="/?tab=settings#apache" data-preserve-settings-scroll="1">
-          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-          <?php if (empty($apacheState['installed'])): ?>
-            <input type="hidden" name="action" value="install_apache">
-            <button type="submit">Install Apache</button>
-          <?php elseif (empty($apacheState['running'])): ?>
-            <input type="hidden" name="action" value="start_apache">
-            <button type="submit">Start Apache</button>
-          <?php else: ?>
-            <input type="hidden" name="action" value="restart_apache">
-            <button type="submit">Restart Apache</button>
-          <?php endif; ?>
-        </form>
+        <div class="apache-summary">
+          <dl class="apache-summary-grid">
+            <div><dt>Status</dt><dd><?= h(apacheStatusLabel($apacheState)) ?></dd></div>
+            <div><dt>Version</dt><dd><?= h(configuredDisplayValue($apacheState['version'] ?? '')) ?></dd></div>
+            <div><dt>Service enabled</dt><dd><?= h(apacheEnabledLabel($apacheState)) ?></dd></div>
+            <div><dt>Binary path</dt><dd><?= h(configuredDisplayValue($apacheState['binary_path'] ?? '')) ?></dd></div>
+          </dl>
+          <form method="post" class="form-actions" action="/?tab=settings#apache" data-preserve-settings-scroll="1">
+            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+            <?php if (empty($apacheState['installed'])): ?>
+              <input type="hidden" name="action" value="install_apache">
+              <button type="submit">Install Apache</button>
+            <?php elseif (empty($apacheState['running'])): ?>
+              <input type="hidden" name="action" value="start_apache">
+              <button type="submit">Start Apache</button>
+            <?php else: ?>
+              <input type="hidden" name="action" value="restart_apache">
+              <button type="submit">Restart Apache</button>
+            <?php endif; ?>
+          </form>
+        </div>
         <?php if ($apacheActionResult !== null): ?>
           <section class="result-block <?= !empty($apacheActionResult['success']) ? '' : 'error' ?>">
             <h2><?= !empty($apacheActionResult['success']) ? 'Apache action completed' : 'Apache action failed' ?></h2>
@@ -1491,40 +1526,71 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           </section>
         <?php endif; ?>
 
-        <section class="subsection">
-        <h2>Discovered Apache Sites</h2>
+        <section class="apache-sites">
+        <h2>Managed Sites</h2>
         <?php if (empty($apacheSites)): ?>
           <p class="meta">No Apache site configurations detected.</p>
+        <?php elseif (empty($managedApacheSites)): ?>
+          <p class="meta">No managed Apache sites found.</p>
         <?php else: ?>
-          <table class="settings-table">
+          <div class="table-scroll">
+          <table class="settings-table compact-sites">
             <thead>
               <tr>
                 <th>Site</th>
                 <th>Status</th>
                 <th>ServerName</th>
-                <th>Aliases</th>
                 <th>DocumentRoot</th>
               </tr>
             </thead>
             <tbody>
-              <?php foreach ($apacheSites as $site): ?>
+              <?php foreach ($managedApacheSites as $site): ?>
                 <tr>
                   <td>
                     <strong><?= h(configuredDisplayValue($site['name'] ?? '')) ?></strong><br>
-                    <span class="meta"><?= h(configuredDisplayValue($site['path'] ?? '')) ?></span>
+                    <span class="meta site-path"><?= h(configuredDisplayValue($site['path'] ?? '')) ?></span>
                   </td>
                   <td><span class="status-pill <?= !empty($site['enabled']) ? 'healthy' : 'warning' ?>"><?= !empty($site['enabled']) ? 'Enabled' : 'Disabled' ?></span></td>
                   <td><?= h(configuredDisplayValue($site['server_name'] ?? '')) ?></td>
-                  <td><?= h(configuredDisplayValue($site['server_aliases'] ?? [])) ?></td>
-                  <td><?= h(configuredDisplayValue($site['document_root'] ?? '')) ?></td>
+                  <td class="path-value"><?= h(configuredDisplayValue($site['document_root'] ?? '')) ?></td>
                 </tr>
               <?php endforeach; ?>
             </tbody>
           </table>
+          </div>
+        <?php endif; ?>
+        <?php if (!empty($otherApacheSites)): ?>
+          <details class="compact-details">
+            <summary>Other Apache sites (<?= h((string)count($otherApacheSites)) ?>)</summary>
+            <div class="table-scroll">
+            <table class="settings-table compact-sites">
+              <thead>
+                <tr>
+                  <th>Site</th>
+                  <th>Status</th>
+                  <th>ServerName</th>
+                  <th>DocumentRoot</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($otherApacheSites as $site): ?>
+                  <tr>
+                    <td>
+                      <strong><?= h(configuredDisplayValue($site['name'] ?? '')) ?></strong><br>
+                      <span class="meta site-path"><?= h(configuredDisplayValue($site['path'] ?? '')) ?></span>
+                    </td>
+                    <td><span class="status-pill <?= !empty($site['enabled']) ? 'healthy' : 'warning' ?>"><?= !empty($site['enabled']) ? 'Enabled' : 'Disabled' ?></span></td>
+                    <td><?= h(configuredDisplayValue($site['server_name'] ?? '')) ?></td>
+                    <td class="path-value"><?= h(configuredDisplayValue($site['document_root'] ?? '')) ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+            </div>
+          </details>
         <?php endif; ?>
         </section>
       </section>
-      </div>
     </div>
   </section>
 
@@ -1554,6 +1620,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   const activeTask = <?= json_encode($activeTaskId === '' ? 'None' : $activeTaskId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
   const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
+  const pageContexts = Array.from(document.querySelectorAll('[data-page-context]'));
   const scrollKey = 'iovon.devConsole.scrollPosition';
   const settingsScrollKey = 'iovon.devConsole.settingsScrollPosition';
   let scrollSaveFrame = null;
@@ -1563,6 +1630,9 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     });
     tabPanels.forEach((panel) => {
       panel.hidden = panel.dataset.tabPanel !== target;
+    });
+    pageContexts.forEach((context) => {
+      context.hidden = context.dataset.pageContext !== target;
     });
   };
   tabButtons.forEach((button) => {
