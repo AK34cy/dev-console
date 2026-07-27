@@ -114,7 +114,7 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
                 $project['git'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
             }
         }
-        if (isset($gitInput['bootstrap_status']) && is_scalar($gitInput['bootstrap_status']) && in_array((string)$gitInput['bootstrap_status'], ['not_started', 'remote_created', 'cloning', 'ready', 'failed'], true)) {
+        if (isset($gitInput['bootstrap_status']) && is_scalar($gitInput['bootstrap_status']) && in_array((string)$gitInput['bootstrap_status'], ['not_started', 'local_created', 'remote_created', 'ready', 'failed'], true)) {
             $project['git']['bootstrap_status'] = (string)$gitInput['bootstrap_status'];
         }
 

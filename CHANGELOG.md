@@ -34,6 +34,8 @@ Date:
 - Reliable GitHub CLI repository cloning
 - Retryable repository initialization
 - Compact GitHub and Apache Settings layout
+- GitHub CLI 2.4-compatible repository bootstrap
+- Local-first repository initialization and push
 - Preview and Production deployment binding
 - DNS and SSL support
 - UI refinement
