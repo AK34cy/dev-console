@@ -276,8 +276,9 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
     $expectedRemote = gitExpectedRemoteUrl($project, $githubConfiguration);
     $expectedClone = gitExpectedCloneUrl($project, $githubConfiguration);
     $githubConfigured = $githubConfiguration !== null && devConsoleGithubConfigured($githubConfiguration);
+    $bootstrapStatus = (string)($project['git']['bootstrap_status'] ?? 'not_started');
     $status = [
-        'status' => $githubConfigured ? 'NOT INITIALIZED' : 'GitHub not configured',
+        'status' => $githubConfigured && in_array($bootstrapStatus, ['remote_created', 'cloning', 'failed'], true) ? 'INITIALIZATION INCOMPLETE' : ($githubConfigured ? 'NOT INITIALIZED' : 'GitHub not configured'),
         'repository_path' => $path,
         'remote_url' => (string)($project['git']['remote_url'] ?? ''),
         'branch' => (string)($project['branch'] ?? ''),
@@ -340,6 +341,19 @@ function gitSetMetadata(array $project, array $metadata): array
     return $project;
 }
 
+function gitSetBootstrapState(array $configuration, array $project, string $status, array $metadata = []): bool
+{
+    $metadata['bootstrap_status'] = $status;
+    if ($status === 'failed') {
+        $metadata['last_error_at'] = date('c');
+    }
+    if ($status === 'ready') {
+        $metadata['last_error_at'] = null;
+    }
+
+    return gitSaveProject($configuration, gitSetMetadata($project, $metadata));
+}
+
 function gitSaveProject(array $configuration, array $project): bool
 {
     return devConsoleSaveProjectConfiguration(devConsoleReplaceProject($configuration, $project));
@@ -372,43 +386,17 @@ function gitRemoveDirectoryCreatedDuringAction(string $path): void
     @rmdir($path);
 }
 
-function gitCreateAskpassHelper(string $token): array
-{
-    $directory = sys_get_temp_dir() . '/dev-console-git-' . bin2hex(random_bytes(8));
-    if (!@mkdir($directory, 0700)) {
-        throw new RuntimeException('Unable to create temporary Git credential helper.');
-    }
-    $script = $directory . '/askpass.sh';
-    $contents = "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' 'x-access-token' ;;\n  *) printf '%s\\n' \"$GH_TOKEN\" ;;\nesac\n";
-    if (@file_put_contents($script, $contents, LOCK_EX) === false) {
-        @rmdir($directory);
-        throw new RuntimeException('Unable to write temporary Git credential helper.');
-    }
-    @chmod($script, 0700);
-
-    return ['directory' => $directory, 'script' => $script];
-}
-
-function gitRemoveAskpassHelper(array $helper): void
-{
-    $script = (string)($helper['script'] ?? '');
-    $directory = (string)($helper['directory'] ?? '');
-    if ($script !== '') @unlink($script);
-    if ($directory !== '') @rmdir($directory);
-}
-
 function gitRunAuthenticatedCommand(array $arguments, array $githubConfiguration, int $timeoutSeconds = 120): array
 {
-    // Git reads the token from this action's environment through a temporary askpass helper; the helper file contains no secret and is removed immediately.
-    $helper = gitCreateAskpassHelper((string)$githubConfiguration['token']);
-    try {
-        return gitRunFixedCommand($arguments, $timeoutSeconds, [
-            'GH_TOKEN' => (string)$githubConfiguration['token'],
-            'GIT_ASKPASS' => (string)$helper['script'],
-        ], false);
-    } finally {
-        gitRemoveAskpassHelper($helper);
+    // gh installs its Git credential helper for the service user; Git receives GH_TOKEN only in this process environment and the token is not written to the remote URL.
+    $setup = gitGithubRunCommand(['gh', 'auth', 'setup-git', '--hostname', 'github.com'], $githubConfiguration, 20);
+    if ($setup['exit_code'] !== 0) {
+        return $setup;
     }
+
+    return gitRunFixedCommand($arguments, $timeoutSeconds, [
+        'GH_TOKEN' => (string)$githubConfiguration['token'],
+    ], false);
 }
 
 function gitRepositoryFullName(array $project, array $githubConfiguration): string
@@ -426,6 +414,65 @@ function gitWriteInitialProjectFiles(array $project, string $path): void
     if (@file_put_contents(rtrim($path, '/') . '/.gitignore', $gitignore, LOCK_EX) === false) {
         throw new RuntimeException('Unable to write .gitignore.');
     }
+}
+
+function gitBootstrapMetadataMatches(array $project, array $githubConfiguration): bool
+{
+    $git = is_array($project['git'] ?? null) ? $project['git'] : [];
+    $status = (string)($git['bootstrap_status'] ?? 'not_started');
+    if (!in_array($status, ['remote_created', 'cloning', 'failed'], true)) {
+        return false;
+    }
+
+    return (string)($git['provider'] ?? '') === 'github'
+        && (string)($git['repository_owner'] ?? '') === (string)$githubConfiguration['account']
+        && (string)($git['repository_name'] ?? '') === (string)$project['id']
+        && (string)($git['remote_url'] ?? '') === gitExpectedRemoteUrl($project, $githubConfiguration)
+        && (string)($git['clone_url'] ?? '') === gitExpectedCloneUrl($project, $githubConfiguration);
+}
+
+function gitExpectedLocalRepositoryValid(array $project, array $githubConfiguration, array &$log = []): bool
+{
+    $path = gitProjectRepositoryPath($project);
+    if (!is_dir($path) || is_link($path)) {
+        return false;
+    }
+    $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
+    gitAppendCommandLog($log, $inside);
+    if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') {
+        return false;
+    }
+    $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5, [], false);
+    gitAppendCommandLog($log, $remote);
+    if ($remote['exit_code'] !== 0) {
+        return false;
+    }
+    $actualRemote = trim((string)$remote['stdout']);
+    return in_array($actualRemote, [gitExpectedCloneUrl($project, $githubConfiguration), gitExpectedRemoteUrl($project, $githubConfiguration)], true);
+}
+
+function gitWorkingTreeSafeForBootstrap(string $path): bool
+{
+    $status = gitRunFixedCommand(['git', '-C', $path, 'status', '--porcelain'], 5, [], false);
+    if ($status['exit_code'] !== 0) {
+        return false;
+    }
+    foreach (explode("\n", trim((string)$status['stdout'])) as $line) {
+        if ($line === '') {
+            continue;
+        }
+        $file = trim(substr($line, 3));
+        if (!in_array($file, ['README.md', '.gitignore'], true)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+function gitSaveBootstrapFailure(array $configuration, array $project, string $message): void
+{
+    gitSetBootstrapState($configuration, $project, 'failed', ['last_error_at' => date('c')]);
 }
 
 function gitInitializeRepository(array $configuration, string $projectId): array
@@ -446,11 +493,26 @@ function gitInitializeRepository(array $configuration, string $projectId): array
     }
     if ($error = gitValidateProjectRepositoryPath($project)) return gitActionResult(false, $error);
 
+    $fullName = gitRepositoryFullName($project, $github);
+    $remoteUrl = gitExpectedRemoteUrl($project, $github);
+    $cloneUrl = gitExpectedCloneUrl($project, $github);
     $path = gitProjectRepositoryPath($project);
-    if (is_dir($path . '/.git') || is_file($path . '/.git')) {
-        return gitActionResult(false, 'Local repository directory already contains a Git repository.');
+    $matchingBootstrapMetadata = gitBootstrapMetadataMatches($project, $github);
+
+    if ((string)($project['git']['bootstrap_status'] ?? '') === 'ready' && gitExpectedLocalRepositoryValid($project, $github, $log)) {
+        return gitActionResult(true, 'Repository is already initialized.', $log);
     }
-    if (file_exists($path) && (!is_dir($path) || is_link($path) || !gitDirectoryIsEmpty($path))) {
+    if (file_exists($path) && is_link($path)) {
+        return gitActionResult(false, 'Local repository path must not be a symlink.');
+    }
+    if (is_dir($path . '/.git') || is_file($path . '/.git')) {
+        if (!$matchingBootstrapMetadata && !gitProjectConnected($project)) {
+            return gitActionResult(false, 'Local repository directory already contains a Git repository that was not created by this bootstrap process.');
+        }
+        if (!gitExpectedLocalRepositoryValid($project, $github, $log)) {
+            return gitActionResult(false, 'Local repository exists but does not match the expected GitHub repository.', $log);
+        }
+    } elseif (file_exists($path) && (!is_dir($path) || !gitDirectoryIsEmpty($path))) {
         return gitActionResult(false, 'Local repository directory must be absent or empty before initialization.');
     }
     $removeLocalOnFailure = !file_exists($path);
@@ -458,45 +520,83 @@ function gitInitializeRepository(array $configuration, string $projectId): array
         return gitActionResult(false, 'Unable to prepare Git repository base directory.', $log);
     }
 
-    $fullName = gitRepositoryFullName($project, $github);
-    $remoteUrl = gitExpectedRemoteUrl($project, $github);
-    $cloneUrl = gitExpectedCloneUrl($project, $github);
     $view = gitGithubRunCommand(['gh', 'repo', 'view', $fullName, '--json', 'nameWithOwner,url,sshUrl,isPrivate'], $github, 20);
     gitAppendCommandLog($log, $view);
     if ($view['exit_code'] === 0) {
-        return gitActionResult(false, 'A repository with this name already exists in the configured GitHub account.', $log);
+        if (!$matchingBootstrapMetadata) {
+            return gitActionResult(false, 'A repository with this name already exists and was not created by this Dev Console bootstrap process.', $log);
+        }
+    } else {
+        $create = gitGithubRunCommand(['gh', 'repo', 'create', $fullName, '--private', '--add-readme'], $github, 60);
+        gitAppendCommandLog($log, $create);
+        if ($create['exit_code'] !== 0) {
+            return gitActionResult(false, 'GitHub repository creation failed.', $log);
+        }
+        $project = gitSetMetadata($project, [
+            'provider' => 'github',
+            'repository_owner' => (string)$github['account'],
+            'repository_name' => (string)$project['id'],
+            'remote_url' => $remoteUrl,
+            'clone_url' => $cloneUrl,
+            'remote_created_at' => date('c'),
+            'connected' => false,
+        ]);
+        if (!gitSetBootstrapState($configuration, $project, 'remote_created')) {
+            return gitActionResult(false, 'GitHub repository was created, but bootstrap metadata could not be saved.', $log);
+        }
+        $configuration = devConsoleLoadProjectConfiguration();
+        $project = devConsoleFindProjectById($configuration, $projectId) ?? $project;
     }
 
-    $create = gitGithubRunCommand(['gh', 'repo', 'create', $fullName, '--private', '--confirm'], $github, 60);
-    gitAppendCommandLog($log, $create);
-    if ($create['exit_code'] !== 0) {
-        return gitActionResult(false, 'GitHub repository creation failed.', $log);
-    }
-
-    $createdRemote = true;
     try {
-        $clone = gitRunAuthenticatedCommand(['git', 'clone', $cloneUrl, $path], $github, 120);
-        gitAppendCommandLog($log, $clone);
-        if ($clone['exit_code'] !== 0) {
-            throw new RuntimeException('Git clone failed.');
+        if (!gitExpectedLocalRepositoryValid($project, $github, $log)) {
+            if (!gitSetBootstrapState($configuration, $project, 'cloning')) {
+                throw new RuntimeException('Unable to save repository cloning state.');
+            }
+            $clone = gitGithubRunCommand(['gh', 'repo', 'clone', $fullName, $path], $github, 180);
+            gitAppendCommandLog($log, $clone);
+            if ($clone['exit_code'] !== 0) {
+                throw new RuntimeException('Git clone failed.');
+            }
+        }
+        $remoteSet = gitRunFixedCommand(['git', '-C', $path, 'remote', 'set-url', 'origin', $cloneUrl], 10, [], false);
+        gitAppendCommandLog($log, $remoteSet);
+        if ($remoteSet['exit_code'] !== 0) {
+            throw new RuntimeException('Unable to configure repository origin.');
+        }
+        if (gitCurrentBranch($path) !== 'main') {
+            throw new RuntimeException('Cloned repository branch is not main.');
+        }
+        if (!gitWorkingTreeSafeForBootstrap($path)) {
+            throw new RuntimeException('Local repository has uncommitted changes outside README.md and .gitignore.');
         }
         gitWriteInitialProjectFiles($project, $path);
         foreach ([
             ['git', '-C', $path, 'config', 'user.name', 'IOVON Dev Console'],
             ['git', '-C', $path, 'config', 'user.email', 'iovon@iovon.com'],
-            ['git', '-C', $path, 'add', '.'],
-            ['git', '-C', $path, 'commit', '-m', 'Initial commit'],
+            ['git', '-C', $path, 'add', 'README.md', '.gitignore'],
         ] as $arguments) {
             $result = gitRunFixedCommand($arguments, 20, [], false);
             gitAppendCommandLog($log, $result);
             if ($result['exit_code'] !== 0) {
-                throw new RuntimeException('Unable to create initial commit.');
+                throw new RuntimeException('Unable to prepare bootstrap commit.');
             }
+        }
+        $diff = gitRunFixedCommand(['git', '-C', $path, 'diff', '--cached', '--quiet'], 10, [], false);
+        gitAppendCommandLog($log, $diff);
+        if ($diff['exit_code'] === 1) {
+            $commit = gitRunFixedCommand(['git', '-C', $path, 'commit', '-m', 'Initialize project repository'], 30, [], false);
+            gitAppendCommandLog($log, $commit);
+            if ($commit['exit_code'] !== 0) {
+                throw new RuntimeException('Bootstrap commit failed.');
+            }
+        } elseif ($diff['exit_code'] !== 0) {
+            throw new RuntimeException('Unable to inspect staged bootstrap changes.');
         }
         $push = gitRunAuthenticatedCommand(['git', '-C', $path, 'push', '-u', 'origin', 'main'], $github, 120);
         gitAppendCommandLog($log, $push);
         if ($push['exit_code'] !== 0) {
-            throw new RuntimeException('Unable to push initial commit.');
+            throw new RuntimeException('Bootstrap push failed.');
         }
         $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
         gitAppendCommandLog($log, $inside);
@@ -507,9 +607,6 @@ function gitInitializeRepository(array $configuration, string $projectId): array
         gitAppendCommandLog($log, $remote);
         if ($remote['exit_code'] !== 0 || trim((string)$remote['stdout']) !== $cloneUrl) {
             throw new RuntimeException('Cloned repository origin does not match the GitHub repository.');
-        }
-        if (gitCurrentBranch($path) !== 'main') {
-            throw new RuntimeException('Cloned repository branch is not main.');
         }
 
         $project = gitSetMetadata($project, [
@@ -522,7 +619,7 @@ function gitInitializeRepository(array $configuration, string $projectId): array
             'connected_at' => date('c'),
             'created_at' => date('c'),
         ]);
-        if (!gitSaveProject($configuration, $project)) {
+        if (!gitSetBootstrapState($configuration, $project, 'ready')) {
             throw new RuntimeException('Unable to save Git metadata.');
         }
     } catch (Throwable $exception) {
@@ -530,9 +627,8 @@ function gitInitializeRepository(array $configuration, string $projectId): array
             gitRemoveDirectoryCreatedDuringAction($path);
             $log[] = 'Removed local repository created during this action.';
         }
-        if ($createdRemote) {
-            $log[] = 'GitHub repository was created and may require manual cleanup: ' . $fullName;
-        }
+        gitSaveBootstrapFailure($configuration, $project, $exception->getMessage());
+        $log[] = 'Repository initialization can be retried after the cause is fixed.';
         return gitActionResult(false, $exception->getMessage(), $log);
     }
 

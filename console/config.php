@@ -56,6 +56,9 @@ function devConsoleEmptyProject(): array
             'repository_name' => null,
             'remote_url' => null,
             'clone_url' => null,
+            'bootstrap_status' => 'not_started',
+            'remote_created_at' => null,
+            'last_error_at' => null,
             'connected' => false,
             'connected_at' => null,
             'created_at' => null,
@@ -105,11 +108,14 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
 
         $gitInput = is_array($projectInput['git'] ?? null) ? $projectInput['git'] : [];
         $project['git']['connected'] = !empty($gitInput['connected']);
-        foreach (['provider', 'repository_owner', 'repository_name', 'remote_url', 'clone_url', 'connected_at', 'created_at', 'last_fetch_at', 'last_pull_at'] as $field) {
+        foreach (['provider', 'repository_owner', 'repository_name', 'remote_url', 'clone_url', 'remote_created_at', 'last_error_at', 'connected_at', 'created_at', 'last_fetch_at', 'last_pull_at'] as $field) {
             if (array_key_exists($field, $gitInput)) {
                 $value = $gitInput[$field];
                 $project['git'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
             }
+        }
+        if (isset($gitInput['bootstrap_status']) && is_scalar($gitInput['bootstrap_status']) && in_array((string)$gitInput['bootstrap_status'], ['not_started', 'remote_created', 'cloning', 'ready', 'failed'], true)) {
+            $project['git']['bootstrap_status'] = (string)$gitInput['bootstrap_status'];
         }
 
         $provisioningInput = is_array($projectInput['provisioning'] ?? null) ? $projectInput['provisioning'] : [];

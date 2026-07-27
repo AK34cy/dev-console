@@ -1050,7 +1050,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
     .compact-table th { color: var(--muted); width: 45%; }
     .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr); }
-    .settings-layout > #github, .settings-layout > #apache { grid-column: 1 / -1; }
+    .settings-service-row { align-items: start; display: grid; gap: 14px; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .settings-service-row > .panel { margin-top: 0; }
     .settings-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .settings-table th, .settings-table td { border-top: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }
     .settings-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
@@ -1087,6 +1088,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .apache-summary { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) auto; }
     .apache-summary-grid { display: grid; gap: 6px 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
     .apache-summary .form-actions { align-self: start; margin: 0; }
+    .settings-service-row .apache-summary, .settings-service-row .apache-summary-grid { grid-template-columns: 1fr; }
     .apache-sites { display: grid; gap: 12px; margin-top: 16px; }
     .local-hosts { background: #edf7fb; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; overflow-wrap: anywhere; padding: 8px; }
     .success-message { background: #e9f7ef; border: 1px solid #b8dfc7; border-radius: 6px; color: var(--green); padding: 10px 12px; }
@@ -1096,7 +1098,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .process-table td:last-child { overflow-wrap: anywhere; }
     @media (max-width: 900px) {
       .dashboard-columns { display: block; }
-      .settings-layout { grid-template-columns: 1fr; }
+      .settings-layout, .settings-service-row { grid-template-columns: 1fr; }
       .apache-summary { grid-template-columns: 1fr; }
       .page-header { display: block; }
       .page-context { margin-top: 12px; text-align: left; }
@@ -1380,7 +1382,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
                 $gitStatus = $gitStatuses[(string)($project['id'] ?? '')] ?? gitStatus($project, $githubConfiguration);
                 $gitConnected = gitProjectConnected($project);
-                $gitStatusClass = $gitStatus['status'] === 'CONNECTED' ? 'healthy' : (in_array($gitStatus['status'], ['GitHub not configured', 'NOT INITIALIZED', 'Changes present'], true) ? 'warning' : 'error');
+                $gitStatusClass = $gitStatus['status'] === 'CONNECTED' ? 'healthy' : (in_array($gitStatus['status'], ['GitHub not configured', 'NOT INITIALIZED', 'INITIALIZATION INCOMPLETE', 'Changes present'], true) ? 'warning' : 'error');
               ?>
               <section class="project-item">
                 <div class="project-item-header">
@@ -1443,7 +1445,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                       <tr><th>Remote</th><td><?= h(configuredDisplayValue($gitStatus['remote_url'] ?? '')) ?></td></tr>
                       <tr><th>Branch</th><td><?= h(configuredDisplayValue($gitStatus['branch'] ?? '')) ?></td></tr>
                       <?php if ($gitConnected): ?>
-                        <tr><th>Last commit</th><td><?= h(configuredDisplayValue($gitStatus['subject'] ?? '')) ?><?= ($gitStatus['commit'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$gitStatus['commit']) . '</span>' : '' ?></td></tr>
+                        <tr><th>Commit</th><td><?= h(configuredDisplayValue($gitStatus['subject'] ?? '')) ?><?= ($gitStatus['commit'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$gitStatus['commit']) . '</span>' : '' ?></td></tr>
                         <tr><th>Working tree</th><td><?= h(configuredDisplayValue($gitStatus['working_tree'] ?? '')) ?></td></tr>
                         <tr><th>Ahead / Behind</th><td><?= h(($gitStatus['ahead'] ?? null) === null || ($gitStatus['behind'] ?? null) === null ? 'Not available' : ((string)$gitStatus['ahead'] . ' / ' . (string)$gitStatus['behind'])) ?></td></tr>
                         <tr><th>Last fetch</th><td><?= h(configuredDisplayValue($gitStatus['last_fetch_at'] ?? '')) ?></td></tr>
@@ -1453,12 +1455,12 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   </table>
                   <?php if ($gitStatus['status'] === 'GitHub not configured'): ?>
                     <p class="field-help">Configure GitHub in Settings to create this repository.</p>
-                  <?php elseif ($gitStatus['status'] === 'NOT INITIALIZED'): ?>
+                  <?php elseif (in_array($gitStatus['status'], ['NOT INITIALIZED', 'INITIALIZATION INCOMPLETE'], true)): ?>
                     <form method="post" class="project-form" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
                       <input type="hidden" name="action" value="initialize_repository">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                      <button type="submit"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub in Settings before initializing repositories."' ?>>Initialize Repository</button>
+                      <button type="submit"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub in Settings before initializing repositories."' ?>><?= $gitStatus['status'] === 'INITIALIZATION INCOMPLETE' ? 'Retry Initialization' : 'Initialize Repository' ?></button>
                     </form>
                   <?php elseif ($gitConnected): ?>
                     <div class="project-actions">
@@ -1560,6 +1562,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           </form>
       </section>
 
+      <div class="settings-service-row">
       <section class="panel" id="github">
         <h2>GitHub</h2>
         <?php if ($githubActionResult !== null): ?>
@@ -1616,8 +1619,9 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             <p class="field-help">GitHub owner where Dev Console will create repositories.</p>
 
             <label for="github_token">Personal Access Token</label>
-            <input id="github_token" name="github_token" type="password" maxlength="4096" placeholder="github_pat_..." autocomplete="new-password"<?= $githubConfigured ? '' : ' required' ?>>
+            <input id="github_token" name="github_token" type="password" maxlength="4096" placeholder="github_pat_..." autocomplete="new-password" spellcheck="false" autocorrect="off" autocapitalize="off"<?= $githubConfigured ? '' : ' required' ?>>
             <p class="field-help">Stored only in the server's local configuration. Leave empty to keep the current token.</p>
+            <p class="field-help">Recommended token: Classic Personal Access Token with repo scope.</p>
             <p class="field-help"><a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer">Create GitHub Personal Access Token</a></p>
           </fieldset>
           <button type="submit"><?= $githubConfigured ? 'Update configuration' : 'Save and test' ?></button>
@@ -1738,6 +1742,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
         <?php endif; ?>
         </section>
       </section>
+      </div>
     </div>
   </section>
 

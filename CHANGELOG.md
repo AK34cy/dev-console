@@ -31,6 +31,9 @@ Date:
 - Automatic GitHub repository creation
 - Secure token-based Git operations
 - Removed manual existing-repository connection flow
+- Reliable GitHub CLI repository cloning
+- Retryable repository initialization
+- Compact GitHub and Apache Settings layout
 - Preview and Production deployment binding
 - DNS and SSL support
 - UI refinement
