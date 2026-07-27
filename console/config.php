@@ -55,6 +55,7 @@ function devConsoleEmptyProject(): array
             'repository_owner' => null,
             'repository_name' => null,
             'remote_url' => null,
+            'clone_url' => null,
             'connected' => false,
             'connected_at' => null,
             'created_at' => null,
@@ -104,7 +105,7 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
 
         $gitInput = is_array($projectInput['git'] ?? null) ? $projectInput['git'] : [];
         $project['git']['connected'] = !empty($gitInput['connected']);
-        foreach (['provider', 'repository_owner', 'repository_name', 'remote_url', 'connected_at', 'created_at', 'last_fetch_at', 'last_pull_at'] as $field) {
+        foreach (['provider', 'repository_owner', 'repository_name', 'remote_url', 'clone_url', 'connected_at', 'created_at', 'last_fetch_at', 'last_pull_at'] as $field) {
             if (array_key_exists($field, $gitInput)) {
                 $value = $gitInput[$field];
                 $project['git'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
@@ -214,7 +215,7 @@ function devConsoleNormalizeGithubConfiguration(array $configuration): array
             $normalized[$field] = trim((string)$configuration[$field]);
         }
     }
-    if (!in_array($normalized['default_visibility'], ['private', 'public'], true)) {
+    if ($normalized['default_visibility'] !== 'private') {
         $normalized['default_visibility'] = 'private';
     }
     $normalized['verified'] = !empty($configuration['verified']);
@@ -316,17 +317,14 @@ function devConsoleValidateGithubToken(string $token, bool $required): array
 
 function devConsoleValidateGithubVisibility(string $visibility): array
 {
-    return in_array($visibility, ['private', 'public'], true) ? [] : ['Default repository visibility must be private or public.'];
+    return $visibility === 'private' ? [] : ['Repository visibility is always private.'];
 }
 
 function devConsoleBuildGithubConfiguration(array $input, array $existing): array
 {
     $account = devConsoleScalarInput($input, 'github_account');
     $tokenInput = is_scalar($input['github_token'] ?? null) ? trim((string)$input['github_token']) : '';
-    $visibility = devConsoleScalarInput($input, 'github_visibility');
-    if ($visibility === '') {
-        $visibility = 'private';
-    }
+    $visibility = 'private';
 
     $requiresToken = !devConsoleGithubConfigured($existing);
     $errors = array_merge(

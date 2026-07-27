@@ -35,6 +35,15 @@ function gitAppendCommandLog(array &$log, array $result): void
     }
 }
 
+function gitAppendCommandSummary(array &$log, array $result): void
+{
+    $log[] = '$ ' . (string)$result['command_display'];
+    $log[] = 'Exit code: ' . (string)$result['exit_code'];
+    if (!empty($result['timed_out'])) {
+        $log[] = 'Command timed out.';
+    }
+}
+
 function gitGhInstalled(): bool
 {
     $result = gitRunFixedCommand(['gh', '--version'], 5, [], false);
@@ -110,7 +119,7 @@ function gitGithubRemoveConfiguration(): array
     return gitActionResult(true, 'GitHub configuration removed. Local repositories and remote GitHub repositories were not changed.');
 }
 
-function gitGithubTestConnection(): array
+function gitGithubVerifyConnection(bool $persist): array
 {
     $github = devConsoleLoadGithubConfiguration();
     $log = [];
@@ -121,8 +130,9 @@ function gitGithubTestConnection(): array
         return gitActionResult(false, 'GitHub CLI is not installed.');
     }
 
+    $log[] = 'GitHub CLI detected';
     $user = gitGithubRunCommand(['gh', 'api', 'user'], $github, 20);
-    gitAppendCommandLog($log, $user);
+    gitAppendCommandSummary($log, $user);
     if ($user['exit_code'] !== 0) {
         return gitActionResult(false, 'GitHub authentication failed.', $log);
     }
@@ -135,20 +145,31 @@ function gitGithubTestConnection(): array
     $account = (string)$github['account'];
     if (strcasecmp($account, $authenticatedLogin) !== 0) {
         $organization = gitGithubRunCommand(['gh', 'api', 'orgs/' . $account], $github, 20);
-        gitAppendCommandLog($log, $organization);
+        gitAppendCommandSummary($log, $organization);
         if ($organization['exit_code'] !== 0) {
             return gitActionResult(false, 'The configured account is not the authenticated user or an accessible organization.', $log);
         }
     }
 
-    $github['verified'] = true;
-    $github['last_verified_at'] = date('c');
-    $github['authenticated_login'] = $authenticatedLogin;
-    if (!devConsoleSaveGithubConfiguration($github)) {
-        return gitActionResult(false, 'GitHub connection verified, but the verification metadata could not be saved.', $log);
+    $log[] = 'Authentication successful';
+    $log[] = 'Login: ' . $authenticatedLogin;
+    $log[] = 'Account: ' . $account;
+
+    if ($persist) {
+        $github['verified'] = true;
+        $github['last_verified_at'] = date('c');
+        $github['authenticated_login'] = $authenticatedLogin;
+        if (!devConsoleSaveGithubConfiguration($github)) {
+            return gitActionResult(false, 'GitHub connection verified, but the verification metadata could not be saved.', $log);
+        }
     }
 
     return gitActionResult(true, 'GitHub connection verified for ' . $account . ' as ' . $authenticatedLogin . '.', $log);
+}
+
+function gitGithubTestConnection(): array
+{
+    return gitGithubVerifyConnection(true);
 }
 
 function gitProjectRepositoryPath(array $project): string
@@ -162,6 +183,23 @@ function gitExpectedRepositoryPath(array $project): string
 }
 
 function gitExpectedRemoteUrl(array $project, ?array $githubConfiguration = null): string
+{
+    $owner = (string)($project['git']['repository_owner'] ?? '');
+    if ($owner === '' && $githubConfiguration !== null) {
+        $owner = (string)($githubConfiguration['account'] ?? '');
+    }
+    $name = (string)($project['git']['repository_name'] ?? '');
+    if ($name === '') {
+        $name = (string)($project['id'] ?? '');
+    }
+    if ($owner === '' || $name === '') {
+        return '';
+    }
+
+    return 'git@github.com:' . $owner . '/' . $name . '.git';
+}
+
+function gitExpectedCloneUrl(array $project, ?array $githubConfiguration = null): string
 {
     $owner = (string)($project['git']['repository_owner'] ?? '');
     if ($owner === '' && $githubConfiguration !== null) {
@@ -236,9 +274,10 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
 {
     $path = gitProjectRepositoryPath($project);
     $expectedRemote = gitExpectedRemoteUrl($project, $githubConfiguration);
+    $expectedClone = gitExpectedCloneUrl($project, $githubConfiguration);
     $githubConfigured = $githubConfiguration !== null && devConsoleGithubConfigured($githubConfiguration);
     $status = [
-        'status' => $githubConfigured ? 'Repository not created' : 'GitHub not configured',
+        'status' => $githubConfigured ? 'NOT INITIALIZED' : 'GitHub not configured',
         'repository_path' => $path,
         'remote_url' => (string)($project['git']['remote_url'] ?? ''),
         'branch' => (string)($project['branch'] ?? ''),
@@ -271,11 +310,11 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
         return $status;
     }
     $actualRemote = trim((string)$remote['stdout']);
-    $status['remote_url'] = $actualRemote;
-    if ($expectedRemote === '' || $actualRemote !== $expectedRemote || (string)($project['git']['remote_url'] ?? '') !== $expectedRemote) {
+    if ($expectedClone === '' || $actualRemote !== $expectedClone || (string)($project['git']['clone_url'] ?? '') !== $expectedClone || (string)($project['git']['remote_url'] ?? '') !== $expectedRemote) {
         $status['status'] = 'Remote unavailable';
         return $status;
     }
+    $status['remote_url'] = $expectedRemote;
 
     $commit = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--short', 'HEAD'], 5);
     if ($commit['exit_code'] === 0) $status['commit'] = trim((string)$commit['stdout']);
@@ -284,7 +323,7 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
     $porcelain = gitRunFixedCommand(['git', '-C', $path, 'status', '--porcelain'], 5);
     $dirty = $porcelain['exit_code'] === 0 && trim((string)$porcelain['stdout']) !== '';
     $status['working_tree'] = $dirty ? 'Dirty' : 'Clean';
-    $status['status'] = $dirty ? 'Changes present' : 'Ready';
+    $status['status'] = $dirty ? 'Changes present' : 'CONNECTED';
 
     $counts = gitRunFixedCommand(['git', '-C', $path, 'rev-list', '--left-right', '--count', 'HEAD...origin/' . (string)$project['branch']], 5);
     if ($counts['exit_code'] === 0 && preg_match('/^(\d+)\s+(\d+)$/', trim((string)$counts['stdout']), $matches) === 1) {
@@ -377,87 +416,87 @@ function gitRepositoryFullName(array $project, array $githubConfiguration): stri
     return (string)$githubConfiguration['account'] . '/' . (string)$project['id'];
 }
 
-function gitCreateInitialRepositoryCommit(array $project, array $githubConfiguration, string $remoteUrl, array &$log): void
+function gitWriteInitialProjectFiles(array $project, string $path): void
 {
-    $temporary = sys_get_temp_dir() . '/dev-console-repo-bootstrap-' . bin2hex(random_bytes(8));
-    if (!@mkdir($temporary, 0700)) {
-        throw new RuntimeException('Unable to create temporary repository bootstrap directory.');
+    $readme = '# ' . (string)$project['name'] . "\n\nCreated by IOVON Dev Console.\n\nRepository initialized automatically.\n";
+    $gitignore = ".env\n.env.*\nvendor/\nnode_modules/\n.DS_Store\n";
+    if (@file_put_contents(rtrim($path, '/') . '/README.md', $readme, LOCK_EX) === false) {
+        throw new RuntimeException('Unable to write README.md.');
     }
-    try {
-        $readme = '# ' . (string)$project['name'] . "\n\nCreated by IOVON Dev Console.\n";
-        if (@file_put_contents($temporary . '/README.md', $readme, LOCK_EX) === false) {
-            throw new RuntimeException('Unable to write bootstrap README.');
-        }
-        foreach ([
-            ['git', '-C', $temporary, 'init', '--initial-branch=main'],
-            ['git', '-C', $temporary, 'config', 'user.name', 'IOVON Dev Console'],
-            ['git', '-C', $temporary, 'config', 'user.email', 'iovon@iovon.com'],
-            ['git', '-C', $temporary, 'add', 'README.md'],
-            ['git', '-C', $temporary, 'commit', '-m', 'Initial commit'],
-            ['git', '-C', $temporary, 'remote', 'add', 'origin', $remoteUrl],
-        ] as $arguments) {
-            $result = gitRunFixedCommand($arguments, 20, [], false);
-            gitAppendCommandLog($log, $result);
-            if ($result['exit_code'] !== 0) {
-                throw new RuntimeException('Unable to initialize GitHub repository.');
-            }
-        }
-        $push = gitRunAuthenticatedCommand(['git', '-C', $temporary, 'push', '-u', 'origin', 'main'], $githubConfiguration, 120);
-        gitAppendCommandLog($log, $push);
-        if ($push['exit_code'] !== 0) {
-            throw new RuntimeException('Unable to push initial repository contents.');
-        }
-    } finally {
-        gitRemoveDirectoryCreatedDuringAction($temporary);
+    if (@file_put_contents(rtrim($path, '/') . '/.gitignore', $gitignore, LOCK_EX) === false) {
+        throw new RuntimeException('Unable to write .gitignore.');
     }
 }
 
-function gitCreateProjectRepository(array $configuration, string $projectId): array
+function gitInitializeRepository(array $configuration, string $projectId): array
 {
     $project = devConsoleFindProjectById($configuration, $projectId);
     if ($project === null) return gitActionResult(false, 'Project not found.');
     $github = devConsoleLoadGithubConfiguration();
     $log = [];
-    if (!devConsoleGithubConfigured($github) || empty($github['verified'])) {
-        return gitActionResult(false, 'GitHub must be configured and verified before creating repositories.');
+    if (!devConsoleGithubConfigured($github)) {
+        return gitActionResult(false, 'GitHub must be configured before initializing repositories.');
     }
     if (!gitGhInstalled()) {
         return gitActionResult(false, 'GitHub CLI is not installed.');
     }
+    $verification = gitGithubVerifyConnection(false);
+    if (empty($verification['success'])) {
+        return gitActionResult(false, 'GitHub authentication is not valid: ' . (string)$verification['message'], [(string)($verification['output'] ?? '')]);
+    }
     if ($error = gitValidateProjectRepositoryPath($project)) return gitActionResult(false, $error);
 
     $path = gitProjectRepositoryPath($project);
-    if (file_exists($path)) {
-        return gitActionResult(false, 'Local repository path already exists and cannot be bootstrapped automatically.');
+    if (is_dir($path . '/.git') || is_file($path . '/.git')) {
+        return gitActionResult(false, 'Local repository directory already contains a Git repository.');
     }
+    if (file_exists($path) && (!is_dir($path) || is_link($path) || !gitDirectoryIsEmpty($path))) {
+        return gitActionResult(false, 'Local repository directory must be absent or empty before initialization.');
+    }
+    $removeLocalOnFailure = !file_exists($path);
     if (!gitEnsureRepositoryBase($log)) {
         return gitActionResult(false, 'Unable to prepare Git repository base directory.', $log);
     }
 
     $fullName = gitRepositoryFullName($project, $github);
     $remoteUrl = gitExpectedRemoteUrl($project, $github);
+    $cloneUrl = gitExpectedCloneUrl($project, $github);
     $view = gitGithubRunCommand(['gh', 'repo', 'view', $fullName, '--json', 'nameWithOwner,url,sshUrl,isPrivate'], $github, 20);
     gitAppendCommandLog($log, $view);
     if ($view['exit_code'] === 0) {
         return gitActionResult(false, 'A repository with this name already exists in the configured GitHub account.', $log);
     }
 
-    $visibilityFlag = (string)$github['default_visibility'] === 'public' ? '--public' : '--private';
-    $create = gitGithubRunCommand(['gh', 'repo', 'create', $fullName, $visibilityFlag, '--confirm'], $github, 60);
+    $create = gitGithubRunCommand(['gh', 'repo', 'create', $fullName, '--private', '--confirm'], $github, 60);
     gitAppendCommandLog($log, $create);
     if ($create['exit_code'] !== 0) {
         return gitActionResult(false, 'GitHub repository creation failed.', $log);
     }
 
     $createdRemote = true;
-    $createdLocal = false;
     try {
-        gitCreateInitialRepositoryCommit($project, $github, $remoteUrl, $log);
-        $createdLocal = true;
-        $clone = gitRunAuthenticatedCommand(['git', 'clone', '--branch', 'main', '--single-branch', $remoteUrl, $path], $github, 120);
+        $clone = gitRunAuthenticatedCommand(['git', 'clone', $cloneUrl, $path], $github, 120);
         gitAppendCommandLog($log, $clone);
         if ($clone['exit_code'] !== 0) {
             throw new RuntimeException('Git clone failed.');
+        }
+        gitWriteInitialProjectFiles($project, $path);
+        foreach ([
+            ['git', '-C', $path, 'config', 'user.name', 'IOVON Dev Console'],
+            ['git', '-C', $path, 'config', 'user.email', 'iovon@iovon.com'],
+            ['git', '-C', $path, 'add', '.'],
+            ['git', '-C', $path, 'commit', '-m', 'Initial commit'],
+        ] as $arguments) {
+            $result = gitRunFixedCommand($arguments, 20, [], false);
+            gitAppendCommandLog($log, $result);
+            if ($result['exit_code'] !== 0) {
+                throw new RuntimeException('Unable to create initial commit.');
+            }
+        }
+        $push = gitRunAuthenticatedCommand(['git', '-C', $path, 'push', '-u', 'origin', 'main'], $github, 120);
+        gitAppendCommandLog($log, $push);
+        if ($push['exit_code'] !== 0) {
+            throw new RuntimeException('Unable to push initial commit.');
         }
         $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
         gitAppendCommandLog($log, $inside);
@@ -466,7 +505,7 @@ function gitCreateProjectRepository(array $configuration, string $projectId): ar
         }
         $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5, [], false);
         gitAppendCommandLog($log, $remote);
-        if ($remote['exit_code'] !== 0 || trim((string)$remote['stdout']) !== $remoteUrl) {
+        if ($remote['exit_code'] !== 0 || trim((string)$remote['stdout']) !== $cloneUrl) {
             throw new RuntimeException('Cloned repository origin does not match the GitHub repository.');
         }
         if (gitCurrentBranch($path) !== 'main') {
@@ -478,6 +517,7 @@ function gitCreateProjectRepository(array $configuration, string $projectId): ar
             'repository_owner' => (string)$github['account'],
             'repository_name' => (string)$project['id'],
             'remote_url' => $remoteUrl,
+            'clone_url' => $cloneUrl,
             'connected' => true,
             'connected_at' => date('c'),
             'created_at' => date('c'),
@@ -486,22 +526,17 @@ function gitCreateProjectRepository(array $configuration, string $projectId): ar
             throw new RuntimeException('Unable to save Git metadata.');
         }
     } catch (Throwable $exception) {
-        if ($createdLocal && is_dir($path) && !is_link($path)) {
+        if ($removeLocalOnFailure && is_dir($path) && !is_link($path)) {
             gitRemoveDirectoryCreatedDuringAction($path);
             $log[] = 'Removed local repository created during this action.';
         }
         if ($createdRemote) {
-            $delete = gitGithubRunCommand(['gh', 'repo', 'delete', $fullName, '--yes'], $github, 60);
-            gitAppendCommandLog($log, $delete);
-            if ($delete['exit_code'] !== 0) {
-                return gitActionResult(false, $exception->getMessage() . ' GitHub repository rollback failed; manual cleanup may be required.', $log);
-            }
-            $log[] = 'Deleted GitHub repository created during this action.';
+            $log[] = 'GitHub repository was created and may require manual cleanup: ' . $fullName;
         }
         return gitActionResult(false, $exception->getMessage(), $log);
     }
 
-    return gitActionResult(true, 'GitHub repository created and cloned.', $log);
+    return gitActionResult(true, 'Repository initialized.', $log);
 }
 
 function gitAssertConnectedRepository(array $project, array $githubConfiguration): ?string
@@ -512,11 +547,13 @@ function gitAssertConnectedRepository(array $project, array $githubConfiguration
     $path = gitProjectRepositoryPath($project);
     if (!is_dir($path) || is_link($path)) return 'Repository is missing or invalid.';
     $expectedRemote = gitExpectedRemoteUrl($project, $githubConfiguration);
+    $expectedClone = gitExpectedCloneUrl($project, $githubConfiguration);
     if ((string)($project['git']['remote_url'] ?? '') !== $expectedRemote) return 'Repository metadata does not match the configured GitHub account.';
+    if ((string)($project['git']['clone_url'] ?? '') !== $expectedClone) return 'Repository clone metadata does not match the configured GitHub account.';
     $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
     if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') return 'Repository is not a valid Git working tree.';
     $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5, [], false);
-    if ($remote['exit_code'] !== 0 || trim((string)$remote['stdout']) !== $expectedRemote) return 'Repository origin no longer matches the GitHub repository.';
+    if ($remote['exit_code'] !== 0 || trim((string)$remote['stdout']) !== $expectedClone) return 'Repository origin no longer matches the GitHub repository.';
     return null;
 }
 
