@@ -17,6 +17,24 @@ function devConsoleProjectsConfigPath(): string
     return devConsoleRepositoryRoot() . '/config/projects.json';
 }
 
+function devConsoleGithubConfigPath(): string
+{
+    return devConsoleRepositoryRoot() . '/config/github.json';
+}
+
+function devConsoleDefaultGithubConfiguration(): array
+{
+    return [
+        'account' => '',
+        'token' => '',
+        'default_visibility' => 'private',
+        'configured_at' => null,
+        'verified' => false,
+        'last_verified_at' => null,
+        'authenticated_login' => null,
+    ];
+}
+
 function devConsoleEmptyProject(): array
 {
     return [
@@ -33,9 +51,13 @@ function devConsoleEmptyProject(): array
             'path' => '',
         ],
         'git' => [
+            'provider' => null,
+            'repository_owner' => null,
+            'repository_name' => null,
             'remote_url' => null,
             'connected' => false,
             'connected_at' => null,
+            'created_at' => null,
             'last_fetch_at' => null,
             'last_pull_at' => null,
         ],
@@ -82,7 +104,7 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
 
         $gitInput = is_array($projectInput['git'] ?? null) ? $projectInput['git'] : [];
         $project['git']['connected'] = !empty($gitInput['connected']);
-        foreach (['remote_url', 'connected_at', 'last_fetch_at', 'last_pull_at'] as $field) {
+        foreach (['provider', 'repository_owner', 'repository_name', 'remote_url', 'connected_at', 'created_at', 'last_fetch_at', 'last_pull_at'] as $field) {
             if (array_key_exists($field, $gitInput)) {
                 $value = $gitInput[$field];
                 $project['git'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
@@ -182,6 +204,151 @@ function devConsoleSaveProjectConfiguration(array $configuration): bool
     }
 
     return true;
+}
+
+function devConsoleNormalizeGithubConfiguration(array $configuration): array
+{
+    $normalized = devConsoleDefaultGithubConfiguration();
+    foreach (['account', 'token', 'default_visibility'] as $field) {
+        if (isset($configuration[$field]) && is_scalar($configuration[$field])) {
+            $normalized[$field] = trim((string)$configuration[$field]);
+        }
+    }
+    if (!in_array($normalized['default_visibility'], ['private', 'public'], true)) {
+        $normalized['default_visibility'] = 'private';
+    }
+    $normalized['verified'] = !empty($configuration['verified']);
+    foreach (['configured_at', 'last_verified_at', 'authenticated_login'] as $field) {
+        if (array_key_exists($field, $configuration)) {
+            $value = $configuration[$field];
+            $normalized[$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
+        }
+    }
+
+    return $normalized;
+}
+
+function devConsoleLoadGithubConfiguration(): array
+{
+    $path = devConsoleGithubConfigPath();
+    $defaultConfiguration = devConsoleDefaultGithubConfiguration();
+    if (!is_file($path) || !is_readable($path)) {
+        return $defaultConfiguration;
+    }
+
+    $contents = @file_get_contents($path);
+    if ($contents === false) {
+        return $defaultConfiguration + ['_load_error' => 'Unable to read GitHub configuration.'];
+    }
+
+    $decoded = json_decode($contents, true);
+    if (!is_array($decoded)) {
+        return $defaultConfiguration + ['_load_error' => 'GitHub configuration contains invalid JSON.'];
+    }
+
+    return devConsoleNormalizeGithubConfiguration($decoded);
+}
+
+function devConsoleSaveGithubConfiguration(array $configuration): bool
+{
+    $path = devConsoleGithubConfigPath();
+    $configDirectory = dirname($path);
+    if (!is_dir($configDirectory) && !@mkdir($configDirectory, 0750, true) && !is_dir($configDirectory)) {
+        return false;
+    }
+
+    $normalized = devConsoleNormalizeGithubConfiguration($configuration);
+    $json = json_encode($normalized, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        return false;
+    }
+
+    $temporaryPath = $configDirectory . '/github.json.tmp.' . bin2hex(random_bytes(8));
+    if (@file_put_contents($temporaryPath, $json . "\n", LOCK_EX) === false) {
+        return false;
+    }
+
+    @chmod($temporaryPath, 0600);
+    if (!@rename($temporaryPath, $path)) {
+        @unlink($temporaryPath);
+        return false;
+    }
+    @chmod($path, 0600);
+
+    return true;
+}
+
+function devConsoleRemoveGithubConfiguration(): bool
+{
+    $path = devConsoleGithubConfigPath();
+    return !is_file($path) || @unlink($path);
+}
+
+function devConsoleGithubConfigured(array $configuration): bool
+{
+    return (string)($configuration['account'] ?? '') !== '' && (string)($configuration['token'] ?? '') !== '';
+}
+
+function devConsoleValidateGithubAccount(string $account): array
+{
+    $errors = [];
+    if ($account === '' || strlen($account) > 39 || devConsoleHasControlCharacters($account) || preg_match('/^(?!-)[A-Za-z0-9-]{1,39}(?<!-)$/', $account) !== 1) {
+        $errors[] = 'Account or organization must be a GitHub login using only letters, digits, and hyphens, and it cannot begin or end with a hyphen.';
+    }
+    if (str_starts_with($account, '-') || str_contains($account, '/') || preg_match('/\s/', $account) === 1 || preg_match('~^https?://~i', $account) === 1) {
+        $errors[] = 'Account or organization must not be a URL, path, whitespace value, or command option.';
+    }
+
+    return $errors;
+}
+
+function devConsoleValidateGithubToken(string $token, bool $required): array
+{
+    if ($token === '' && !$required) {
+        return [];
+    }
+    if ($token === '' || strlen($token) > 4096 || devConsoleHasControlCharacters($token)) {
+        return ['Token is required and must not contain control characters.'];
+    }
+
+    return [];
+}
+
+function devConsoleValidateGithubVisibility(string $visibility): array
+{
+    return in_array($visibility, ['private', 'public'], true) ? [] : ['Default repository visibility must be private or public.'];
+}
+
+function devConsoleBuildGithubConfiguration(array $input, array $existing): array
+{
+    $account = devConsoleScalarInput($input, 'github_account');
+    $tokenInput = is_scalar($input['github_token'] ?? null) ? trim((string)$input['github_token']) : '';
+    $visibility = devConsoleScalarInput($input, 'github_visibility');
+    if ($visibility === '') {
+        $visibility = 'private';
+    }
+
+    $requiresToken = !devConsoleGithubConfigured($existing);
+    $errors = array_merge(
+        devConsoleValidateGithubAccount($account),
+        devConsoleValidateGithubToken($tokenInput, $requiresToken),
+        devConsoleValidateGithubVisibility($visibility)
+    );
+
+    $token = $tokenInput !== '' ? $tokenInput : (string)($existing['token'] ?? '');
+    return [
+        'valid' => empty($errors),
+        'errors' => array_values(array_unique($errors)),
+        'configuration' => [
+            'account' => $account,
+            'token' => $token,
+            'default_visibility' => $visibility,
+            'configured_at' => (string)($existing['configured_at'] ?? '') !== '' ? $existing['configured_at'] : date('c'),
+            'verified' => false,
+            'last_verified_at' => null,
+            'authenticated_login' => null,
+        ],
+    ];
 }
 
 function devConsoleProjects(array $configuration): array

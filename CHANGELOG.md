@@ -27,6 +27,10 @@ Date:
 - Local Git status reporting
 - Shared robust external command execution
 - Reliable exit-code and timeout handling
+- Global GitHub configuration
+- Automatic GitHub repository creation
+- Secure token-based Git operations
+- Removed manual existing-repository connection flow
 - Preview and Production deployment binding
 - DNS and SSL support
 - UI refinement

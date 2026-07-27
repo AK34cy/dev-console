@@ -10,14 +10,26 @@ function processCommandDisplay(array $arguments): string
     return implode(' ', array_map(fn($argument): string => escapeshellarg(processRedactDisplayArgument((string)$argument)), $arguments));
 }
 
-function processNormalizeEnvironment(array $environment): ?array
+function processRedactSensitiveOutput(string $output, array $environment): string
 {
-    if (empty($environment)) {
+    foreach (['GH_TOKEN', 'GITHUB_TOKEN'] as $name) {
+        $value = $environment[$name] ?? '';
+        if (is_scalar($value) && (string)$value !== '') {
+            $output = str_replace((string)$value, '[redacted]', $output);
+        }
+    }
+
+    return $output;
+}
+
+function processNormalizeEnvironment(array $environment, bool $inheritEnvironment = true): ?array
+{
+    if (empty($environment) && $inheritEnvironment) {
         return null;
     }
 
     $normalized = [];
-    $baseEnvironment = getenv();
+    $baseEnvironment = $inheritEnvironment ? getenv() : false;
     if (is_array($baseEnvironment)) {
         foreach ($baseEnvironment as $name => $value) {
             $name = (string)$name;
@@ -50,7 +62,7 @@ function processRunCommand(array $arguments, array $options = []): array
 
     $cwd = is_string($options['cwd'] ?? null) && is_dir((string)$options['cwd']) ? (string)$options['cwd'] : null;
     $timeoutSeconds = max(1, (int)($options['timeout'] ?? 10));
-    $environment = processNormalizeEnvironment(is_array($options['env'] ?? null) ? $options['env'] : []);
+    $environment = processNormalizeEnvironment(is_array($options['env'] ?? null) ? $options['env'] : [], (bool)($options['inherit_env'] ?? true));
     $pipes = [];
     $process = @proc_open(array_values(array_map('strval', $arguments)), [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, $cwd, $environment);
     if (!is_resource($process)) {
@@ -105,7 +117,7 @@ function processRunCommand(array $arguments, array $options = []): array
         $stderr = trim($stderr . "\nUnable to determine command exit status.");
     }
 
-    return processResult($commandDisplay, $stdout, $stderr, $exitCode, $timedOut, $startedAt);
+    return processResult($commandDisplay, processRedactSensitiveOutput($stdout, $environment ?? []), processRedactSensitiveOutput($stderr, $environment ?? []), $exitCode, $timedOut, $startedAt);
 }
 
 function processResult(string $commandDisplay, string $stdout, string $stderr, int $exitCode, bool $timedOut, float $startedAt): array

@@ -3,3 +3,4 @@ console/runs/*
 .env
 *.log
 config/projects.json
+config/github.json

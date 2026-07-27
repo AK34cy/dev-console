@@ -585,6 +585,7 @@ $prompt = '';
 $error = '';
 $apacheActionResult = null;
 $projectActionResult = null;
+$githubActionResult = null;
 $projectFormErrors = [];
 $projectFormValues = [
     'project_name' => '',
@@ -705,6 +706,24 @@ if (in_array($action, apacheAllowedActions(), true)) {
     exit;
 }
 
+if (in_array($action, ['save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli'], true)) {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $githubActionResult = gitActionResult(false, 'Invalid GitHub management request.');
+    } elseif ($action === 'save_github_configuration') {
+        $githubActionResult = gitGithubSaveConfiguration($_POST);
+    } elseif ($action === 'test_github_connection') {
+        $githubActionResult = gitGithubTestConnection();
+    } elseif ($action === 'remove_github_configuration') {
+        $githubActionResult = gitGithubRemoveConfiguration();
+    } else {
+        $githubActionResult = gitGithubInstallCli();
+    }
+    $githubActionResult['action'] = $action;
+    $_SESSION['github_action_result'] = $githubActionResult;
+    header('Location: /?tab=settings#github');
+    exit;
+}
+
 if ($action === 'create_project') {
     foreach ($projectFormValues as $field => $fallback) {
         $value = $_POST[$field] ?? $fallback;
@@ -725,7 +744,7 @@ if ($action === 'create_project') {
     }
 }
 
-if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'connect_git_repository', 'fetch_git_repository', 'pull_git_repository', 'remove_git_connection'], true)) {
+if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'create_project_repository', 'fetch_git_repository', 'pull_git_repository'], true)) {
     $projectConfigurationForAction = devConsoleLoadProjectConfiguration();
     $projectId = is_scalar($_POST['project_id'] ?? null) ? (string)$_POST['project_id'] : '';
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
@@ -734,15 +753,12 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
         $projectActionResult = projectProvision($projectConfigurationForAction, $projectId);
     } elseif ($action === 'verify_project_routing') {
         $projectActionResult = projectVerifyRoutingAction($projectConfigurationForAction, $projectId, ['require_apache_running' => true]);
-    } elseif ($action === 'connect_git_repository') {
-        $remoteUrl = is_scalar($_POST['remote_url'] ?? null) ? trim((string)$_POST['remote_url']) : '';
-        $projectActionResult = gitConnectRepository($projectConfigurationForAction, $projectId, $remoteUrl);
+    } elseif ($action === 'create_project_repository') {
+        $projectActionResult = gitCreateProjectRepository($projectConfigurationForAction, $projectId);
     } elseif ($action === 'fetch_git_repository') {
         $projectActionResult = gitFetchRepository($projectConfigurationForAction, $projectId);
     } elseif ($action === 'pull_git_repository') {
         $projectActionResult = gitPullRepository($projectConfigurationForAction, $projectId);
-    } elseif ($action === 'remove_git_connection') {
-        $projectActionResult = gitRemoveConnection($projectConfigurationForAction, $projectId);
     } elseif ($action === 'remove_project') {
         $projectActionResult = projectRemoveFromConsole($projectConfigurationForAction, $projectId);
     } else {
@@ -755,7 +771,7 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'connect_git_repository', 'fetch_git_repository', 'pull_git_repository', 'remove_git_connection']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'create_project_repository', 'fetch_git_repository', 'pull_git_repository', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -872,12 +888,17 @@ $apacheSites = devConsoleApacheSites();
 $managedApacheSites = array_values(array_filter($apacheSites, fn(array $site): bool => str_starts_with((string)($site['name'] ?? ''), 'dev-console-')));
 $otherApacheSites = array_values(array_filter($apacheSites, fn(array $site): bool => !str_starts_with((string)($site['name'] ?? ''), 'dev-console-')));
 $apacheState = apacheState();
+$githubConfiguration = devConsoleLoadGithubConfiguration();
+$githubConfigured = devConsoleGithubConfigured($githubConfiguration);
+$githubCliInstalled = gitGhInstalled();
 $projectFlash = (string)($_SESSION['project_flash'] ?? '');
 unset($_SESSION['project_flash']);
 $projectActionResult = is_array($_SESSION['project_action_result'] ?? null) ? $_SESSION['project_action_result'] : $projectActionResult;
 unset($_SESSION['project_action_result']);
 $apacheActionResult = is_array($_SESSION['apache_action_result'] ?? null) ? $_SESSION['apache_action_result'] : $apacheActionResult;
 unset($_SESSION['apache_action_result']);
+$githubActionResult = is_array($_SESSION['github_action_result'] ?? null) ? $_SESSION['github_action_result'] : $githubActionResult;
+unset($_SESSION['github_action_result']);
 $projectStatuses = [];
 $gitStatuses = [];
 foreach ($projects as $project) {
@@ -890,13 +911,13 @@ foreach ($projects as $project) {
             'preview' => [],
         ];
     }
-    $gitStatuses[(string)($project['id'] ?? '')] = gitStatus($project);
+    $gitStatuses[(string)($project['id'] ?? '')] = gitStatus($project, $githubConfiguration);
 }
 $serverAddress = (string)($_SERVER['SERVER_ADDR'] ?? '');
 if ($serverAddress === '' || in_array($serverAddress, ['127.0.0.1', '::1'], true)) {
     $serverAddress = 'SERVER_IP';
 }
-$initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '' || $projectActionResult !== null || $apacheActionResult !== null) ? 'settings' : 'dashboard';
+$initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '' || $projectActionResult !== null || $apacheActionResult !== null || $githubActionResult !== null) ? 'settings' : 'dashboard';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -918,8 +939,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     label { display: block; font-weight: 700; margin: 18px 0 8px; }
     textarea { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 8px; box-sizing: border-box; color: #10242f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.5; min-height: 390px; padding: 14px; resize: vertical; tab-size: 2; width: 100%; }
     textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
-    input[type="text"] { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 6px; box-sizing: border-box; color: #10242f; font-size: 14px; padding: 9px 10px; width: 100%; }
-    input[type="text"]:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
+    input[type="text"], input[type="password"], select { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 6px; box-sizing: border-box; color: #10242f; font-size: 14px; padding: 9px 10px; width: 100%; }
+    input[type="text"]:focus, input[type="password"]:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
     button, .button-link { align-items: center; background: var(--blue); border: 0; border-radius: 5px; color: #fff; cursor: pointer; display: inline-flex; font-size: 15px; font-weight: 700; gap: 8px; margin-top: 16px; padding: 11px 18px; text-decoration: none; }
     button:disabled { cursor: not-allowed; opacity: 0.55; }
     [hidden] { display: none !important; }
@@ -1029,7 +1050,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
     .compact-table th { color: var(--muted); width: 45%; }
     .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr); }
-    .settings-layout > #apache { grid-column: 1 / -1; }
+    .settings-layout > #github, .settings-layout > #apache { grid-column: 1 / -1; }
     .settings-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .settings-table th, .settings-table td { border-top: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }
     .settings-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
@@ -1038,7 +1059,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .table-scroll .settings-table { min-width: 680px; }
     .table-scroll .settings-table.compact-sites { min-width: 560px; }
     .site-path, .path-value { overflow-wrap: anywhere; word-break: normal; }
-    #projects, #apache { scroll-margin-top: 18px; }
+    #projects, #github, #apache { scroll-margin-top: 18px; }
     #createProject { scroll-margin-top: 18px; }
     #createProject button[type="submit"] { width: 100%; }
     .subsection { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
@@ -1328,14 +1349,12 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Project deleted' : 'Project deletion failed';
             } elseif ($projectAction === 'verify_project_routing') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Project routing verified' : 'Project routing verification failed';
-            } elseif ($projectAction === 'connect_git_repository') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Git repository connected' : 'Git connection failed';
+            } elseif ($projectAction === 'create_project_repository') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'GitHub repository created' : 'GitHub repository creation failed';
             } elseif ($projectAction === 'fetch_git_repository') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Git fetch completed' : 'Git fetch failed';
             } elseif ($projectAction === 'pull_git_repository') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Git pull completed' : 'Git pull failed';
-            } elseif ($projectAction === 'remove_git_connection') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Git connection removed' : 'Git connection removal failed';
             }
           ?>
           <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
@@ -1359,9 +1378,9 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $isManaged = !empty($project['provisioning']['managed']);
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
                 $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
-                $gitStatus = $gitStatuses[(string)($project['id'] ?? '')] ?? gitStatus($project);
+                $gitStatus = $gitStatuses[(string)($project['id'] ?? '')] ?? gitStatus($project, $githubConfiguration);
                 $gitConnected = gitProjectConnected($project);
-                $gitStatusClass = $gitStatus['status'] === 'Ready' ? 'healthy' : (in_array($gitStatus['status'], ['Not connected', 'Repository missing'], true) ? 'warning' : 'error');
+                $gitStatusClass = $gitStatus['status'] === 'Ready' ? 'healthy' : (in_array($gitStatus['status'], ['GitHub not configured', 'Repository not created', 'Changes present'], true) ? 'warning' : 'error');
               ?>
               <section class="project-item">
                 <div class="project-item-header">
@@ -1432,35 +1451,28 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                       <?php endif; ?>
                     </tbody>
                   </table>
-                  <?php if (!$gitConnected): ?>
+                  <?php if ($gitStatus['status'] === 'GitHub not configured'): ?>
+                    <p class="field-help">Configure GitHub in Settings to create this repository.</p>
+                  <?php elseif ($gitStatus['status'] === 'Repository not created'): ?>
                     <form method="post" class="project-form" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
-                      <input type="hidden" name="action" value="connect_git_repository">
+                      <input type="hidden" name="action" value="create_project_repository">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                      <label for="remote_url_<?= h((string)$project['id']) ?>">Remote repository URL</label>
-                      <input id="remote_url_<?= h((string)$project['id']) ?>" name="remote_url" type="text" maxlength="512" placeholder="git@github.com:AK34cy/example.git">
-                      <p class="field-help">Supports git@host:owner/repository.git, ssh://, and public https:// repositories.</p>
-                      <button type="submit">Connect</button>
+                      <button type="submit"<?= $githubConfigured && !empty($githubConfiguration['verified']) ? '' : ' disabled title="Verify GitHub in Settings before creating repositories."' ?>>Create repository</button>
                     </form>
-                  <?php else: ?>
+                  <?php elseif ($gitConnected): ?>
                     <div class="project-actions">
                       <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
                         <input type="hidden" name="action" value="fetch_git_repository">
                         <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                         <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                        <button type="submit" class="secondary">Fetch</button>
+                        <button type="submit" class="secondary"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub before network Git actions."' ?>>Fetch</button>
                       </form>
                       <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
                         <input type="hidden" name="action" value="pull_git_repository">
                         <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                         <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                        <button type="submit" class="secondary">Pull</button>
-                      </form>
-                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove Git connection?\nRepository files will remain on the server.');">
-                        <input type="hidden" name="action" value="remove_git_connection">
-                        <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                        <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                        <button type="submit" class="secondary">Remove connection</button>
+                        <button type="submit" class="secondary"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub before network Git actions."' ?>>Pull</button>
                       </form>
                     </div>
                   <?php endif; ?>
@@ -1546,6 +1558,91 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
 
             <button type="submit">Create Project</button>
           </form>
+      </section>
+
+      <section class="panel" id="github">
+        <h2>GitHub</h2>
+        <?php if ($githubActionResult !== null): ?>
+          <?php
+            $githubAction = (string)($githubActionResult['action'] ?? '');
+            $githubActionTitle = !empty($githubActionResult['success']) ? 'GitHub action completed' : 'GitHub action failed';
+            if ($githubAction === 'save_github_configuration') {
+                $githubActionTitle = !empty($githubActionResult['success']) ? 'GitHub configuration saved' : 'GitHub configuration needs attention';
+            } elseif ($githubAction === 'test_github_connection') {
+                $githubActionTitle = !empty($githubActionResult['success']) ? 'GitHub connection verified' : 'GitHub connection failed';
+            } elseif ($githubAction === 'remove_github_configuration') {
+                $githubActionTitle = !empty($githubActionResult['success']) ? 'GitHub configuration removed' : 'GitHub configuration removal failed';
+            } elseif ($githubAction === 'install_github_cli') {
+                $githubActionTitle = !empty($githubActionResult['success']) ? 'GitHub CLI installed' : 'GitHub CLI installation failed';
+            }
+          ?>
+          <section class="result-block <?= !empty($githubActionResult['success']) ? '' : 'error' ?>">
+            <h2><?= h($githubActionTitle) ?></h2>
+            <p><?= h((string)$githubActionResult['message']) ?></p>
+            <details<?= !empty($githubActionResult['success']) ? '' : ' open' ?>>
+              <summary>Show operation log</summary>
+              <pre><?= h((string)($githubActionResult['output'] ?? '')) ?></pre>
+            </details>
+          </section>
+        <?php endif; ?>
+
+        <dl class="apache-summary-grid">
+          <div><dt>Account / organization</dt><dd><?= h(configuredDisplayValue($githubConfigured ? (string)$githubConfiguration['account'] : '')) ?></dd></div>
+          <div><dt>Authentication</dt><dd><?= $githubConfigured ? 'Configured' : 'Not configured' ?></dd></div>
+          <div><dt>GitHub CLI</dt><dd><?= $githubCliInstalled ? 'Installed' : 'Not installed' ?></dd></div>
+          <div><dt>Connection</dt><dd><?= !empty($githubConfiguration['verified']) ? 'Verified' : ($githubConfigured ? 'Not verified' : 'Not configured') ?></dd></div>
+          <div><dt>Default visibility</dt><dd><?= h(configuredDisplayValue($githubConfiguration['default_visibility'] ?? 'private')) ?></dd></div>
+          <div><dt>Last verified</dt><dd><?= h(configuredDisplayValue($githubConfiguration['last_verified_at'] ?? '')) ?></dd></div>
+          <?php if ($githubConfigured): ?>
+            <div><dt>Authenticated login</dt><dd><?= h(configuredDisplayValue($githubConfiguration['authenticated_login'] ?? '')) ?></dd></div>
+          <?php endif; ?>
+        </dl>
+
+        <?php if (!$githubCliInstalled): ?>
+          <p class="field-help">GitHub CLI is not installed.</p>
+          <form method="post" class="form-actions" action="/?tab=settings#github" data-preserve-settings-scroll="1">
+            <input type="hidden" name="action" value="install_github_cli">
+            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+            <button type="submit" class="secondary">Install GitHub CLI</button>
+          </form>
+        <?php endif; ?>
+
+        <form method="post" class="project-form subsection" action="/?tab=settings#github" data-preserve-settings-scroll="1">
+          <input type="hidden" name="action" value="save_github_configuration">
+          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+          <fieldset>
+            <legend><?= $githubConfigured ? 'Update configuration' : 'Configure GitHub' ?></legend>
+            <label for="github_account">Account or organization</label>
+            <input id="github_account" name="github_account" type="text" required maxlength="39" placeholder="account-or-organization" value="<?= h($githubConfigured ? (string)$githubConfiguration['account'] : '') ?>">
+            <p class="field-help">GitHub owner where Dev Console will create repositories.</p>
+
+            <label for="github_token">Personal Access Token</label>
+            <input id="github_token" name="github_token" type="password" maxlength="4096" placeholder="github_pat_..." autocomplete="new-password"<?= $githubConfigured ? '' : ' required' ?>>
+            <p class="field-help">Stored only in the server's local configuration. Leave empty to keep the current token.</p>
+
+            <label for="github_visibility">Default repository visibility</label>
+            <select id="github_visibility" name="github_visibility">
+              <option value="private"<?= (string)($githubConfiguration['default_visibility'] ?? 'private') === 'private' ? ' selected' : '' ?>>Private</option>
+              <option value="public"<?= (string)($githubConfiguration['default_visibility'] ?? 'private') === 'public' ? ' selected' : '' ?>>Public</option>
+            </select>
+          </fieldset>
+          <button type="submit"><?= $githubConfigured ? 'Update configuration' : 'Save and test' ?></button>
+        </form>
+
+        <?php if ($githubConfigured): ?>
+          <div class="project-actions">
+            <form method="post" action="/?tab=settings#github" data-preserve-settings-scroll="1">
+              <input type="hidden" name="action" value="test_github_connection">
+              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+              <button type="submit" class="secondary">Test connection</button>
+            </form>
+            <form method="post" action="/?tab=settings#github" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove GitHub configuration?\nLocal and remote repositories will not be deleted.');">
+              <input type="hidden" name="action" value="remove_github_configuration">
+              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+              <button type="submit" class="secondary">Remove configuration</button>
+            </form>
+          </div>
+        <?php endif; ?>
       </section>
 
       <section class="panel" id="apache">
