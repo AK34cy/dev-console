@@ -36,6 +36,9 @@ Date:
 - Compact GitHub and Apache Settings layout
 - GitHub CLI 2.4-compatible repository bootstrap
 - Local-first repository initialization and push
+- Reliable PAT authentication for Git push, fetch, and pull
+- Recovery of incomplete repository initialization
+- GitHub API and Git transport separation
 - Preview and Production deployment binding
 - DNS and SSL support
 - UI refinement

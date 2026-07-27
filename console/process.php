@@ -12,12 +12,15 @@ function processCommandDisplay(array $arguments): string
 
 function processRedactSensitiveOutput(string $output, array $environment): string
 {
-    foreach (['GH_TOKEN', 'GITHUB_TOKEN'] as $name) {
+    foreach (['GH_TOKEN', 'GITHUB_TOKEN', 'IOVON_GIT_TOKEN'] as $name) {
         $value = $environment[$name] ?? '';
         if (is_scalar($value) && (string)$value !== '') {
             $output = str_replace((string)$value, '[redacted]', $output);
         }
     }
+
+    $output = preg_replace('~Authorization:\s*(?:Bearer|token|Basic)\s+[^\r\n]+~i', 'Authorization: [redacted]', $output) ?? $output;
+    $output = preg_replace('~https://[^/@\s:]+:[^/@\s]+@~i', 'https://[redacted]@', $output) ?? $output;
 
     return $output;
 }
