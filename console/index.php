@@ -574,6 +574,56 @@ function renderGitOutput(array $results): void
     echo '</details>';
 }
 
+function projectLifecycleLabel(array $project, array $projectStatus): string
+{
+    $status = (string)($projectStatus['label'] ?? 'Not set up');
+    $managed = !empty($project['provisioning']['managed']);
+    if ($status === 'Ready') {
+        return $managed ? 'Ready' : 'Imported';
+    }
+    if ($status === 'Configuration drift' || $status === 'Incomplete') {
+        return $status;
+    }
+
+    return $managed ? 'Not set up' : 'New';
+}
+
+function operationSummarySteps(string $action, array $result): array
+{
+    if (empty($result['success'])) {
+        return [];
+    }
+
+    if ($action === 'initialize_repository') {
+        return [
+            'Local repository prepared',
+            'GitHub repository verified',
+            'First push completed',
+            'Remote branch verified',
+        ];
+    }
+    if ($action === 'fetch_git_repository') {
+        return ['Remote changes fetched', 'Git status refreshed'];
+    }
+    if ($action === 'pull_git_repository') {
+        return ['Remote changes fetched', 'Fast-forward pull completed', 'Git status refreshed'];
+    }
+    if ($action === 'provision_project') {
+        return ['Project directories prepared', 'Apache configuration ready', 'Routing verified'];
+    }
+    if ($action === 'verify_project_routing') {
+        return ['Apache ServerName checked', 'Routing verified'];
+    }
+    if ($action === 'delete_project') {
+        return ['Managed Apache configuration removed', 'Managed project directories removed', 'Git repository preserved'];
+    }
+    if ($action === 'remove_project') {
+        return ['Project registration removed', 'Server files preserved'];
+    }
+
+    return [];
+}
+
 $nextNumber = nextTaskNumber($todoDir, $doneDir);
 $latestTasks = taskFileEntries($repoRoot, ['TODO' => $todoDir, 'DONE' => $doneDir]);
 $viewTask = findTaskForView($repoRoot, $todoDir, $doneDir, (string)($_GET['task'] ?? ''));
@@ -936,6 +986,10 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .dashboard-column { min-width: 0; }
     .panel, .result-block { background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 18px rgba(0, 83, 133, 0.07); margin-top: 14px; padding: 18px; }
     .result-block h2, .command-output h3 { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 15px; }
+    .result-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+    .result-actions button { font-size: 12px; margin-top: 0; padding: 7px 10px; }
+    .operation-summary { background: #f7fcfe; border: 1px solid var(--line); border-radius: 7px; display: grid; gap: 6px; list-style: none; margin: 12px 0; padding: 10px; }
+    .operation-summary li { color: var(--green); font-size: 13px; font-weight: 700; }
     label { display: block; font-weight: 700; margin: 18px 0 8px; }
     textarea { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 8px; box-sizing: border-box; color: #10242f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.5; min-height: 390px; padding: 14px; resize: vertical; tab-size: 2; width: 100%; }
     textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
@@ -1078,6 +1132,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .project-actions button { font-size: 13px; margin-top: 0; padding: 8px 11px; }
     .project-actions .danger { background: #a51d1d; }
     .project-actions .danger:disabled { background: #a51d1d; }
+    .action-note { color: var(--muted); flex-basis: 100%; font-size: 12px; margin: 0; }
+    .lifecycle-note { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
     .environment-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .environment-block, .generated-summary { background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 10px; }
     .environment-block h4, .generated-summary h3 { color: var(--blue); font-size: 12px; margin: 0 0 8px; }
@@ -1358,13 +1414,27 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             } elseif ($projectAction === 'pull_git_repository') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Git pull completed' : 'Git pull failed';
             }
+            $operationSteps = operationSummarySteps($projectAction, $projectActionResult);
+            $operationLogId = 'projectOperationLog';
           ?>
           <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
             <h2><?= h($projectActionTitle) ?></h2>
             <p><?= h((string)$projectActionResult['message']) ?></p>
+            <?php if (!empty($operationSteps)): ?>
+              <ul class="operation-summary">
+                <?php foreach ($operationSteps as $step): ?>
+                  <li>Done: <?= h($step) ?></li>
+                <?php endforeach; ?>
+              </ul>
+            <?php endif; ?>
             <details<?= !empty($projectActionResult['success']) ? '' : ' open' ?>>
               <summary>Show operation log</summary>
-              <pre><?= h((string)($projectActionResult['output'] ?? '')) ?></pre>
+              <div class="result-actions">
+                <button type="button" class="secondary" data-copy-log="<?= h($operationLogId) ?>">Copy Log</button>
+                <button type="button" class="secondary" data-download-log="<?= h($operationLogId) ?>" data-download-name="<?= h($projectAction !== '' ? $projectAction . '.log' : 'project-operation.log') ?>">Download Log</button>
+                <span class="hint" data-log-message="<?= h($operationLogId) ?>" aria-live="polite"></span>
+              </div>
+              <pre id="<?= h($operationLogId) ?>"><?= h((string)($projectActionResult['output'] ?? '')) ?></pre>
             </details>
           </section>
         <?php endif; ?>
@@ -1377,6 +1447,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $projectStatus = $projectStatuses[(string)($project['id'] ?? '')] ?? projectStatus($project);
                 $statusLabel = (string)$projectStatus['label'];
                 $statusClass = $statusLabel === 'Ready' ? 'healthy' : ($statusLabel === 'Configuration drift' ? 'error' : 'warning');
+                $lifecycleLabel = projectLifecycleLabel($project, $projectStatus);
                 $isManaged = !empty($project['provisioning']['managed']);
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
                 $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
@@ -1396,9 +1467,10 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 </div>
                 <table class="compact-table">
                   <tbody>
+                    <tr><th>Lifecycle</th><td><?= h($lifecycleLabel) ?></td></tr>
                     <tr><th>Repository</th><td><?= h(configuredDisplayValue($project['repository_path'] ?? '')) ?></td></tr>
                     <tr><th>Branch</th><td><?= h(configuredDisplayValue($project['branch'] ?? '')) ?></td></tr>
-                    <tr><th>Managed</th><td><?= $isManaged ? 'Yes' : 'No' ?></td></tr>
+                    <tr><th>Set up</th><td><?= h(configuredDisplayValue($project['provisioning']['provisioned_at'] ?? '')) ?></td></tr>
                   </tbody>
                 </table>
                 <div class="environment-grid">
@@ -1497,27 +1569,32 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
                       <button type="submit"<?= $canSetUp ? '' : ' disabled title="This project cannot be set up automatically with its current environment paths."' ?>>Set up</button>
                     </form>
+                  <?php else: ?>
+                    <p class="lifecycle-note">Configured: <?= h(configuredDisplayValue($project['provisioning']['provisioned_at'] ?? '')) ?></p>
                   <?php endif; ?>
                   <?php if ($statusLabel === 'Ready'): ?>
                     <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
                       <input type="hidden" name="action" value="verify_project_routing">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                      <button type="submit" class="secondary">Verify routing</button>
+                      <button type="submit" class="secondary" title="Run routing checks again without changing project configuration.">Reverify Routing</button>
                     </form>
                   <?php endif; ?>
+                  <p class="action-note">Alternative actions: choose Remove from Console to unregister the project, or Delete Project to remove Dev Console-managed local infrastructure.</p>
+                  <p class="action-note">Remove from Console removes only the project registration from Dev Console. Directories, Apache configuration, and Git repositories remain.</p>
                   <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove this project from Dev Console?\nServer files will not be deleted.');">
                     <input type="hidden" name="action" value="remove_project">
                     <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                     <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
                     <button type="submit" class="secondary" title="Removes only this project record.">Remove from Console</button>
                   </form>
+                  <p class="action-note">Delete Project removes the project registration and local project infrastructure. The local Git repository and GitHub repository are preserved.</p>
                   <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" data-delete-project-form="1" data-project-id="<?= h((string)$project['id']) ?>">
                     <input type="hidden" name="action" value="delete_project">
                     <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                     <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
                     <input type="hidden" name="confirm_project_id" value="">
-                    <button type="submit" class="danger" title="Removes directories and Apache configuration created by Dev Console."<?= $isManaged ? '' : ' disabled' ?>>Delete Project</button>
+                    <button type="submit" class="danger" title="Removes Dev Console-managed directories and Apache configuration. Preserves Git repositories."<?= $isManaged ? '' : ' disabled' ?>>Delete Project</button>
                   </form>
                 </div>
               </section>
@@ -1831,13 +1908,43 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   document.querySelectorAll('[data-delete-project-form="1"]').forEach((deleteForm) => {
     deleteForm.addEventListener('submit', (event) => {
       const projectId = deleteForm.dataset.projectId || '';
-      const confirmation = window.prompt(`Type ${projectId} to delete this Dev Console-managed project.`);
+      const confirmation = window.prompt(`Type ${projectId} to delete Dev Console-managed directories and Apache configuration. The local Git repository and GitHub repository will be preserved.`);
       if (confirmation !== projectId) {
         event.preventDefault();
         return;
       }
       const confirmationInput = deleteForm.querySelector('input[name="confirm_project_id"]');
       if (confirmationInput) confirmationInput.value = confirmation;
+    });
+  });
+  document.querySelectorAll('[data-copy-log]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const target = document.getElementById(button.dataset.copyLog || '');
+      const message = document.querySelector(`[data-log-message="${button.dataset.copyLog || ''}"]`);
+      if (!target) return;
+      try {
+        await navigator.clipboard.writeText(target.textContent || '');
+        const original = button.textContent;
+        button.textContent = 'Copied';
+        if (message) message.textContent = '';
+        window.setTimeout(() => { button.textContent = original; }, 1500);
+      } catch (error) {
+        if (message) message.textContent = 'Unable to copy log.';
+      }
+    });
+  });
+  document.querySelectorAll('[data-download-log]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const target = document.getElementById(button.dataset.downloadLog || '');
+      if (!target) return;
+      const blob = new Blob([target.textContent || ''], { type: 'text/plain;charset=utf-8' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = button.dataset.downloadName || 'operation.log';
+      document.body.appendChild(link);
+      link.click();
+      URL.revokeObjectURL(link.href);
+      link.remove();
     });
   });
   const projectNameInput = document.getElementById('project_name');

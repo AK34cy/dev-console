@@ -950,6 +950,7 @@ function gitInitializeRepository(array $configuration, string $projectId): array
             'connected' => true,
             'connected_at' => date('c'),
             'created_at' => date('c'),
+            'last_fetch_at' => date('c'),
         ] + $verified);
         if (!gitSetBootstrapState($configuration, $project, 'ready')) {
             throw new RuntimeException('Unable to save Git metadata.');
