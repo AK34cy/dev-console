@@ -121,6 +121,7 @@ $todoDir = $repoRoot . '/TASKS/TODO';
 $doneDir = $repoRoot . '/TASKS/DONE';
 $attachmentsRoot = $repoRoot . '/TASKS/ATTACHMENTS';
 $runsDir = devConsoleProjectRunsDir($activeProject);
+$legacyTaskRoot = dirname(devConsoleRepositoryRoot());
 
 function h(string $value): string
 {
@@ -153,13 +154,6 @@ function taskNumber(int $number): string
     return sprintf('TASK-%03d', $number);
 }
 
-function taskExists(int $number, string $todoDir, string $doneDir): bool
-{
-    $taskFile = taskNumber($number) . '.md';
-
-    return is_file($todoDir . '/' . $taskFile) || is_file($doneDir . '/' . $taskFile);
-}
-
 function shortSha(string $sha): string
 {
     return preg_match('/^[0-9a-f]{7,40}$/i', $sha) ? substr($sha, 0, 7) : $sha;
@@ -182,6 +176,95 @@ function taskMarkdownMetadata(string $body): array
     }
 
     return $metadata;
+}
+
+function taskSystemMetadata(string $body): array
+{
+    if (preg_match('/\A---\s*\R(.*?)\R---\s*(?:\R|$)/s', $body, $matches) !== 1) {
+        return [];
+    }
+
+    $metadata = [];
+    foreach (preg_split('/\R/', $matches[1]) ?: [] as $line) {
+        if (preg_match('/^([a-z0-9_]+):\s*(.*?)\s*$/i', $line, $lineMatches) === 1) {
+            $metadata[strtolower($lineMatches[1])] = trim($lineMatches[2], " \t\"'");
+        }
+    }
+
+    return $metadata;
+}
+
+function taskProjectId(string $body): string
+{
+    $metadata = taskSystemMetadata($body);
+    if (isset($metadata['project_id']) && projectSafeId((string)$metadata['project_id'])) {
+        return (string)$metadata['project_id'];
+    }
+
+    return '';
+}
+
+function taskBodyWithProjectMetadata(string $body, string $projectId): string
+{
+    return "---\nproject_id: " . $projectId . "\n---\n\n" . rtrim($body);
+}
+
+function taskBelongsToProject(string $body, string $projectId, bool $allowImplicitOwnership): bool
+{
+    $metadataProjectId = taskProjectId($body);
+    if ($metadataProjectId !== '') {
+        return $metadataProjectId === $projectId;
+    }
+
+    return $allowImplicitOwnership;
+}
+
+function taskStorageContexts(array $configuration, ?array $project): array
+{
+    if ($project === null) {
+        return [];
+    }
+
+    $projectId = (string)($project['id'] ?? '');
+    $projectRoot = devConsoleProjectTaskRoot($configuration, $project);
+    $contexts = [[
+        'source' => 'project',
+        'root' => $projectRoot,
+        'todo' => $projectRoot . '/TASKS/TODO',
+        'done' => $projectRoot . '/TASKS/DONE',
+        'attachments' => $projectRoot . '/TASKS/ATTACHMENTS',
+        'allow_implicit_ownership' => true,
+    ]];
+
+    // Legacy compatibility: before Project-specific repositories, the first/default
+    // Project used /var/www/TASKS. Those legacy files are associated only with that
+    // first Project and are never copied or shown for other Projects.
+    if ($projectId !== '' && $projectId === devConsoleFirstProjectId($configuration)) {
+        $legacyRoot = dirname(devConsoleRepositoryRoot());
+        if ($legacyRoot !== $projectRoot) {
+            $contexts[] = [
+                'source' => 'legacy',
+                'root' => $legacyRoot,
+                'todo' => $legacyRoot . '/TASKS/TODO',
+                'done' => $legacyRoot . '/TASKS/DONE',
+                'attachments' => $legacyRoot . '/TASKS/ATTACHMENTS',
+                'allow_implicit_ownership' => true,
+            ];
+        }
+    }
+
+    return $contexts;
+}
+
+function taskContextForSource(array $contexts, string $source): ?array
+{
+    foreach ($contexts as $context) {
+        if ((string)$context['source'] === $source) {
+            return $context;
+        }
+    }
+
+    return null;
 }
 
 function taskGitMetadata(string $repoRoot): array
@@ -226,12 +309,12 @@ function taskGitMetadata(string $repoRoot): array
     return $metadata;
 }
 
-function taskFileEntries(string $repoRoot, array $directories): array
+function taskFileEntriesForContext(array $context, string $projectId): array
 {
     $entries = [];
-    $gitMetadata = taskGitMetadata($repoRoot);
+    $gitMetadata = taskGitMetadata((string)$context['root']);
 
-    foreach ($directories as $status => $directory) {
+    foreach (['TODO' => (string)$context['todo'], 'DONE' => (string)$context['done']] as $status => $directory) {
         if (!is_dir($directory)) {
             continue;
         }
@@ -242,8 +325,11 @@ function taskFileEntries(string $repoRoot, array $directories): array
             }
 
             $path = $directory . '/' . $entry;
-            $relativePath = relativePath($repoRoot, $path);
             $body = (string)file_get_contents($path);
+            if (!taskBelongsToProject($body, $projectId, !empty($context['allow_implicit_ownership']))) {
+                continue;
+            }
+            $relativePath = relativePath((string)$context['root'], $path);
             $markdownMetadata = taskMarkdownMetadata($body);
             $taskId = 'TASK-' . $matches[1];
             $commit = preg_match('/^[0-9a-f]{7,40}$/i', $markdownMetadata['commit'])
@@ -257,6 +343,9 @@ function taskFileEntries(string $repoRoot, array $directories): array
                 'status' => $status,
                 'path' => $path,
                 'relative_path' => $relativePath,
+                'source' => (string)$context['source'],
+                'root' => (string)$context['root'],
+                'project_id' => $projectId,
                 'modified' => filemtime($path) ?: 0,
                 'title' => $markdownMetadata['title'],
                 'milestone' => $markdownMetadata['milestone'],
@@ -274,57 +363,99 @@ function taskFileEntries(string $repoRoot, array $directories): array
     return $entries;
 }
 
-function existingTaskNumbers(array $directories): array
+function taskFileEntries(array $contexts, string $projectId): array
+{
+    $entries = [];
+    $seen = [];
+    foreach ($contexts as $context) {
+        foreach (taskFileEntriesForContext($context, $projectId) as $entry) {
+            $key = (string)$entry['task_id'];
+            if (isset($seen[$key])) {
+                $GLOBALS['taskIsolationWarnings'][] = 'Ambiguous task "' . $key . '" exists in more than one task storage location for this Project and one copy was excluded.';
+                continue;
+            }
+            $seen[$key] = true;
+            $entries[] = $entry;
+        }
+    }
+
+    usort($entries, function (array $left, array $right): int {
+        return $right['number'] <=> $left['number'] ?: $right['modified'] <=> $left['modified'];
+    });
+
+    return $entries;
+}
+
+function existingTaskNumbers(array $contexts, string $projectId): array
 {
     $numbers = [];
 
-    foreach ($directories as $directory) {
-        if (!is_dir($directory)) {
-            continue;
-        }
-
-        foreach (scandir($directory) ?: [] as $entry) {
-            if (preg_match('/^TASK-(\d{3})\.md$/', $entry, $matches)) {
-                $numbers[] = (int)$matches[1];
-            }
+    foreach (taskFileEntries($contexts, $projectId) as $entry) {
+        if (isset($entry['number'])) {
+            $numbers[] = (int)$entry['number'];
         }
     }
 
     return $numbers;
 }
 
-function nextTaskNumber(string $todoDir, string $doneDir): int
+function taskExists(int $number, array $contexts, string $projectId): bool
 {
-    $numbers = existingTaskNumbers([$todoDir, $doneDir]);
+    $taskId = taskNumber($number);
+    foreach (taskFileEntries($contexts, $projectId) as $entry) {
+        if ((string)$entry['task_id'] === $taskId) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function nextTaskNumber(array $contexts, string $projectId): int
+{
+    $numbers = existingTaskNumbers($contexts, $projectId);
     $next = empty($numbers) ? 1 : max($numbers) + 1;
 
-    while (taskExists($next, $todoDir, $doneDir)) {
+    while (taskExists($next, $contexts, $projectId)) {
         $next++;
     }
 
     return $next;
 }
 
-function findTaskForView(string $repoRoot, string $todoDir, string $doneDir, string $filename): ?array
+function findTaskForView(array $contexts, string $projectId, string $filename, string $source = ''): ?array
 {
     if (!preg_match('/^TASK-\d{3}\.md$/', $filename)) {
         return null;
     }
 
-    foreach (['TODO' => $todoDir, 'DONE' => $doneDir] as $status => $directory) {
-        $path = $directory . '/' . $filename;
-        if (is_file($path)) {
-            return [
+    $contextsToInspect = $source === '' ? $contexts : array_values(array_filter([$context = taskContextForSource($contexts, $source)]));
+    $matches = [];
+    foreach ($contextsToInspect as $context) {
+        foreach (['TODO' => (string)$context['todo'], 'DONE' => (string)$context['done']] as $status => $directory) {
+            $path = $directory . '/' . $filename;
+            if (!is_file($path)) {
+                continue;
+            }
+            $body = (string)file_get_contents($path);
+            if (!taskBelongsToProject($body, $projectId, !empty($context['allow_implicit_ownership']))) {
+                continue;
+            }
+            $matches[] = [
                 'filename' => $filename,
+                'task_id' => pathinfo($filename, PATHINFO_FILENAME),
                 'status' => $status,
                 'path' => $path,
-                'relative_path' => relativePath($repoRoot, $path),
-                'body' => file_get_contents($path) ?: '',
+                'relative_path' => relativePath((string)$context['root'], $path),
+                'source' => (string)$context['source'],
+                'root' => (string)$context['root'],
+                'project_id' => $projectId,
+                'body' => $body,
             ];
         }
     }
 
-    return null;
+    return count($matches) === 1 ? $matches[0] : null;
 }
 
 function sanitizeUploadName(string $name): string
@@ -357,9 +488,20 @@ function uniqueUploadPath(string $directory, string $filename): string
     throw new RuntimeException('Unable to create a unique attachment filename.');
 }
 
-function attachmentFilesForTask(string $repoRoot, string $taskId): array
+function attachmentFilesForTask(array $contexts, string $projectId, string $taskId, string $source): array
 {
-    $directory = $repoRoot . '/TASKS/ATTACHMENTS/' . $taskId;
+    if (!isTaskId($taskId)) {
+        return [];
+    }
+    $context = taskContextForSource($contexts, $source);
+    if ($context === null) {
+        return [];
+    }
+    if (findTaskForView($contexts, $projectId, $taskId . '.md', $source) === null) {
+        return [];
+    }
+
+    $directory = (string)$context['attachments'] . '/' . $taskId;
 
     if (!is_dir($directory)) {
         return [];
@@ -402,9 +544,9 @@ function uploadedAttachments(): array
     return $uploads;
 }
 
-function attachmentPromptText(string $repoRoot, string $taskId): string
+function attachmentPromptText(array $contexts, string $projectId, string $taskId, string $source): string
 {
-    $files = attachmentFilesForTask($repoRoot, $taskId);
+    $files = attachmentFilesForTask($contexts, $projectId, $taskId, $source);
     if (empty($files)) {
         return '';
     }
@@ -418,41 +560,41 @@ function isTaskId(string $taskId): bool
     return preg_match('/^TASK-\d{3}$/', $taskId) === 1;
 }
 
-function taskFileForId(string $repoRoot, string $taskId): ?string
+function taskFileForId(array $contexts, string $projectId, string $taskId, string $source = ''): ?string
 {
     if (!isTaskId($taskId)) {
         return null;
     }
 
-    foreach (['TASKS/TODO', 'TASKS/DONE'] as $directory) {
-        $path = $repoRoot . '/' . $directory . '/' . $taskId . '.md';
-        if (is_file($path)) {
-            return $path;
-        }
-    }
-
-    return null;
+    $task = findTaskForView($contexts, $projectId, $taskId . '.md', $source);
+    return $task === null ? null : (string)$task['path'];
 }
 
-function todoTaskFileForId(string $repoRoot, string $taskId): ?string
+function todoTaskForId(array $contexts, string $projectId, string $taskId, string $source = ''): ?array
 {
     if (!isTaskId($taskId)) {
         return null;
     }
 
-    $path = $repoRoot . '/TASKS/TODO/' . $taskId . '.md';
-
-    return is_file($path) ? $path : null;
+    $task = findTaskForView($contexts, $projectId, $taskId . '.md', $source);
+    return $task !== null && (string)$task['status'] === 'TODO' ? $task : null;
 }
 
-function taskHasAttachment(string $repoRoot, string $taskId): bool
+function todoTaskFileForId(array $contexts, string $projectId, string $taskId, string $source = ''): ?string
 {
-    return !empty(attachmentFilesForTask($repoRoot, $taskId));
+    $task = todoTaskForId($contexts, $projectId, $taskId, $source);
+    return $task === null ? null : (string)$task['path'];
 }
 
-function codexPromptForTask(string $repoRoot, string $taskId): string
+function taskHasAttachment(array $contexts, string $projectId, string $taskId, string $source): bool
 {
-    if (todoTaskFileForId($repoRoot, $taskId) === null) {
+    return !empty(attachmentFilesForTask($contexts, $projectId, $taskId, $source));
+}
+
+function codexPromptForTask(array $contexts, string $projectId, string $taskId, string $source): string
+{
+    $task = todoTaskForId($contexts, $projectId, $taskId, $source);
+    if ($task === null) {
         throw new RuntimeException('Task file is not in TODO.');
     }
 
@@ -461,9 +603,9 @@ function codexPromptForTask(string $repoRoot, string $taskId): string
 Follow AGENTS.md.
 
 Work in repository:
-" . $repoRoot;
+" . (string)$task['root'];
 
-    $attachmentPrompt = attachmentPromptText($repoRoot, $taskId);
+    $attachmentPrompt = attachmentPromptText($contexts, $projectId, $taskId, $source);
     if ($attachmentPrompt !== '') {
         $prompt .= "\n\n" . $attachmentPrompt;
     }
@@ -471,13 +613,42 @@ Work in repository:
     return $prompt;
 }
 
-function runFile(string $runsDir, string $taskId, string $extension): string
+function runFile(string $runsDir, string $taskId, string $extension, string $source = 'project'): string
 {
     if (!isTaskId($taskId)) {
         throw new RuntimeException('Invalid task id.');
     }
+    if (!in_array($source, ['project', 'legacy'], true)) {
+        throw new RuntimeException('Invalid task source.');
+    }
 
-    return $runsDir . '/' . $taskId . '.' . $extension;
+    $prefix = $source === 'project' ? '' : $source . '-';
+    return $runsDir . '/' . $prefix . $taskId . '.' . $extension;
+}
+
+function currentTaskSessionKey(string $projectId): string
+{
+    return 'current_task_' . $projectId;
+}
+
+function currentTaskSourceSessionKey(string $projectId): string
+{
+    return 'current_task_source_' . $projectId;
+}
+
+function saveCurrentTaskSelection(string $projectId, string $taskId, string $source): void
+{
+    if ($projectId === '' || !isTaskId($taskId) || !in_array($source, ['project', 'legacy'], true)) {
+        return;
+    }
+
+    $_SESSION[currentTaskSessionKey($projectId)] = $taskId;
+    $_SESSION[currentTaskSourceSessionKey($projectId)] = $source;
+}
+
+function clearCurrentTaskSelection(string $projectId): void
+{
+    unset($_SESSION[currentTaskSessionKey($projectId)], $_SESSION[currentTaskSourceSessionKey($projectId)]);
 }
 
 function ensureRunsDir(string $runsDir): void
@@ -498,9 +669,9 @@ function statusLabel(string $status): string
     };
 }
 
-function codexRunStatus(string $runsDir, string $taskId): string
+function codexRunStatus(string $runsDir, string $taskId, string $source = 'project'): string
 {
-    $statusPath = runFile($runsDir, $taskId, 'status');
+    $statusPath = runFile($runsDir, $taskId, 'status', $source);
 
     if (!is_file($statusPath)) {
         return 'not_started';
@@ -511,13 +682,13 @@ function codexRunStatus(string $runsDir, string $taskId): string
     return in_array($status, ['queued', 'running', 'completed', 'failed'], true) ? $status : 'failed';
 }
 
-function startCodexRun(string $repoRoot, string $runsDir, string $taskId): void
+function startCodexRun(array $contexts, string $projectId, string $runsDir, string $taskId, string $source): void
 {
     if (!isTaskId($taskId)) {
         throw new RuntimeException('Invalid task id.');
     }
 
-    if (todoTaskFileForId($repoRoot, $taskId) === null) {
+    if (todoTaskForId($contexts, $projectId, $taskId, $source) === null) {
         throw new RuntimeException('Task file is not in TODO.');
     }
 
@@ -527,15 +698,15 @@ function startCodexRun(string $repoRoot, string $runsDir, string $taskId): void
     }
 
     ensureRunsDir($runsDir);
-    $promptPath = runFile($runsDir, $taskId, 'prompt');
-    $statusPath = runFile($runsDir, $taskId, 'status');
-    $logPath = runFile($runsDir, $taskId, 'log');
-    file_put_contents($promptPath, codexPromptForTask($repoRoot, $taskId));
+    $promptPath = runFile($runsDir, $taskId, 'prompt', $source);
+    $statusPath = runFile($runsDir, $taskId, 'status', $source);
+    $logPath = runFile($runsDir, $taskId, 'log', $source);
+    file_put_contents($promptPath, codexPromptForTask($contexts, $projectId, $taskId, $source));
     file_put_contents($statusPath, 'queued');
     file_put_contents($logPath, '[' . date('c') . "] Queued Codex run for {$taskId}.\n");
 
     $worker = __DIR__ . '/run-codex.php';
-    $command = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($taskId) . ' ' . escapeshellarg((string)($GLOBALS['activeProjectId'] ?? '')) . ' >/dev/null 2>&1 &';
+    $command = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($taskId) . ' ' . escapeshellarg((string)($GLOBALS['activeProjectId'] ?? '')) . ' ' . escapeshellarg($source) . ' >/dev/null 2>&1 &';
     exec($command);
 }
 
@@ -584,10 +755,20 @@ function taskRepositoryReadiness(?array $project, array $githubConfiguration): a
         return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'];
     }
     if ((string)($project['git']['bootstrap_status'] ?? '') !== 'ready' || empty($project['git']['connected'])) {
-        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'];
+        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Settings before creating tasks.'];
     }
     if ($error = gitAssertConnectedRepository($project, $githubConfiguration)) {
         return ['ready' => false, 'reason' => $error];
+    }
+    $status = gitStatus($project, $githubConfiguration);
+    if (in_array((string)$status['status'], ['INITIALIZATION INCOMPLETE', 'NOT INITIALIZED', 'INVALID REPOSITORY', 'REMOTE UNAVAILABLE'], true)) {
+        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Settings before creating tasks.'];
+    }
+    if (in_array((string)$status['status'], ['AHEAD', 'AHEAD / BEHIND', 'CHANGES PRESENT'], true)) {
+        return ['ready' => false, 'reason' => 'Repository synchronization is pending. Use Push in Settings before creating another task.'];
+    }
+    if ((string)$status['status'] !== 'CONNECTED') {
+        return ['ready' => false, 'reason' => 'Repository is not ready for task creation. Review Git status in Settings.'];
     }
 
     return ['ready' => true, 'reason' => ''];
@@ -737,9 +918,22 @@ function operationSummarySteps(string $action, array $result): array
     return [];
 }
 
-$nextNumber = nextTaskNumber($todoDir, $doneDir);
-$latestTasks = taskFileEntries($repoRoot, ['TODO' => $todoDir, 'DONE' => $doneDir]);
-$viewTask = findTaskForView($repoRoot, $todoDir, $doneDir, (string)($_GET['task'] ?? ''));
+$taskContexts = taskStorageContexts($projectConfiguration, $activeProject);
+$nextNumber = $activeProjectId === '' ? 1 : nextTaskNumber($taskContexts, $activeProjectId);
+$latestTasks = $activeProjectId === '' ? [] : taskFileEntries($taskContexts, $activeProjectId);
+$requestedTaskFile = (string)($_GET['task'] ?? '');
+$requestedTaskSource = (string)($_GET['task_source'] ?? '');
+$viewTask = $activeProjectId === '' ? null : findTaskForView($taskContexts, $activeProjectId, $requestedTaskFile, $requestedTaskSource);
+if ($viewTask !== null) {
+    saveCurrentTaskSelection($activeProjectId, (string)$viewTask['task_id'], (string)$viewTask['source']);
+} elseif ($requestedTaskFile === '' && $activeProjectId !== '') {
+    $storedTaskId = is_scalar($_SESSION[currentTaskSessionKey($activeProjectId)] ?? null) ? (string)$_SESSION[currentTaskSessionKey($activeProjectId)] : '';
+    $storedTaskSource = is_scalar($_SESSION[currentTaskSourceSessionKey($activeProjectId)] ?? null) ? (string)$_SESSION[currentTaskSourceSessionKey($activeProjectId)] : '';
+    $viewTask = $storedTaskId === '' ? null : findTaskForView($taskContexts, $activeProjectId, $storedTaskId . '.md', $storedTaskSource);
+    if ($viewTask === null) {
+        clearCurrentTaskSelection($activeProjectId);
+    }
+}
 $createdTaskId = '';
 $createdTaskPath = '';
 $attachmentPaths = [];
@@ -757,6 +951,7 @@ $projectFormValues = [
 $projectFlash = '';
 $results = [];
 $taskPushWarning = '';
+$taskIsolationWarnings = [];
 $taskRepositoryReadiness = taskRepositoryReadiness($activeProject, $githubConfiguration);
 $taskCreationReady = !empty($taskRepositoryReadiness['ready']);
 $taskCreationUnavailableReason = (string)($taskRepositoryReadiness['reason'] ?? '');
@@ -766,11 +961,15 @@ $action = (string)($_GET['action'] ?? $_POST['action'] ?? '');
 
 if ($action === 'codex-status') {
     $taskId = (string)($_GET['task'] ?? '');
+    $taskSource = (string)($_GET['task_source'] ?? 'project');
     try {
         if (!isTaskId($taskId)) {
             throw new RuntimeException('Invalid task id.');
         }
-        $status = codexRunStatus($runsDir, $taskId);
+        if ($activeProjectId === '' || todoTaskForId($taskContexts, $activeProjectId, $taskId, $taskSource) === null) {
+            throw new RuntimeException('Task does not belong to the active Project.');
+        }
+        $status = codexRunStatus($runsDir, $taskId, $taskSource);
         sendJson(['ok' => true, 'task' => $taskId, 'status' => $status, 'label' => statusLabel($status)]);
     } catch (Throwable $exception) {
         http_response_code(400);
@@ -781,14 +980,15 @@ if ($action === 'codex-status') {
 
 if ($action === 'codex-log') {
     $taskId = (string)($_GET['task'] ?? '');
-    if (!isTaskId($taskId)) {
+    $taskSource = (string)($_GET['task_source'] ?? 'project');
+    if (!isTaskId($taskId) || $activeProjectId === '' || todoTaskForId($taskContexts, $activeProjectId, $taskId, $taskSource) === null) {
         http_response_code(400);
         header('Content-Type: text/plain; charset=UTF-8');
-        echo 'Invalid task id.';
+        echo 'Task does not belong to the active Project.';
         exit;
     }
 
-    $logPath = runFile($runsDir, $taskId, 'log');
+    $logPath = runFile($runsDir, $taskId, 'log', $taskSource);
     header('Content-Type: text/plain; charset=UTF-8');
     echo is_file($logPath) ? (string)file_get_contents($logPath) : 'No log file yet.';
     exit;
@@ -851,12 +1051,13 @@ if ($action === 'environment-status') {
 
 if ($action === 'run-codex' && $requestMethod === 'POST') {
     $taskId = (string)($_POST['task'] ?? '');
+    $taskSource = (string)($_POST['task_source'] ?? 'project');
     try {
         if (!$codexCliReady) {
             throw new RuntimeException('Codex CLI is not installed on this server.');
         }
-        startCodexRun($repoRoot, $runsDir, $taskId);
-        $status = codexRunStatus($runsDir, $taskId);
+        startCodexRun($taskContexts, $activeProjectId, $runsDir, $taskId, $taskSource);
+        $status = codexRunStatus($runsDir, $taskId, $taskSource);
         sendJson(['ok' => true, 'task' => $taskId, 'status' => $status, 'label' => statusLabel($status)]);
     } catch (Throwable $exception) {
         http_response_code(400);
@@ -1026,12 +1227,12 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
             }
         }
 
-        $number = nextTaskNumber($todoDir, $doneDir);
+        $number = nextTaskNumber($taskContexts, $activeProjectId);
         $taskId = taskNumber($number);
         $createdTaskId = $taskId;
         $taskPath = $todoDir . '/' . $taskId . '.md';
 
-        if (taskExists($number, $todoDir, $doneDir)) {
+        if (taskExists($number, $taskContexts, $activeProjectId)) {
             throw new RuntimeException($taskId . ' already exists.');
         }
 
@@ -1039,10 +1240,7 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
         if (!$handle) {
             throw new RuntimeException('Unable to create task file without overwriting.');
         }
-        $taskBody = rtrim($body);
-        if (!preg_match('/^Project:\s*/mi', $taskBody)) {
-            $taskBody = "Project: " . $activeProjectId . "\n" . $taskBody;
-        }
+        $taskBody = taskBodyWithProjectMetadata($body, $activeProjectId);
         fwrite($handle, $taskBody . "\n");
         fclose($handle);
 
@@ -1084,7 +1282,17 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
 
         $results[] = taskGitAuthenticatedCommand(['push', 'origin', 'main'], $repoRoot, $githubConfiguration);
         if (end($results)['exit_code'] !== 0) {
-            $taskPushWarning = 'Task ' . $taskId . ' was created and committed locally, but synchronization with GitHub failed. Use Push in Settings to retry.';
+            $refreshedConfiguration = devConsoleLoadProjectConfiguration();
+            $refreshedProject = devConsoleFindProjectById($refreshedConfiguration, $activeProjectId);
+            if ($refreshedProject !== null) {
+                gitSaveProject($refreshedConfiguration, gitSetMetadata($refreshedProject, [
+                    'bootstrap_status' => 'ready',
+                    'connected' => true,
+                    'remote_verified' => true,
+                    'last_error_at' => date('c'),
+                ]));
+            }
+            $taskPushWarning = 'Task "' . $taskId . '" created and committed locally for Project "' . projectMessageName($activeProject, $activeProjectId) . '", but synchronization with GitHub failed. Use Push in Settings to retry.';
         } else {
             $results[] = taskGitAuthenticatedCommand(['fetch', '--prune', 'origin'], $repoRoot, $githubConfiguration);
             if (end($results)['exit_code'] === 0) {
@@ -1103,10 +1311,11 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
             }
         }
 
-        $prompt = codexPromptForTask($repoRoot, $taskId);
+        saveCurrentTaskSelection($activeProjectId, $taskId, 'project');
+        $prompt = codexPromptForTask($taskContexts, $activeProjectId, $taskId, 'project');
 
-        $nextNumber = nextTaskNumber($todoDir, $doneDir);
-        $latestTasks = array_slice(taskFileEntries($repoRoot, ['TODO' => $todoDir, 'DONE' => $doneDir]), 0, 12);
+        $nextNumber = nextTaskNumber($taskContexts, $activeProjectId);
+        $latestTasks = array_slice(taskFileEntries($taskContexts, $activeProjectId), 0, 12);
         $taskGroups = ['TODO' => [], 'DONE' => []];
         foreach ($latestTasks as $task) {
             $taskGroups[$task['status']][] = $task;
@@ -1135,6 +1344,7 @@ $activeTaskId = $createdTaskId;
 if ($activeTaskId === '' && $viewTask) {
     $activeTaskId = pathinfo($viewTask['filename'], PATHINFO_FILENAME);
 }
+$activeTaskSource = $createdTaskId !== '' ? 'project' : ($viewTask ? (string)$viewTask['source'] : '');
 $activeTaskStatus = '';
 $activeTaskPath = '';
 if ($createdTaskId !== '' && $error === '') {
@@ -1144,7 +1354,7 @@ if ($createdTaskId !== '' && $error === '') {
     $activeTaskStatus = $viewTask['status'];
     $activeTaskPath = $viewTask['relative_path'];
 }
-$activeRunStatus = $activeTaskId === '' ? 'not_started' : codexRunStatus($runsDir, $activeTaskId);
+$activeRunStatus = $activeTaskId === '' ? 'not_started' : codexRunStatus($runsDir, $activeTaskId, $activeTaskSource === '' ? 'project' : $activeTaskSource);
 $taskGitCompleted = $activeTaskId !== '';
 $taskGitPushed = $activeTaskId !== '' && $taskPushWarning === '';
 $editorTaskId = $viewTask ? pathinfo($viewTask['filename'], PATHINFO_FILENAME) : '';
@@ -1360,8 +1570,10 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .project-summary { align-items: center; display: flex; flex-wrap: wrap; gap: 8px 12px; justify-content: space-between; }
     .project-summary > span:first-child { display: grid; gap: 2px; margin-right: auto; }
     .project-summary .button-link { font-size: 12px; margin-top: 0; padding: 6px 9px; }
+    .project-item .hide-details { display: none; }
     .project-item[open] .project-summary { border-bottom: 1px solid var(--line); margin-bottom: 12px; padding-bottom: 10px; }
-    .project-item[open] .project-summary .button-link { display: none; }
+    .project-item[open] .show-details { display: none; }
+    .project-item[open] .hide-details { display: inline-flex; }
     .project-item-header { align-items: flex-start; display: flex; gap: 12px; justify-content: space-between; }
     .project-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .project-actions form { margin: 0; }
@@ -1471,13 +1683,12 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
       <p class="meta" id="viewingTaskNote">Viewing existing task. Editing here will not update the saved task.</p>
     <?php endif; ?>
     <?php if (!$taskCreationReady): ?>
-      <p class="error">Repository is not initialized. Initialize Repository in Settings before creating tasks.</p>
-      <?php if ($taskCreationUnavailableReason !== '' && $taskCreationUnavailableReason !== 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'): ?>
-        <p class="meta"><?= h($taskCreationUnavailableReason) ?></p>
-      <?php endif; ?>
+      <p class="error"><?= h($taskCreationUnavailableReason === '' ? 'Repository is not ready for task creation. Review Git status in Settings.' : $taskCreationUnavailableReason) ?></p>
     <?php endif; ?>
     <?php if ($taskPushWarning !== ''): ?>
       <p class="success-message"><?= h($taskPushWarning) ?></p>
+    <?php elseif ($createdTaskId !== '' && $error === ''): ?>
+      <p class="success-message">Task "<?= h($createdTaskId) ?>" created, committed locally, and synchronized with GitHub for Project "<?= h(projectMessageName($activeProject, $activeProjectId)) ?>".</p>
     <?php endif; ?>
     <p id="nextTaskNumber"><strong>Next task number:</strong> <?= h(taskNumber($nextNumber)) ?></p>
     <form method="post" enctype="multipart/form-data" id="taskForm" data-created="<?= h($createdTaskPath !== '' && $error === '' ? '1' : '0') ?>">
@@ -1496,7 +1707,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
         <div class="selected-files" id="selectedFiles">No files selected.</div>
       </label>
 
-      <button type="submit"<?= $taskCreationReady ? '' : ' disabled title="Initialize Repository in Settings before creating tasks."' ?>>Create Task</button>
+      <button type="submit"<?= $taskCreationReady ? '' : ' disabled title="' . h($taskCreationUnavailableReason === '' ? 'Review Git status in Settings before creating tasks.' : $taskCreationUnavailableReason) . '"' ?>>Create Task</button>
     </form>
   </section>
 
@@ -1512,11 +1723,11 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           </ul>
           <div class="prompt-actions">
             <?php if ($activeTaskStatus === 'TODO' && $codexCliReady): ?>
-              <button type="button" id="runCodex" data-task="<?= h($activeTaskId) ?>">Run Codex</button>
+              <button type="button" id="runCodex" data-task="<?= h($activeTaskId) ?>" data-task-source="<?= h($activeTaskSource) ?>">Run Codex</button>
             <?php else: ?>
               <button type="button" disabled title="<?= h($activeTaskStatus === 'TODO' ? 'Codex CLI is not installed on this server.' : 'Only TODO tasks can be run with Codex.') ?>">Run Codex</button>
             <?php endif; ?>
-            <a class="button-link" href="?task=<?= h(rawurlencode($activeTaskId . '.md')) ?>" target="_blank" rel="noopener">Open TASK</a>
+            <a class="button-link" href="?task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>" target="_blank" rel="noopener">Open TASK</a>
             <?php if ($activeTaskStatus === 'TODO' && !$codexCliReady): ?>
               <span class="hint">Codex CLI is not installed on this server.</span>
             <?php endif; ?>
@@ -1586,6 +1797,13 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
 
     <section class="panel">
       <h2>Tasks</h2>
+      <?php if (!empty($taskIsolationWarnings)): ?>
+        <ul class="operation-summary">
+          <?php foreach (array_unique($taskIsolationWarnings) as $warning): ?>
+            <li><?= h($warning) ?></li>
+          <?php endforeach; ?>
+        </ul>
+      <?php endif; ?>
       <?php if (empty($latestTasks)): ?>
         <p class="meta">No task files found yet.</p>
       <?php else: ?>
@@ -1603,7 +1821,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   <?php if ($task['milestone'] !== ''): ?><span class="milestone">⭐ <?= h($task['milestone']) ?></span><?php endif; ?>
                   <?php if ($task['tag'] !== ''): ?><span>Tag: <?= h($task['tag']) ?></span><?php endif; ?>
                 </div>
-                <a class="button-link secondary" href="?task=<?= h(rawurlencode($task['filename'])) ?>">Use in Workflow</a>
+                <a class="button-link secondary" href="?task=<?= h(rawurlencode($task['filename'])) ?>&task_source=<?= h(rawurlencode((string)$task['source'])) ?>">Use in Workflow</a>
               </li>
             <?php endforeach; ?>
           </ul>
@@ -1628,10 +1846,10 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   </div>
   <?php endif; ?>
 
-  <?php if (!$viewTask && isset($_GET['task']) && (string)$_GET['task'] !== ''): ?>
+  <?php if (!$viewTask && $requestedTaskFile !== ''): ?>
     <section class="panel error">
       <h2>Task not found</h2>
-      <p>The requested task file could not be opened.</p>
+      <p>The requested task file does not belong to the active Project or could not be opened.</p>
     </section>
   <?php endif; ?>
 
@@ -1713,7 +1931,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   <?php if ($isActiveProject): ?><span class="status-pill healthy">Active</span><?php endif; ?>
                   <span>Production: <?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?></span>
                   <span>Preview: <?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?></span>
-                  <span class="button-link secondary">Expand</span>
+                  <span class="button-link secondary show-details">Show details</span>
+                  <span class="button-link secondary hide-details">Hide details</span>
                 </summary>
                 <?php if ($cardActionResult !== null): ?>
                   <?php renderOperationResult($cardActionResult, 'projectOperationLog-' . $projectIdForCard, ((string)($cardActionResult['action'] ?? 'project-operation')) . '-' . $projectIdForCard . '.log'); ?>
@@ -2128,7 +2347,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   <span>Preview config: <?= empty($orphan['preview']) ? 'No' : 'Yes' ?></span>
                   <span>Dirs: <?= is_dir((string)$orphan['production_path']) || is_dir((string)$orphan['preview_path']) ? 'Present' : 'Not present' ?></span>
                   <span>Git: <?= is_dir((string)$orphan['git_repository_path']) ? 'Present' : 'Not present' ?></span>
-                  <span class="button-link secondary">Expand</span>
+                  <span class="button-link secondary show-details">Show details</span>
+                  <span class="button-link secondary hide-details">Hide details</span>
                 </summary>
                 <table class="compact-table">
                   <tbody>
@@ -2526,12 +2746,13 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   });
 
   const taskForCodexPanel = () => codexRunPanel?.dataset.task || '';
+  const taskSourceForCodexPanel = () => codexRunPanel?.dataset.taskSource || 'project';
 
   const updateCodexLog = async (scrollToBottom = false) => {
     if (!codexConsole || !codexRunPanel) {
       return;
     }
-    const response = await fetch(`?action=codex-log&task=${encodeURIComponent(taskForCodexPanel())}`, { cache: 'no-store' });
+    const response = await fetch(`?action=codex-log&task=${encodeURIComponent(taskForCodexPanel())}&task_source=${encodeURIComponent(taskSourceForCodexPanel())}`, { cache: 'no-store' });
     const logText = await response.text();
     codexConsole.textContent = logText;
     if (scrollToBottom) {
@@ -2543,7 +2764,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     if (!codexRunPanel || !codexStatus) {
       return 'not_started';
     }
-    const response = await fetch(`?action=codex-status&task=${encodeURIComponent(taskForCodexPanel())}`, { cache: 'no-store' });
+    const response = await fetch(`?action=codex-status&task=${encodeURIComponent(taskForCodexPanel())}&task_source=${encodeURIComponent(taskSourceForCodexPanel())}`, { cache: 'no-store' });
     const payload = await response.json();
     if (!payload.ok) {
       throw new Error(payload.error || 'Unable to read Codex status.');
@@ -2567,7 +2788,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           if (status === 'completed') {
             window.setTimeout(() => {
               saveScrollPosition();
-              window.location.href = `?task=${encodeURIComponent(`${taskForCodexPanel()}.md`)}`;
+              window.location.href = `?task=${encodeURIComponent(`${taskForCodexPanel()}.md`)}&task_source=${encodeURIComponent(taskSourceForCodexPanel())}`;
             }, 1000);
           }
         }
@@ -2589,6 +2810,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     const formData = new FormData();
     formData.set('action', 'run-codex');
     formData.set('task', runCodex.dataset.task || '');
+    formData.set('task_source', runCodex.dataset.taskSource || 'project');
 
     try {
       const response = await fetch('', { method: 'POST', body: formData });

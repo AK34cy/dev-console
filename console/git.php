@@ -373,7 +373,7 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
         $status['diagnostic'] = 'Last authenticated remote access failed.';
         return $status;
     }
-    if (!empty($project['git']['remote_verified']) && (string)($project['git']['remote_head'] ?? '') === $status['remote_commit'] && (string)($project['git']['local_head'] ?? '') === $status['local_commit']) {
+    if ($bootstrapStatus === 'ready' && !empty($project['git']['remote_verified'])) {
         if ($dirty) {
             $status['status'] = 'CHANGES PRESENT';
         } elseif (($status['ahead'] ?? 0) > 0 && ($status['behind'] ?? 0) > 0) {
@@ -1090,7 +1090,12 @@ function gitPushRepository(array $configuration, string $projectId): array
     $push = gitRunAuthenticatedCommand(['git', '-C', $path, 'push', 'origin', 'main'], $github, 120);
     gitAppendCommandLog($log, $push);
     if ($push['exit_code'] !== 0) {
-        gitSaveProject($configuration, gitSetMetadata($project, ['remote_verified' => false, 'connected' => false, 'last_error_at' => date('c')]));
+        gitSaveProject($configuration, gitSetMetadata($project, [
+            'bootstrap_status' => 'ready',
+            'connected' => true,
+            'remote_verified' => true,
+            'last_error_at' => date('c'),
+        ]));
         return gitActionResult(false, 'Git push failed.', $log);
     }
     $fetch = gitRunAuthenticatedCommand(['git', '-C', $path, 'fetch', '--prune', 'origin'], $github, 120);

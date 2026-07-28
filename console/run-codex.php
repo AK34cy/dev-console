@@ -4,10 +4,13 @@ require __DIR__ . '/git.php';
 
 $taskId = (string)($argv[1] ?? '');
 $projectId = (string)($argv[2] ?? '');
+$taskSource = (string)($argv[3] ?? 'project');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
 $project = $projectId === '' ? null : devConsoleFindProjectById($projectConfiguration, $projectId);
 $githubConfiguration = devConsoleLoadGithubConfiguration();
-$repoRoot = devConsoleProjectTaskRoot($projectConfiguration, $project);
+$repoRoot = $taskSource === 'legacy' && $projectId === devConsoleFirstProjectId($projectConfiguration)
+    ? dirname(devConsoleRepositoryRoot())
+    : devConsoleProjectTaskRoot($projectConfiguration, $project);
 $runsDir = devConsoleProjectRunsDir($project);
 
 function workerIsTaskId(string $taskId): bool
@@ -15,13 +18,46 @@ function workerIsTaskId(string $taskId): bool
     return preg_match('/^TASK-\d{3}$/', $taskId) === 1;
 }
 
-function workerRunFile(string $runsDir, string $taskId, string $extension): string
+function workerTaskProjectId(string $body): string
+{
+    if (preg_match('/\A---\s*\R(.*?)\R---\s*(?:\R|$)/s', $body, $matches) !== 1) {
+        return '';
+    }
+    foreach (preg_split('/\R/', $matches[1]) ?: [] as $line) {
+        if (preg_match('/^project_id:\s*([a-z0-9]+(?:-[a-z0-9]+)*)\s*$/i', trim($line), $lineMatches) === 1) {
+            return strtolower($lineMatches[1]);
+        }
+    }
+
+    return '';
+}
+
+function workerAssertTaskBelongsToProject(string $repoRoot, string $taskId, ?array $project): void
+{
+    if ($project === null) {
+        throw new RuntimeException('Project not found.');
+    }
+    $path = $repoRoot . '/TASKS/TODO/' . $taskId . '.md';
+    if (!is_file($path)) {
+        throw new RuntimeException('Task file is not in TODO.');
+    }
+    $metadataProjectId = workerTaskProjectId((string)file_get_contents($path));
+    if ($metadataProjectId !== '' && $metadataProjectId !== (string)($project['id'] ?? '')) {
+        throw new RuntimeException('Task does not belong to the selected Project.');
+    }
+}
+
+function workerRunFile(string $runsDir, string $taskId, string $extension, string $source = 'project'): string
 {
     if (!workerIsTaskId($taskId)) {
         throw new RuntimeException('Invalid task id.');
     }
+    if (!in_array($source, ['project', 'legacy'], true)) {
+        throw new RuntimeException('Invalid task source.');
+    }
 
-    return $runsDir . '/' . $taskId . '.' . $extension;
+    $prefix = $source === 'project' ? '' : $source . '-';
+    return $runsDir . '/' . $prefix . $taskId . '.' . $extension;
 }
 
 function appendLog(string $logPath, string $message): void
@@ -396,10 +432,11 @@ try {
     if (!workerIsTaskId($taskId)) {
         throw new RuntimeException('Invalid task id.');
     }
+    workerAssertTaskBelongsToProject($repoRoot, $taskId, $project);
 
-    $promptPath = workerRunFile($runsDir, $taskId, 'prompt');
-    $statusPath = workerRunFile($runsDir, $taskId, 'status');
-    $logPath = workerRunFile($runsDir, $taskId, 'log');
+    $promptPath = workerRunFile($runsDir, $taskId, 'prompt', $taskSource);
+    $statusPath = workerRunFile($runsDir, $taskId, 'status', $taskSource);
+    $logPath = workerRunFile($runsDir, $taskId, 'log', $taskSource);
 
     if (!is_file($promptPath)) {
         throw new RuntimeException('Prompt file not found.');
@@ -448,8 +485,8 @@ try {
     appendActivity($logPath, 'Completed successfully');
 } catch (Throwable $exception) {
     if (workerIsTaskId($taskId)) {
-        $statusPath = workerRunFile($runsDir, $taskId, 'status');
-        $logPath = workerRunFile($runsDir, $taskId, 'log');
+        $statusPath = workerRunFile($runsDir, $taskId, 'status', $taskSource);
+        $logPath = workerRunFile($runsDir, $taskId, 'log', $taskSource);
         writeStatus($statusPath, 'failed');
         appendLog($logPath, 'Error: ' . $exception->getMessage());
         appendActivity($logPath, 'Failed');
