@@ -1416,6 +1416,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             }
             $operationSteps = operationSummarySteps($projectAction, $projectActionResult);
             $operationLogId = 'projectOperationLog';
+            $operationLog = (string)($projectActionResult['output'] ?? '');
+            $hasOperationLog = trim($operationLog) !== '';
           ?>
           <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
             <h2><?= h($projectActionTitle) ?></h2>
@@ -1427,15 +1429,17 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 <?php endforeach; ?>
               </ul>
             <?php endif; ?>
-            <details<?= !empty($projectActionResult['success']) ? '' : ' open' ?>>
-              <summary>Show operation log</summary>
-              <div class="result-actions">
-                <button type="button" class="secondary" data-copy-log="<?= h($operationLogId) ?>">Copy Log</button>
-                <button type="button" class="secondary" data-download-log="<?= h($operationLogId) ?>" data-download-name="<?= h($projectAction !== '' ? $projectAction . '.log' : 'project-operation.log') ?>">Download Log</button>
-                <span class="hint" data-log-message="<?= h($operationLogId) ?>" aria-live="polite"></span>
-              </div>
-              <pre id="<?= h($operationLogId) ?>"><?= h((string)($projectActionResult['output'] ?? '')) ?></pre>
-            </details>
+            <?php if ($hasOperationLog): ?>
+              <details<?= !empty($projectActionResult['success']) ? '' : ' open' ?>>
+                <summary>Show operation log</summary>
+                <div class="result-actions">
+                  <button type="button" class="secondary" data-copy-log="<?= h($operationLogId) ?>">Copy Log</button>
+                  <button type="button" class="secondary" data-download-log="<?= h($operationLogId) ?>" data-download-name="<?= h($projectAction !== '' ? $projectAction . '.log' : 'project-operation.log') ?>">Download Log</button>
+                  <span class="hint" data-log-message="<?= h($operationLogId) ?>" aria-live="polite"></span>
+                </div>
+                <pre id="<?= h($operationLogId) ?>"><?= h($operationLog) ?></pre>
+              </details>
+            <?php endif; ?>
           </section>
         <?php endif; ?>
         <?php if (empty($projects)): ?>
