@@ -434,7 +434,7 @@ function projectVerifyRoutingAction(array $configuration, string $projectId, arr
     $verification = projectVerifyRouting($project, $options);
     $log = array_merge($log, $verification['log']);
     $updatedProject = projectApplyRoutingVerificationMetadata($project, $verification);
-    if (empty($options['skip_save']) && !devConsoleSaveProjectConfiguration(devConsoleReplaceProject($configuration, $updatedProject))) {
+    if (empty($options['skip_save']) && !devConsoleSaveProjectConfiguration(devConsoleTouchProject(devConsoleReplaceProject($configuration, $updatedProject), (string)($project['id'] ?? '')))) {
         return projectActionResult(false, 'Unable to save routing verification metadata.', $log);
     }
 
@@ -673,7 +673,7 @@ function projectProvision(array $configuration, string $projectId, array $option
             'preview_routing_verified' => !empty($verification['results']['preview']['matched']),
         ];
         if (empty($options['skip_save'])) {
-            $updatedConfiguration = devConsoleReplaceProject($configuration, $project);
+            $updatedConfiguration = devConsoleTouchProject(devConsoleReplaceProject($configuration, $project), (string)$project['id']);
             if (!devConsoleSaveProjectConfiguration($updatedConfiguration)) {
                 throw new RuntimeException('Unable to save provisioning metadata.');
             }

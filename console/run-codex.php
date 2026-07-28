@@ -1,10 +1,12 @@
 <?php
 require __DIR__ . '/config.php';
+require __DIR__ . '/git.php';
 
 $taskId = (string)($argv[1] ?? '');
 $projectId = (string)($argv[2] ?? '');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
 $project = $projectId === '' ? null : devConsoleFindProjectById($projectConfiguration, $projectId);
+$githubConfiguration = devConsoleLoadGithubConfiguration();
 $repoRoot = devConsoleProjectTaskRoot($projectConfiguration, $project);
 $runsDir = devConsoleProjectRunsDir($project);
 
@@ -290,25 +292,25 @@ function processEnvironment(): array
 function runLoggedCommand(array $arguments, string $cwd, string $logPath): array
 {
     appendActivity($logPath, activityForCommand($arguments));
-
-    $descriptors = [
-        0 => ['pipe', 'r'],
-        1 => ['pipe', 'w'],
-        2 => ['pipe', 'w'],
-    ];
-
-    $process = proc_open(shellCommand($arguments), $descriptors, $pipes, $cwd, processEnvironment());
-    if (!is_resource($process)) {
-        throw new RuntimeException('Unable to start git command.');
+    $isGitPush = ($arguments[0] ?? '') === 'git' && ($arguments[1] ?? '') === 'push';
+    if ($isGitPush && is_array($GLOBALS['project'] ?? null) && devConsoleGithubConfigured($GLOBALS['githubConfiguration'] ?? [])) {
+        $result = gitRunAuthenticatedCommand(array_merge(['git', '-C', $cwd], array_slice($arguments, 1)), $GLOBALS['githubConfiguration'], 120);
+    } else {
+        $result = processRunCommand($arguments, [
+            'cwd' => $cwd,
+            'env' => [
+                'GIT_TERMINAL_PROMPT' => '0',
+                'GIT_AUTHOR_NAME' => 'IOVON Dev Console',
+                'GIT_AUTHOR_EMAIL' => 'iovon@iovon.com',
+                'GIT_COMMITTER_NAME' => 'IOVON Dev Console',
+                'GIT_COMMITTER_EMAIL' => 'iovon@iovon.com',
+            ],
+            'inherit_env' => false,
+            'timeout' => 120,
+        ]);
     }
-
-    fclose($pipes[0]);
-    $stdout = stream_get_contents($pipes[1]) ?: '';
-    $stderr = stream_get_contents($pipes[2]) ?: '';
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    $exitCode = proc_close($process);
-    $output = trim($stdout . ($stderr === '' ? '' : "\n" . $stderr));
+    $exitCode = (int)$result['exit_code'];
+    $output = trim((string)$result['output']);
 
     if ($exitCode !== 0) {
         appendLog($logPath, commandForLog($arguments) . ' failed: ' . ($output === '' ? 'no output' : substr($output, 0, 1000)));

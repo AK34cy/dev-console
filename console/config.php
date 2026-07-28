@@ -70,6 +70,7 @@ function devConsoleEmptyProject(): array
             'last_fetch_at' => null,
             'last_pull_at' => null,
         ],
+        'last_activity_at' => null,
         'provisioning' => [
             'managed' => false,
             'provisioned_at' => null,
@@ -100,6 +101,10 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
             if (isset($projectInput[$field]) && is_scalar($projectInput[$field])) {
                 $project[$field] = trim((string)$projectInput[$field]);
             }
+        }
+        if (array_key_exists('last_activity_at', $projectInput)) {
+            $value = $projectInput['last_activity_at'];
+            $project['last_activity_at'] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
         }
 
         foreach (['production', 'preview'] as $environment) {
@@ -396,7 +401,12 @@ function devConsoleActiveProject(array $configuration): ?array
 function devConsoleSetActiveProject(array $configuration, string $projectId): array
 {
     $configuration = devConsoleNormalizeProjectConfiguration($configuration);
-    $configuration['active_project_id'] = devConsoleFindProjectById($configuration, $projectId) === null ? null : $projectId;
+    if ($projectId !== '' && devConsoleFindProjectById($configuration, $projectId) !== null) {
+        $configuration = devConsoleTouchProject($configuration, $projectId);
+        $configuration['active_project_id'] = $projectId;
+    } else {
+        $configuration['active_project_id'] = null;
+    }
     return devConsoleNormalizeProjectConfiguration($configuration);
 }
 
@@ -419,9 +429,6 @@ function devConsoleFirstProjectId(array $configuration): string
 function devConsoleProjectTaskRoot(array $configuration, ?array $project): string
 {
     if ($project === null) {
-        return dirname(devConsoleRepositoryRoot());
-    }
-    if ((string)($project['id'] ?? '') === devConsoleFirstProjectId($configuration)) {
         return dirname(devConsoleRepositoryRoot());
     }
 
@@ -492,6 +499,44 @@ function devConsoleReplaceProject(array $configuration, array $updatedProject): 
     return $configuration;
 }
 
+function devConsoleTouchProject(array $configuration, string $projectId, ?string $timestamp = null): array
+{
+    $configuration = devConsoleNormalizeProjectConfiguration($configuration);
+    $timestamp ??= date('c');
+    foreach ($configuration['projects'] as $index => $project) {
+        if ((string)($project['id'] ?? '') === $projectId) {
+            $project['last_activity_at'] = $timestamp;
+            unset($configuration['projects'][$index]);
+            array_unshift($configuration['projects'], $project);
+            break;
+        }
+    }
+
+    return devConsoleNormalizeProjectConfiguration($configuration);
+}
+
+function devConsoleProjectActivityTimestamp(array $project): int
+{
+    $timestamp = (string)($project['last_activity_at'] ?? '');
+    $parsed = $timestamp === '' ? false : strtotime($timestamp);
+    return $parsed === false ? 0 : $parsed;
+}
+
+function devConsoleProjectsForDisplay(array $configuration): array
+{
+    $projects = devConsoleProjects($configuration);
+    usort($projects, static function (array $left, array $right): int {
+        $activity = devConsoleProjectActivityTimestamp($right) <=> devConsoleProjectActivityTimestamp($left);
+        if ($activity !== 0) {
+            return $activity;
+        }
+
+        return strcasecmp((string)($left['name'] ?? ''), (string)($right['name'] ?? ''));
+    });
+
+    return $projects;
+}
+
 function devConsoleRemoveProjectFromConfiguration(array $configuration, string $projectId): array
 {
     $configuration = devConsoleNormalizeProjectConfiguration($configuration);
@@ -499,7 +544,7 @@ function devConsoleRemoveProjectFromConfiguration(array $configuration, string $
         return ($project['id'] ?? '') !== $projectId;
     }));
 
-    return $configuration;
+    return devConsoleNormalizeProjectConfiguration($configuration);
 }
 
 function devConsoleProjectIdFromName(string $name): string
@@ -626,6 +671,7 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
         'name' => $name,
         'repository_path' => $repositoryPath,
         'branch' => $branch,
+        'last_activity_at' => date('c'),
         'production' => [
             'domain' => $productionDomain,
             'path' => $productionPath,
@@ -648,9 +694,12 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
 function devConsoleAppendProjectToConfiguration(array $configuration, array $project): array
 {
     $configuration = devConsoleNormalizeProjectConfiguration($configuration);
-    $configuration['projects'][] = $project;
+    array_unshift($configuration['projects'], $project);
+    if ((string)($configuration['active_project_id'] ?? '') === '') {
+        $configuration['active_project_id'] = (string)($project['id'] ?? '');
+    }
 
-    return $configuration;
+    return devConsoleNormalizeProjectConfiguration($configuration);
 }
 
 function devConsoleAppendProject(array $input): array

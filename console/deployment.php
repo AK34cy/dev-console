@@ -458,11 +458,6 @@ function slowDashboardValues(): array
             'production' => directoryStatistics($environment['production_document_root']),
         ],
     ];
-    foreach ($values['software'] as $name => $version) {
-        if ($version === 'Not installed' && !empty($lastSuccessful['software'][$name]) && $lastSuccessful['software'][$name] !== 'Not installed') {
-            $values['software'][$name] = $lastSuccessful['software'][$name];
-        }
-    }
     foreach ($values['statistics'] as $name => $statistics) {
         $previousStatistics = $lastSuccessful['statistics'][$name] ?? null;
         if (($statistics['bytes'] ?? 0) === 0 && is_array($previousStatistics) && ($previousStatistics['bytes'] ?? 0) > 0) {

@@ -411,7 +411,9 @@ function gitSetBootstrapState(array $configuration, array $project, string $stat
 
 function gitSaveProject(array $configuration, array $project): bool
 {
-    return devConsoleSaveProjectConfiguration(devConsoleReplaceProject($configuration, $project));
+    $configuration = devConsoleReplaceProject($configuration, $project);
+    $configuration = devConsoleTouchProject($configuration, (string)($project['id'] ?? ''));
+    return devConsoleSaveProjectConfiguration($configuration);
 }
 
 function gitEnsureRepositoryBase(array &$log): bool
@@ -1070,4 +1072,47 @@ function gitPullRepository(array $configuration, string $projectId): array
     ]);
     if (!gitSaveProject($configuration, $project)) return gitActionResult(false, 'Unable to save Git pull metadata.', $log);
     return gitActionResult(true, 'Git pull completed.', $log);
+}
+
+function gitPushRepository(array $configuration, string $projectId): array
+{
+    $project = devConsoleFindProjectById($configuration, $projectId);
+    if ($project === null) return gitActionResult(false, 'Project not found.');
+    $github = devConsoleLoadGithubConfiguration();
+    if ($error = gitAssertConnectedRepository($project, $github)) return gitActionResult(false, $error);
+    $path = gitProjectRepositoryPath($project);
+    if (gitCurrentBranch($path) !== 'main') return gitActionResult(false, 'Current branch does not match project branch.');
+
+    $log = [];
+    $remoteSet = gitRunFixedCommand(['git', '-C', $path, 'remote', 'set-url', 'origin', gitExpectedCloneUrl($project, $github)], 10, [], false);
+    gitAppendCommandLog($log, $remoteSet);
+    if ($remoteSet['exit_code'] !== 0) return gitActionResult(false, 'Git remote configuration failed', $log);
+    $push = gitRunAuthenticatedCommand(['git', '-C', $path, 'push', 'origin', 'main'], $github, 120);
+    gitAppendCommandLog($log, $push);
+    if ($push['exit_code'] !== 0) {
+        gitSaveProject($configuration, gitSetMetadata($project, ['remote_verified' => false, 'connected' => false, 'last_error_at' => date('c')]));
+        return gitActionResult(false, 'Git push failed.', $log);
+    }
+    $fetch = gitRunAuthenticatedCommand(['git', '-C', $path, 'fetch', '--prune', 'origin'], $github, 120);
+    gitAppendCommandLog($log, $fetch);
+    if ($fetch['exit_code'] !== 0) {
+        return gitActionResult(false, 'Git push completed, but remote verification failed.', $log);
+    }
+    $verified = gitReadVerifiedRepositoryMetadata($path);
+    if ($verified === null || ($verified['local_head'] ?? '') !== ($verified['remote_head'] ?? '')) {
+        return gitActionResult(false, 'Local and remote commits do not match', $log);
+    }
+    $project = gitSetMetadata($project, $verified + [
+        'provider' => 'github',
+        'repository_owner' => (string)$github['account'],
+        'repository_name' => (string)$project['id'],
+        'remote_url' => gitExpectedRemoteUrl($project, $github),
+        'clone_url' => gitExpectedCloneUrl($project, $github),
+        'bootstrap_status' => 'ready',
+        'connected' => true,
+        'last_error_at' => null,
+        'last_fetch_at' => date('c'),
+    ]);
+    if (!gitSaveProject($configuration, $project)) return gitActionResult(false, 'Unable to save Git push metadata.', $log);
+    return gitActionResult(true, 'Git push completed.', $log);
 }

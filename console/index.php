@@ -112,6 +112,9 @@ $projects = devConsoleProjects($projectConfiguration);
 $activeProject = devConsoleActiveProject($projectConfiguration);
 $activeProjectId = $activeProject === null ? '' : (string)($activeProject['id'] ?? '');
 deploymentSetProject($activeProject);
+$githubConfiguration = devConsoleLoadGithubConfiguration();
+$githubConfigured = devConsoleGithubConfigured($githubConfiguration);
+$githubCliInstalled = gitGhInstalled();
 $legacyRepoRoot = dirname(__DIR__, 2);
 $repoRoot = devConsoleProjectTaskRoot($projectConfiguration, $activeProject);
 $todoDir = $repoRoot . '/TASKS/TODO';
@@ -128,6 +131,16 @@ function configuredDisplayValue($value): string
 {
     $text = is_array($value) ? implode(', ', array_map('strval', $value)) : (string)$value;
     return trim($text) === '' ? 'Not configured' : $text;
+}
+
+function projectMessageName(?array $project, string $fallback = ''): string
+{
+    $name = trim((string)($project['name'] ?? ''));
+    if ($name === '') {
+        $name = trim($fallback);
+    }
+
+    return $name === '' ? 'Project' : $name;
 }
 
 function relativePath(string $repoRoot, string $path): string
@@ -173,7 +186,7 @@ function taskMarkdownMetadata(string $body): array
 
 function taskGitMetadata(string $repoRoot): array
 {
-    $cachePath = DEPLOY_STATE_DIR . '/task-git-metadata.json';
+    $cachePath = DEPLOY_STATE_DIR . '/task-git-metadata-' . substr(hash('sha256', $repoRoot), 0, 16) . '.json';
     if (is_file($cachePath) && time() - (filemtime($cachePath) ?: 0) < 60) {
         $cached = json_decode((string)file_get_contents($cachePath), true);
         if (is_array($cached)) return $cached;
@@ -532,18 +545,58 @@ function sendJson(array $payload): void
     echo json_encode($payload, JSON_UNESCAPED_SLASHES);
 }
 
-function runCommand(array $arguments, string $cwd): array
+function taskGitCommand(array $arguments, string $repoRoot, int $timeoutSeconds = 120): array
 {
-    return processRunCommand($arguments, [
-        'cwd' => $cwd,
+    return processRunCommand(array_merge(['git', '-C', $repoRoot], $arguments), [
+        'cwd' => $repoRoot,
         'env' => [
+            'GIT_TERMINAL_PROMPT' => '0',
             'GIT_AUTHOR_NAME' => 'IOVON Dev Console',
             'GIT_AUTHOR_EMAIL' => 'iovon@iovon.com',
             'GIT_COMMITTER_NAME' => 'IOVON Dev Console',
             'GIT_COMMITTER_EMAIL' => 'iovon@iovon.com',
         ],
-        'timeout' => 120,
+        'inherit_env' => false,
+        'timeout' => $timeoutSeconds,
     ]);
+}
+
+function taskGitAuthenticatedCommand(array $arguments, string $repoRoot, array $githubConfiguration, int $timeoutSeconds = 120): array
+{
+    return gitRunAuthenticatedCommand(array_merge(['git', '-C', $repoRoot], $arguments), $githubConfiguration, $timeoutSeconds);
+}
+
+function taskRepositoryReadiness(?array $project, array $githubConfiguration): array
+{
+    if ($project === null) {
+        return ['ready' => false, 'reason' => 'Select or create a Project before creating tasks.'];
+    }
+    $path = gitProjectRepositoryPath($project);
+    if ($path === '' || gitValidateProjectRepositoryPath($project) !== null) {
+        return ['ready' => false, 'reason' => 'Repository path is not valid for this Project.'];
+    }
+    if (!is_dir($path) || is_link($path)) {
+        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'];
+    }
+
+    $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
+    if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') {
+        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'];
+    }
+    if ((string)($project['git']['bootstrap_status'] ?? '') !== 'ready' || empty($project['git']['connected'])) {
+        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'];
+    }
+    if ($error = gitAssertConnectedRepository($project, $githubConfiguration)) {
+        return ['ready' => false, 'reason' => $error];
+    }
+
+    return ['ready' => true, 'reason' => ''];
+}
+
+function codexCliInstalled(): bool
+{
+    $result = processRunCommand(['codex', '--version'], ['timeout' => 5]);
+    return !empty($result['success']);
 }
 
 function extractCommitHash(string $output): string
@@ -580,6 +633,54 @@ function renderGitOutput(array $results): void
     echo '</details>';
 }
 
+function projectActionTitle(string $projectAction, bool $success): string
+{
+    if ($projectAction === 'provision_project') return $success ? 'Project set up' : 'Project setup failed';
+    if ($projectAction === 'remove_project') return $success ? 'Project removed' : 'Project removal failed';
+    if ($projectAction === 'delete_project') return $success ? 'Project deleted' : 'Project deletion failed';
+    if ($projectAction === 'verify_project_routing') return $success ? 'Websites checked' : 'Website check failed';
+    if ($projectAction === 'initialize_repository') return $success ? 'Repository initialized' : 'Repository initialization failed';
+    if ($projectAction === 'fetch_git_repository') return $success ? 'Git fetch completed' : 'Git fetch failed';
+    if ($projectAction === 'pull_git_repository') return $success ? 'Git pull completed' : 'Git pull failed';
+    if ($projectAction === 'push_git_repository') return $success ? 'Git push completed' : 'Git push failed';
+    if ($projectAction === 'cleanup_orphaned_project') return $success ? 'Orphaned infrastructure cleaned up' : 'Orphaned cleanup failed';
+
+    return $success ? 'Project action completed' : 'Project action failed';
+}
+
+function renderOperationResult(array $result, string $operationLogId, string $downloadName): void
+{
+    $projectAction = (string)($result['action'] ?? '');
+    $success = !empty($result['success']);
+    $operationSteps = operationSummarySteps($projectAction, $result);
+    $operationLog = (string)($result['output'] ?? '');
+    $hasOperationLog = trim($operationLog) !== '';
+    ?>
+    <section class="result-block <?= $success ? '' : 'error' ?>">
+      <h2><?= h(projectActionTitle($projectAction, $success)) ?></h2>
+      <p><?= h((string)$result['message']) ?></p>
+      <?php if (!empty($operationSteps)): ?>
+        <ul class="operation-summary">
+          <?php foreach ($operationSteps as $step): ?>
+            <li>Done: <?= h($step) ?></li>
+          <?php endforeach; ?>
+        </ul>
+      <?php endif; ?>
+      <?php if ($hasOperationLog): ?>
+        <details<?= $success ? '' : ' open' ?>>
+          <summary>Show operation log</summary>
+          <div class="result-actions">
+            <button type="button" class="secondary" data-copy-log="<?= h($operationLogId) ?>">Copy Log</button>
+            <button type="button" class="secondary" data-download-log="<?= h($operationLogId) ?>" data-download-name="<?= h($downloadName) ?>">Download Log</button>
+            <span class="hint" data-log-message="<?= h($operationLogId) ?>" aria-live="polite"></span>
+          </div>
+          <pre id="<?= h($operationLogId) ?>"><?= h($operationLog) ?></pre>
+        </details>
+      <?php endif; ?>
+    </section>
+    <?php
+}
+
 function projectLifecycleLabel(array $project, array $projectStatus): string
 {
     $status = (string)($projectStatus['label'] ?? 'Not set up');
@@ -613,6 +714,9 @@ function operationSummarySteps(string $action, array $result): array
     }
     if ($action === 'pull_git_repository') {
         return ['Remote changes fetched', 'Fast-forward pull completed', 'Git status refreshed'];
+    }
+    if ($action === 'push_git_repository') {
+        return ['Local commits pushed', 'Remote branch verified', 'Git status refreshed'];
     }
     if ($action === 'provision_project') {
         return ['Project directories prepared', 'Apache configuration ready', 'Routing verified'];
@@ -652,6 +756,11 @@ $projectFormValues = [
 ];
 $projectFlash = '';
 $results = [];
+$taskPushWarning = '';
+$taskRepositoryReadiness = taskRepositoryReadiness($activeProject, $githubConfiguration);
+$taskCreationReady = !empty($taskRepositoryReadiness['ready']);
+$taskCreationUnavailableReason = (string)($taskRepositoryReadiness['reason'] ?? '');
+$codexCliReady = codexCliInstalled();
 $requestMethod = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $action = (string)($_GET['action'] ?? $_POST['action'] ?? '');
 
@@ -743,6 +852,9 @@ if ($action === 'environment-status') {
 if ($action === 'run-codex' && $requestMethod === 'POST') {
     $taskId = (string)($_POST['task'] ?? '');
     try {
+        if (!$codexCliReady) {
+            throw new RuntimeException('Codex CLI is not installed on this server.');
+        }
         startCodexRun($repoRoot, $runsDir, $taskId);
         $status = codexRunStatus($runsDir, $taskId);
         sendJson(['ok' => true, 'task' => $taskId, 'status' => $status, 'label' => statusLabel($status)]);
@@ -770,12 +882,13 @@ if (in_array($action, apacheAllowedActions(), true)) {
 
 if ($action === 'select_active_project') {
     $projectId = is_scalar($_POST['project_id'] ?? null) ? (string)$_POST['project_id'] : '';
+    $projectForSelection = devConsoleFindProjectById(devConsoleLoadProjectConfiguration(), $projectId);
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $_SESSION['project_flash'] = 'Invalid project selection request.';
     } elseif (!devConsoleSaveActiveProject($projectId)) {
         $_SESSION['project_flash'] = 'Unable to select Project.';
     } else {
-        $_SESSION['project_flash'] = 'Active Project selected.';
+        $_SESSION['project_flash'] = 'Project "' . projectMessageName($projectForSelection, $projectId) . '" selected for Dashboard.';
     }
     $targetTab = (string)($_POST['target_tab'] ?? 'settings') === 'dashboard' ? 'dashboard' : 'settings';
     header('Location: /?tab=' . $targetTab);
@@ -811,7 +924,7 @@ if ($action === 'create_project') {
     } else {
         $projectResult = devConsoleAppendProject($projectFormValues);
         if (!empty($projectResult['valid']) && !empty($projectResult['saved'])) {
-            $_SESSION['project_flash'] = 'Project created.';
+            $_SESSION['project_flash'] = 'Project "' . projectMessageName($projectResult['project'] ?? null, $projectFormValues['project_name']) . '" created.';
             header('Location: /?tab=settings#projects');
             exit;
         }
@@ -820,9 +933,11 @@ if ($action === 'create_project') {
     }
 }
 
-if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'cleanup_orphaned_project'], true)) {
+if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project'], true)) {
     $projectConfigurationForAction = devConsoleLoadProjectConfiguration();
     $projectId = is_scalar($_POST['project_id'] ?? null) ? (string)$_POST['project_id'] : '';
+    $projectForAction = devConsoleFindProjectById($projectConfigurationForAction, $projectId);
+    $projectNameForAction = projectMessageName($projectForAction, $projectId);
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $projectActionResult = projectActionResult(false, 'Invalid project action request.');
     } elseif ($action === 'provision_project') {
@@ -835,6 +950,8 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
         $projectActionResult = gitFetchRepository($projectConfigurationForAction, $projectId);
     } elseif ($action === 'pull_git_repository') {
         $projectActionResult = gitPullRepository($projectConfigurationForAction, $projectId);
+    } elseif ($action === 'push_git_repository') {
+        $projectActionResult = gitPushRepository($projectConfigurationForAction, $projectId);
     } elseif ($action === 'remove_project') {
         $projectActionResult = projectRemoveFromConsole($projectConfigurationForAction, $projectId);
     } elseif ($action === 'cleanup_orphaned_project') {
@@ -844,12 +961,43 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
         $projectActionResult = projectDelete($projectConfigurationForAction, $projectId, $confirmation);
     }
     $projectActionResult['action'] = $action;
+    $projectActionResult['project_id'] = $projectId;
+    $projectActionResult['project_name'] = $projectNameForAction;
+    if (!empty($projectActionResult['success'])) {
+        if ($action === 'provision_project') {
+            $projectActionResult['message'] = 'Project "' . $projectNameForAction . '" set up.';
+        } elseif ($action === 'verify_project_routing') {
+            $projectActionResult['message'] = 'Websites for "' . $projectNameForAction . '" checked.';
+        } elseif ($action === 'initialize_repository') {
+            $projectActionResult['message'] = 'Repository for "' . $projectNameForAction . '" initialized.';
+        } elseif ($action === 'fetch_git_repository') {
+            $projectActionResult['message'] = 'Repository for "' . $projectNameForAction . '" fetched.';
+        } elseif ($action === 'pull_git_repository') {
+            $projectActionResult['message'] = 'Repository for "' . $projectNameForAction . '" pulled.';
+        } elseif ($action === 'push_git_repository') {
+            $projectActionResult['message'] = 'Repository for "' . $projectNameForAction . '" pushed.';
+        } elseif ($action === 'remove_project') {
+            $projectActionResult['message'] = 'Project "' . $projectNameForAction . '" removed from Dev Console.';
+        } elseif ($action === 'delete_project') {
+            $projectActionResult['message'] = 'Project "' . $projectNameForAction . '" deleted.';
+        } elseif ($action === 'cleanup_orphaned_project') {
+            $projectActionResult['message'] = 'Infrastructure for "' . $projectNameForAction . '" cleaned up.';
+        }
+    } else {
+        $prefix = $action === 'cleanup_orphaned_project'
+            ? 'Infrastructure for "' . $projectNameForAction . '": '
+            : 'Project "' . $projectNameForAction . '": ';
+        $projectActionResult['message'] = $prefix . (string)($projectActionResult['message'] ?? 'Action failed.');
+    }
+    if (empty($projectActionResult['success']) && $projectForAction !== null && !in_array($action, ['remove_project', 'delete_project'], true)) {
+        devConsoleSaveProjectConfiguration(devConsoleTouchProject($projectConfigurationForAction, $projectId));
+    }
     $_SESSION['project_action_result'] = $projectActionResult;
     header('Location: /?tab=settings#' . ($action === 'cleanup_orphaned_project' ? 'apache' : 'projects'));
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -858,6 +1006,9 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
         }
         if ($activeProject === null) {
             throw new RuntimeException('Select or create a Project before creating tasks.');
+        }
+        if (!$taskCreationReady) {
+            throw new RuntimeException($taskCreationUnavailableReason);
         }
 
         if (!is_dir($todoDir) && !mkdir($todoDir, 0755, true)) {
@@ -918,20 +1069,38 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
             $pathsToAdd[] = relativePath($repoRoot, $taskAttachmentDir);
         }
 
-        $results[] = runCommand(array_merge(['git', 'add'], $pathsToAdd), $repoRoot);
+        $taskCommitted = false;
+        $results[] = taskGitCommand(array_merge(['add'], $pathsToAdd), $repoRoot);
         if (end($results)['exit_code'] !== 0) {
             throw new RuntimeException('git add failed.');
         }
 
-        $results[] = runCommand(['git', 'commit', '-m', 'Add ' . $taskId], $repoRoot);
+        $results[] = taskGitCommand(['commit', '-m', 'Add ' . $taskId], $repoRoot);
         $commitHash = extractCommitHash(end($results)['output']);
         if (end($results)['exit_code'] !== 0) {
             throw new RuntimeException('git commit failed.');
         }
+        $taskCommitted = true;
 
-        $results[] = runCommand(['git', 'push', 'origin', 'main'], $repoRoot);
+        $results[] = taskGitAuthenticatedCommand(['push', 'origin', 'main'], $repoRoot, $githubConfiguration);
         if (end($results)['exit_code'] !== 0) {
-            throw new RuntimeException('git push failed.');
+            $taskPushWarning = 'Task ' . $taskId . ' was created and committed locally, but synchronization with GitHub failed. Use Push in Settings to retry.';
+        } else {
+            $results[] = taskGitAuthenticatedCommand(['fetch', '--prune', 'origin'], $repoRoot, $githubConfiguration);
+            if (end($results)['exit_code'] === 0) {
+                $refreshedConfiguration = devConsoleLoadProjectConfiguration();
+                $refreshedProject = devConsoleFindProjectById($refreshedConfiguration, $activeProjectId);
+                $verified = gitReadVerifiedRepositoryMetadata($repoRoot);
+                if ($refreshedProject !== null && $verified !== null) {
+                    gitSaveProject($refreshedConfiguration, gitSetMetadata($refreshedProject, $verified + [
+                        'bootstrap_status' => 'ready',
+                        'connected' => true,
+                        'remote_verified' => true,
+                        'last_error_at' => null,
+                        'last_fetch_at' => date('c'),
+                    ]));
+                }
+            }
         }
 
         $prompt = codexPromptForTask($repoRoot, $taskId);
@@ -944,6 +1113,21 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
         }
     } catch (Throwable $exception) {
         $error = $exception->getMessage();
+        if (empty($taskCommitted ?? false) && isset($taskPath) && is_file($taskPath)) {
+            @unlink($taskPath);
+        }
+        if (empty($taskCommitted ?? false) && isset($taskAttachmentDir) && is_dir($taskAttachmentDir)) {
+            foreach (array_diff(scandir($taskAttachmentDir) ?: [], ['.', '..']) as $entry) {
+                @unlink($taskAttachmentDir . '/' . $entry);
+            }
+            @rmdir($taskAttachmentDir);
+        }
+        if (empty($taskCommitted ?? false)) {
+            $createdTaskId = '';
+            $createdTaskPath = '';
+            $attachmentPaths = [];
+            $commitHash = '';
+        }
     }
 }
 
@@ -962,6 +1146,7 @@ if ($createdTaskId !== '' && $error === '') {
 }
 $activeRunStatus = $activeTaskId === '' ? 'not_started' : codexRunStatus($runsDir, $activeTaskId);
 $taskGitCompleted = $activeTaskId !== '';
+$taskGitPushed = $activeTaskId !== '' && $taskPushWarning === '';
 $editorTaskId = $viewTask ? pathinfo($viewTask['filename'], PATHINFO_FILENAME) : '';
 $editorBody = ($createdTaskId === '' && $viewTask) ? $viewTask['body'] : '';
 $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $editorTaskId;
@@ -979,9 +1164,6 @@ $managedApacheSites = array_values(array_filter($apacheSites, static function (a
 }));
 $otherApacheSites = array_values(array_filter($apacheSites, fn(array $site): bool => !str_starts_with((string)($site['name'] ?? ''), 'dev-console-')));
 $apacheState = apacheState();
-$githubConfiguration = devConsoleLoadGithubConfiguration();
-$githubConfigured = devConsoleGithubConfigured($githubConfiguration);
-$githubCliInstalled = gitGhInstalled();
 $projectFlash = (string)($_SESSION['project_flash'] ?? '');
 unset($_SESSION['project_flash']);
 $projectActionResult = is_array($_SESSION['project_action_result'] ?? null) ? $_SESSION['project_action_result'] : $projectActionResult;
@@ -1004,6 +1186,7 @@ foreach ($projects as $project) {
     }
     $gitStatuses[(string)($project['id'] ?? '')] = gitStatus($project, $githubConfiguration);
 }
+$projectsForDisplay = devConsoleProjectsForDisplay($projectConfiguration);
 $serverAddress = (string)($_SERVER['SERVER_ADDR'] ?? '');
 if ($serverAddress === '' || in_array($serverAddress, ['127.0.0.1', '::1'], true)) {
     $serverAddress = 'SERVER_IP';
@@ -1172,6 +1355,13 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .field-help { color: var(--muted); font-size: 12px; margin: 5px 0 0; }
     .project-list { display: grid; gap: 12px; }
     .project-item { background: #f8fbfc; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+    .project-item > summary { cursor: pointer; list-style: none; }
+    .project-item > summary::-webkit-details-marker { display: none; }
+    .project-summary { align-items: center; display: flex; flex-wrap: wrap; gap: 8px 12px; justify-content: space-between; }
+    .project-summary > span:first-child { display: grid; gap: 2px; margin-right: auto; }
+    .project-summary .button-link { font-size: 12px; margin-top: 0; padding: 6px 9px; }
+    .project-item[open] .project-summary { border-bottom: 1px solid var(--line); margin-bottom: 12px; padding-bottom: 10px; }
+    .project-item[open] .project-summary .button-link { display: none; }
     .project-item-header { align-items: flex-start; display: flex; gap: 12px; justify-content: space-between; }
     .project-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .project-actions form { margin: 0; }
@@ -1280,6 +1470,15 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     <?php if ($editorTaskId !== ''): ?>
       <p class="meta" id="viewingTaskNote">Viewing existing task. Editing here will not update the saved task.</p>
     <?php endif; ?>
+    <?php if (!$taskCreationReady): ?>
+      <p class="error">Repository is not initialized. Initialize Repository in Settings before creating tasks.</p>
+      <?php if ($taskCreationUnavailableReason !== '' && $taskCreationUnavailableReason !== 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'): ?>
+        <p class="meta"><?= h($taskCreationUnavailableReason) ?></p>
+      <?php endif; ?>
+    <?php endif; ?>
+    <?php if ($taskPushWarning !== ''): ?>
+      <p class="success-message"><?= h($taskPushWarning) ?></p>
+    <?php endif; ?>
     <p id="nextTaskNumber"><strong>Next task number:</strong> <?= h(taskNumber($nextNumber)) ?></p>
     <form method="post" enctype="multipart/form-data" id="taskForm" data-created="<?= h($createdTaskPath !== '' && $error === '' ? '1' : '0') ?>">
       <label for="task_body">Task markdown body</label>
@@ -1297,7 +1496,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
         <div class="selected-files" id="selectedFiles">No files selected.</div>
       </label>
 
-      <button type="submit">Create Task</button>
+      <button type="submit"<?= $taskCreationReady ? '' : ' disabled title="Initialize Repository in Settings before creating tasks."' ?>>Create Task</button>
     </form>
   </section>
 
@@ -1307,16 +1506,20 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           <p class="meta">Current task: <strong><?= h($activeTaskId) ?></strong> · <?= h($activeTaskStatus) ?></p>
           <ul class="workflow-steps">
             <li><span class="step-state done">Done</span><span>Task file created<?php if ($activeTaskPath !== ''): ?>: <code><?= h($activeTaskPath) ?></code><?php endif; ?></span></li>
-            <li><span class="step-state <?= h($taskGitCompleted ? 'done' : 'pending') ?>"><?= h($taskGitCompleted ? 'Done' : 'Ready') ?></span><span>Task committed and pushed<?php if ($commitHash !== ''): ?>: <code title="<?= h($commitHash) ?>"><?= h(shortSha($commitHash)) ?></code><?php endif; ?></span></li>
+            <li><span class="step-state <?= h($taskGitCompleted ? 'done' : 'pending') ?>"><?= h($taskGitCompleted ? 'Done' : 'Ready') ?></span><span>Task committed locally<?php if ($commitHash !== ''): ?>: <code title="<?= h($commitHash) ?>"><?= h(shortSha($commitHash)) ?></code><?php endif; ?></span></li>
+            <li><span class="step-state <?= h($taskGitPushed ? 'done' : 'pending') ?>"><?= h($taskGitPushed ? 'Done' : 'Pending') ?></span><span><?= h($taskGitPushed ? 'Task synchronized with GitHub' : 'GitHub synchronization needs retry from Settings') ?></span></li>
             <li><span class="step-state <?= h(in_array($activeRunStatus, ['completed', 'failed'], true) ? 'done' : 'pending') ?>"><?= h(statusLabel($activeRunStatus)) ?></span><span>Codex run status</span></li>
           </ul>
           <div class="prompt-actions">
-            <?php if ($activeTaskStatus === 'TODO'): ?>
+            <?php if ($activeTaskStatus === 'TODO' && $codexCliReady): ?>
               <button type="button" id="runCodex" data-task="<?= h($activeTaskId) ?>">Run Codex</button>
             <?php else: ?>
-              <button type="button" disabled>Run Codex</button>
+              <button type="button" disabled title="<?= h($activeTaskStatus === 'TODO' ? 'Codex CLI is not installed on this server.' : 'Only TODO tasks can be run with Codex.') ?>">Run Codex</button>
             <?php endif; ?>
             <a class="button-link" href="?task=<?= h(rawurlencode($activeTaskId . '.md')) ?>" target="_blank" rel="noopener">Open TASK</a>
+            <?php if ($activeTaskStatus === 'TODO' && !$codexCliReady): ?>
+              <span class="hint">Codex CLI is not installed on this server.</span>
+            <?php endif; ?>
           </div>
           <?php if (!empty($attachmentPaths)): ?>
             <div class="attachment-list">
@@ -1469,67 +1672,28 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
         <?php if ($projectFlash !== ''): ?>
           <p class="success-message"><?= h($projectFlash) ?></p>
         <?php endif; ?>
-        <?php if ($projectActionResult !== null && (string)($projectActionResult['action'] ?? '') !== 'cleanup_orphaned_project'): ?>
-          <?php
-            $projectAction = (string)($projectActionResult['action'] ?? '');
-            $projectActionTitle = !empty($projectActionResult['success']) ? 'Project action completed' : 'Project action failed';
-            if ($projectAction === 'provision_project') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Project set up' : 'Project setup failed';
-            } elseif ($projectAction === 'remove_project') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Project removed' : 'Project removal failed';
-            } elseif ($projectAction === 'delete_project') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Project deleted' : 'Project deletion failed';
-            } elseif ($projectAction === 'verify_project_routing') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Websites checked' : 'Website check failed';
-            } elseif ($projectAction === 'initialize_repository') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Repository initialized' : 'Repository initialization failed';
-            } elseif ($projectAction === 'fetch_git_repository') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Git fetch completed' : 'Git fetch failed';
-            } elseif ($projectAction === 'pull_git_repository') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Git pull completed' : 'Git pull failed';
-            } elseif ($projectAction === 'cleanup_orphaned_project') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Orphaned infrastructure cleaned up' : 'Orphaned cleanup failed';
-            }
-            $operationSteps = operationSummarySteps($projectAction, $projectActionResult);
-            $operationLogId = 'projectOperationLog';
-            $operationLog = (string)($projectActionResult['output'] ?? '');
-            $hasOperationLog = trim($operationLog) !== '';
-          ?>
-          <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
-            <h2><?= h($projectActionTitle) ?></h2>
-            <p><?= h((string)$projectActionResult['message']) ?></p>
-            <?php if (!empty($operationSteps)): ?>
-              <ul class="operation-summary">
-                <?php foreach ($operationSteps as $step): ?>
-                  <li>Done: <?= h($step) ?></li>
-                <?php endforeach; ?>
-              </ul>
-            <?php endif; ?>
-            <?php if ($hasOperationLog): ?>
-              <details<?= !empty($projectActionResult['success']) ? '' : ' open' ?>>
-                <summary>Show operation log</summary>
-                <div class="result-actions">
-                  <button type="button" class="secondary" data-copy-log="<?= h($operationLogId) ?>">Copy Log</button>
-                  <button type="button" class="secondary" data-download-log="<?= h($operationLogId) ?>" data-download-name="<?= h($projectAction !== '' ? $projectAction . '.log' : 'project-operation.log') ?>">Download Log</button>
-                  <span class="hint" data-log-message="<?= h($operationLogId) ?>" aria-live="polite"></span>
-                </div>
-                <pre id="<?= h($operationLogId) ?>"><?= h($operationLog) ?></pre>
-              </details>
-            <?php endif; ?>
-          </section>
+        <?php if ($projectActionResult !== null && in_array((string)($projectActionResult['action'] ?? ''), ['remove_project', 'delete_project'], true)): ?>
+          <?php renderOperationResult($projectActionResult, 'projectOperationLog', ((string)($projectActionResult['action'] ?? 'project-operation')) . '.log'); ?>
         <?php endif; ?>
         <?php if (empty($projects)): ?>
           <p class="meta">No projects configured yet.</p>
         <?php else: ?>
           <div class="project-list">
-            <?php foreach ($projects as $project): ?>
+            <?php foreach ($projectsForDisplay as $project): ?>
               <?php
+                $projectIdForCard = (string)($project['id'] ?? '');
                 $projectStatus = $projectStatuses[(string)($project['id'] ?? '')] ?? projectStatus($project);
                 $statusLabel = (string)$projectStatus['label'];
                 $statusClass = $statusLabel === 'Ready' ? 'healthy' : ($statusLabel === 'Configuration drift' ? 'error' : 'warning');
                 $lifecycleLabel = projectLifecycleLabel($project, $projectStatus);
                 $isManaged = !empty($project['provisioning']['managed']);
-                $isActiveProject = (string)($project['id'] ?? '') === $activeProjectId;
+                $isActiveProject = $projectIdForCard === $activeProjectId;
+                $cardActionResult = $projectActionResult !== null
+                    && (string)($projectActionResult['project_id'] ?? '') === $projectIdForCard
+                    && !in_array((string)($projectActionResult['action'] ?? ''), ['remove_project', 'delete_project', 'cleanup_orphaned_project'], true)
+                        ? $projectActionResult
+                        : null;
+                $cardOpen = $cardActionResult !== null || $projectIdForCard === (string)($projectsForDisplay[0]['id'] ?? '');
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
                 $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
                 $gitStatus = $gitStatuses[(string)($project['id'] ?? '')] ?? gitStatus($project, $githubConfiguration);
@@ -1537,8 +1701,23 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $gitCanInitialize = in_array($gitStatus['status'], ['NOT INITIALIZED', 'INITIALIZATION INCOMPLETE', 'REMOTE UNAVAILABLE'], true);
                 $gitCanFetch = !empty($gitStatus['can_fetch']) && in_array($gitStatus['status'], ['INITIALIZATION INCOMPLETE', 'CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND', 'REMOTE UNAVAILABLE'], true);
                 $gitCanPull = !empty($gitStatus['can_pull']) && in_array($gitStatus['status'], ['CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND'], true);
+                $gitCanPush = !empty($gitStatus['can_fetch']) && in_array($gitStatus['status'], ['AHEAD', 'AHEAD / BEHIND', 'REMOTE UNAVAILABLE'], true);
               ?>
-              <section class="project-item">
+              <details class="project-item"<?= $cardOpen ? ' open' : '' ?>>
+                <summary class="project-summary">
+                  <span>
+                    <strong><?= h(configuredDisplayValue($project['name'] ?? '')) ?></strong>
+                    <span class="meta"><?= h(configuredDisplayValue($project['id'] ?? '')) ?></span>
+                  </span>
+                  <span class="status-pill <?= h($statusClass) ?>"><?= h($lifecycleLabel) ?></span>
+                  <?php if ($isActiveProject): ?><span class="status-pill healthy">Active</span><?php endif; ?>
+                  <span>Production: <?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?></span>
+                  <span>Preview: <?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?></span>
+                  <span class="button-link secondary">Expand</span>
+                </summary>
+                <?php if ($cardActionResult !== null): ?>
+                  <?php renderOperationResult($cardActionResult, 'projectOperationLog-' . $projectIdForCard, ((string)($cardActionResult['action'] ?? 'project-operation')) . '-' . $projectIdForCard . '.log'); ?>
+                <?php endif; ?>
                 <div class="project-item-header">
                   <div>
                     <h3><?= h(configuredDisplayValue($project['name'] ?? '')) ?></h3>
@@ -1652,6 +1831,14 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                           <button type="submit" class="secondary"<?= $githubConfigured && ($gitStatus['pull_disabled_reason'] ?? '') === '' ? '' : ' disabled title="' . h((string)($gitStatus['pull_disabled_reason'] ?: 'Configure GitHub before network Git actions.')) . '"' ?>>Pull</button>
                         </form>
                       <?php endif; ?>
+                      <?php if ($gitCanPush): ?>
+                        <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                          <input type="hidden" name="action" value="push_git_repository">
+                          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                          <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                          <button type="submit" class="secondary"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub before network Git actions."' ?>>Push</button>
+                        </form>
+                      <?php endif; ?>
                     </div>
                   <?php endif; ?>
                 </section>
@@ -1691,7 +1878,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                     <button type="submit" class="danger" title="Removes Dev Console-managed directories and Apache configuration. Preserves Git repositories."<?= $isManaged ? '' : ' disabled' ?>>Delete Project</button>
                   </form>
                 </div>
-              </section>
+              </details>
             <?php endforeach; ?>
           </div>
         <?php endif; ?>
@@ -1890,8 +2077,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           </section>
         <?php endif; ?>
 
-        <section class="apache-sites">
-        <h2>Managed Sites</h2>
+        <details class="apache-sites compact-details" open>
+        <summary>Managed Sites (<?= h((string)count($managedApacheSites)) ?>)</summary>
         <?php if (empty($apacheSites)): ?>
           <p class="meta">No Apache site configurations detected.</p>
         <?php elseif (empty($managedApacheSites)): ?>
@@ -1923,18 +2110,26 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           </table>
           </div>
         <?php endif; ?>
-        <?php if (!empty($orphanedApacheInfrastructure)): ?>
-          <section class="apache-sites">
-            <h2>Orphaned Dev Console Infrastructure</h2>
+        </details>
+        <details class="apache-sites compact-details"<?= !empty($orphanedApacheInfrastructure) ? ' open' : '' ?>>
+          <summary>Orphaned Dev Console Infrastructure (<?= h((string)count($orphanedApacheInfrastructure)) ?>)</summary>
+          <?php if (empty($orphanedApacheInfrastructure)): ?>
+            <p class="meta">No orphaned Dev Console infrastructure detected.</p>
+          <?php else: ?>
             <p class="field-help">These Dev Console Apache configurations no longer belong to a registered Project. Clean Up preserves local Git repositories and GitHub repositories.</p>
             <?php foreach ($orphanedApacheInfrastructure as $orphan): ?>
-              <section class="project-item">
-                <div class="project-item-header">
-                  <div>
-                    <h3><?= h((string)$orphan['project_id']) ?></h3>
-                    <p class="meta">Former Project infrastructure</p>
-                  </div>
-                </div>
+              <details class="project-item"<?= count($orphanedApacheInfrastructure) === 1 ? ' open' : '' ?>>
+                <summary class="project-summary">
+                  <span>
+                    <strong><?= h((string)$orphan['project_id']) ?></strong>
+                    <span class="meta">Former Project infrastructure</span>
+                  </span>
+                  <span>Production config: <?= empty($orphan['production']) ? 'No' : 'Yes' ?></span>
+                  <span>Preview config: <?= empty($orphan['preview']) ? 'No' : 'Yes' ?></span>
+                  <span>Dirs: <?= is_dir((string)$orphan['production_path']) || is_dir((string)$orphan['preview_path']) ? 'Present' : 'Not present' ?></span>
+                  <span>Git: <?= is_dir((string)$orphan['git_repository_path']) ? 'Present' : 'Not present' ?></span>
+                  <span class="button-link secondary">Expand</span>
+                </summary>
                 <table class="compact-table">
                   <tbody>
                     <tr><th>Production config</th><td><?= h(configuredDisplayValue($orphan['production']['name'] ?? '')) ?></td></tr>
@@ -1951,13 +2146,13 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   <input type="hidden" name="project_id" value="<?= h((string)$orphan['project_id']) ?>">
                   <button type="submit" class="danger">Clean Up</button>
                 </form>
-              </section>
+              </details>
             <?php endforeach; ?>
-          </section>
-        <?php endif; ?>
+          <?php endif; ?>
+        </details>
         <?php if (!empty($otherApacheSites)): ?>
-          <details class="compact-details">
-            <summary>Other Apache sites (<?= h((string)count($otherApacheSites)) ?>)</summary>
+          <details class="apache-sites compact-details">
+            <summary>Other Apache Sites (<?= h((string)count($otherApacheSites)) ?>)</summary>
             <div class="table-scroll">
             <table class="settings-table compact-sites">
               <thead>
@@ -1985,7 +2180,6 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             </div>
           </details>
         <?php endif; ?>
-        </section>
       </section>
       </div>
     </div>
@@ -2011,7 +2205,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   const copyCodexLog = document.getElementById('copyCodexLog');
   const copyCodexMessage = document.getElementById('copyCodexMessage');
   const csrfToken = <?= json_encode($csrfToken, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
-  const draftKey = 'iovon.devConsole.taskDraft';
+  const activeProjectId = <?= json_encode($activeProjectId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const draftKey = `dev-console-task-draft-${activeProjectId || 'none'}`;
   const environmentDashboard = document.getElementById('environmentDashboard');
   const dashboardUpdated = document.getElementById('dashboardUpdated');
   const activeTask = <?= json_encode($activeTaskId === '' ? 'None' : $activeTaskId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -2190,7 +2385,15 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
       const memory = data.server.memory;
       const disk = data.server.disk;
       const softwareNames = ['PHP', 'Composer', 'Node.js', 'npm', 'Git', 'Codex CLI'];
-      const softwareRows = softwareNames.map((name) => `<tr><th>${dashboardEscape(name.replace('Node.js', 'Node').replace('Codex CLI', 'Codex'))}</th><td>${dashboardEscape(data.software[name])}</td></tr>`).join('');
+      const readiness = {
+        PHP: 'Required',
+        Composer: 'Optional / project-dependent',
+        'Node.js': 'Optional / project-dependent',
+        npm: 'Optional / project-dependent',
+        Git: 'Required',
+        'Codex CLI': 'Required for Run Codex',
+      };
+      const softwareRows = softwareNames.map((name) => `<tr><th>${dashboardEscape(name)}</th><td>${dashboardEscape(data.software[name])}<br><span class="meta">${dashboardEscape(readiness[name] || '')}</span></td></tr>`).join('');
       const processes = data.processes.length ? data.processes.map((process) => `<tr><td>${process.pid}</td><td>${dashboardEscape(process.user)}</td><td>${process.cpu.toFixed(1)}</td><td>${process.memory.toFixed(1)}</td><td>${dashboardEscape(process.command)}</td></tr>`).join('') : '<tr><td colspan="5">No process data available.</td></tr>';
       const previewHealth = statusClass(preview.status);
       const productionHealth = statusClass(production.status);
