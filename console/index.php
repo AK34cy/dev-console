@@ -107,11 +107,17 @@ if (PHP_SAPI !== 'cli' && empty($_SESSION['dev_console_authenticated'])) {
 if (empty($_SESSION['csrf_token'])) $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 $csrfToken = (string)$_SESSION['csrf_token'];
 
-$repoRoot = dirname(__DIR__, 2);
+$projectConfiguration = devConsoleLoadProjectConfiguration();
+$projects = devConsoleProjects($projectConfiguration);
+$activeProject = devConsoleActiveProject($projectConfiguration);
+$activeProjectId = $activeProject === null ? '' : (string)($activeProject['id'] ?? '');
+deploymentSetProject($activeProject);
+$legacyRepoRoot = dirname(__DIR__, 2);
+$repoRoot = devConsoleProjectTaskRoot($projectConfiguration, $activeProject);
 $todoDir = $repoRoot . '/TASKS/TODO';
 $doneDir = $repoRoot . '/TASKS/DONE';
 $attachmentsRoot = $repoRoot . '/TASKS/ATTACHMENTS';
-$runsDir = __DIR__ . '/runs';
+$runsDir = devConsoleProjectRunsDir($activeProject);
 
 function h(string $value): string
 {
@@ -442,7 +448,7 @@ function codexPromptForTask(string $repoRoot, string $taskId): string
 Follow AGENTS.md.
 
 Work in repository:
-" . dirname(__DIR__);
+" . $repoRoot;
 
     $attachmentPrompt = attachmentPromptText($repoRoot, $taskId);
     if ($attachmentPrompt !== '') {
@@ -516,7 +522,7 @@ function startCodexRun(string $repoRoot, string $runsDir, string $taskId): void
     file_put_contents($logPath, '[' . date('c') . "] Queued Codex run for {$taskId}.\n");
 
     $worker = __DIR__ . '/run-codex.php';
-    $command = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($taskId) . ' >/dev/null 2>&1 &';
+    $command = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($taskId) . ' ' . escapeshellarg((string)($GLOBALS['activeProjectId'] ?? '')) . ' >/dev/null 2>&1 &';
     exec($command);
 }
 
@@ -612,10 +618,13 @@ function operationSummarySteps(string $action, array $result): array
         return ['Project directories prepared', 'Apache configuration ready', 'Routing verified'];
     }
     if ($action === 'verify_project_routing') {
-        return ['Apache ServerName checked', 'Routing verified'];
+        return ['Apache ServerName checked', 'Websites checked'];
     }
     if ($action === 'delete_project') {
         return ['Managed Apache configuration removed', 'Managed project directories removed', 'Git repository preserved'];
+    }
+    if ($action === 'cleanup_orphaned_project') {
+        return ['Orphaned Apache configuration removed', 'Orphaned project directories removed', 'Git repositories preserved'];
     }
     if ($action === 'remove_project') {
         return ['Project registration removed', 'Server files preserved'];
@@ -681,6 +690,9 @@ if ($action === 'deployment-preview' || $action === 'deployment-start') {
         http_response_code(403); sendJson(['ok' => false, 'error' => 'Invalid deployment request.']); exit;
     }
     try {
+        if ($activeProject === null) {
+            throw new RuntimeException('Select or create a Project before deploying.');
+        }
         $environment = (string)($_POST['environment'] ?? '');
         $configuration = deploymentConfiguration($environment);
         $errors = deploymentValidation($environment);
@@ -708,7 +720,7 @@ if ($action === 'deployment-preview' || $action === 'deployment-start') {
         $state = newDeploymentState($environment, 'pending', $summary, 'local-console');
         writeDeploymentState($state); appendDeploymentLog($state, 'Deployment queued.');
         $worker = __DIR__ . '/run-deployment.php';
-        exec('nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($environment) . ' ' . escapeshellarg($state['id']) . ' >/dev/null 2>&1 &');
+        exec('nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($environment) . ' ' . escapeshellarg($state['id']) . ' ' . escapeshellarg($activeProjectId) . ' >/dev/null 2>&1 &');
         sendJson(['ok' => true, 'deployment' => $state]); exit;
     } catch (Throwable $exception) {
         http_response_code(400); sendJson(['ok' => false, 'error' => $exception->getMessage()]); exit;
@@ -756,6 +768,20 @@ if (in_array($action, apacheAllowedActions(), true)) {
     exit;
 }
 
+if ($action === 'select_active_project') {
+    $projectId = is_scalar($_POST['project_id'] ?? null) ? (string)$_POST['project_id'] : '';
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $_SESSION['project_flash'] = 'Invalid project selection request.';
+    } elseif (!devConsoleSaveActiveProject($projectId)) {
+        $_SESSION['project_flash'] = 'Unable to select Project.';
+    } else {
+        $_SESSION['project_flash'] = 'Active Project selected.';
+    }
+    $targetTab = (string)($_POST['target_tab'] ?? 'settings') === 'dashboard' ? 'dashboard' : 'settings';
+    header('Location: /?tab=' . $targetTab);
+    exit;
+}
+
 if (in_array($action, ['save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli'], true)) {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $githubActionResult = gitActionResult(false, 'Invalid GitHub management request.');
@@ -794,7 +820,7 @@ if ($action === 'create_project') {
     }
 }
 
-if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository'], true)) {
+if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'cleanup_orphaned_project'], true)) {
     $projectConfigurationForAction = devConsoleLoadProjectConfiguration();
     $projectId = is_scalar($_POST['project_id'] ?? null) ? (string)$_POST['project_id'] : '';
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
@@ -811,22 +837,27 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
         $projectActionResult = gitPullRepository($projectConfigurationForAction, $projectId);
     } elseif ($action === 'remove_project') {
         $projectActionResult = projectRemoveFromConsole($projectConfigurationForAction, $projectId);
+    } elseif ($action === 'cleanup_orphaned_project') {
+        $projectActionResult = projectCleanupOrphanedInfrastructure($projectConfigurationForAction, $projectId);
     } else {
         $confirmation = is_scalar($_POST['confirm_project_id'] ?? null) ? (string)$_POST['confirm_project_id'] : '';
         $projectActionResult = projectDelete($projectConfigurationForAction, $projectId, $confirmation);
     }
     $projectActionResult['action'] = $action;
     $_SESSION['project_action_result'] = $projectActionResult;
-    header('Location: /?tab=settings#projects');
+    header('Location: /?tab=settings#' . ($action === 'cleanup_orphaned_project' ? 'apache' : 'projects'));
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
         if ($body === '') {
             throw new RuntimeException('Task markdown body is required.');
+        }
+        if ($activeProject === null) {
+            throw new RuntimeException('Select or create a Project before creating tasks.');
         }
 
         if (!is_dir($todoDir) && !mkdir($todoDir, 0755, true)) {
@@ -857,7 +888,11 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
         if (!$handle) {
             throw new RuntimeException('Unable to create task file without overwriting.');
         }
-        fwrite($handle, rtrim($body) . "\n");
+        $taskBody = rtrim($body);
+        if (!preg_match('/^Project:\s*/mi', $taskBody)) {
+            $taskBody = "Project: " . $activeProjectId . "\n" . $taskBody;
+        }
+        fwrite($handle, $taskBody . "\n");
         fclose($handle);
 
         $pathsToAdd = [relativePath($repoRoot, $taskPath)];
@@ -935,7 +970,13 @@ $productionDeploymentOverview = deploymentOverview('production');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
 $projects = devConsoleProjects($projectConfiguration);
 $apacheSites = devConsoleApacheSites();
-$managedApacheSites = array_values(array_filter($apacheSites, fn(array $site): bool => str_starts_with((string)($site['name'] ?? ''), 'dev-console-')));
+$registeredProjectIds = array_flip(array_map(static fn(array $project): string => (string)($project['id'] ?? ''), $projects));
+$orphanedApacheInfrastructure = projectOrphanedApacheInfrastructure($projectConfiguration, $apacheSites);
+$managedApacheSites = array_values(array_filter($apacheSites, static function (array $site) use ($registeredProjectIds): bool {
+    $name = (string)($site['name'] ?? '');
+    return preg_match('/^dev-console-([a-z0-9]+(?:-[a-z0-9]+)*)-(production|preview)\.conf$/', $name, $matches) === 1
+        && isset($registeredProjectIds[$matches[1]]);
+}));
 $otherApacheSites = array_values(array_filter($apacheSites, fn(array $site): bool => !str_starts_with((string)($site['name'] ?? ''), 'dev-console-')));
 $apacheState = apacheState();
 $githubConfiguration = devConsoleLoadGithubConfiguration();
@@ -984,6 +1025,11 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     code { background: #edf7fb; border-radius: 4px; padding: 2px 5px; }
     .dashboard-columns { align-items: start; display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) 440px; }
     .dashboard-column { min-width: 0; }
+    .project-selector { align-items: end; display: grid; gap: 12px; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); }
+    .project-selector form { margin: 0; }
+    .project-selector label { margin-top: 0; }
+    .project-identity { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+    .project-identity span { color: var(--muted); font-size: 12px; }
     .panel, .result-block { background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 18px rgba(0, 83, 133, 0.07); margin-top: 14px; padding: 18px; }
     .result-block h2, .command-output h3 { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 15px; }
     .result-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
@@ -1200,6 +1246,33 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     </section>
   <?php endif; ?>
 
+  <section class="panel project-selector">
+    <?php if ($activeProject === null): ?>
+      <div>
+        <h2>Project</h2>
+        <p class="meta">No Projects are registered yet. Create a Project in Settings to use the Dashboard.</p>
+      </div>
+    <?php else: ?>
+      <form method="post" action="/?tab=dashboard" data-preserve-settings-scroll="1">
+        <input type="hidden" name="action" value="select_active_project">
+        <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+        <input type="hidden" name="target_tab" value="dashboard">
+        <label for="activeProjectSelect">Project</label>
+        <select id="activeProjectSelect" name="project_id" onchange="this.form.submit()">
+          <?php foreach ($projects as $project): ?>
+            <option value="<?= h((string)$project['id']) ?>"<?= (string)$project['id'] === $activeProjectId ? ' selected' : '' ?>><?= h((string)$project['name']) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </form>
+      <div class="project-identity">
+        <span><strong><?= h((string)($activeProject['name'] ?? '')) ?></strong></span>
+        <span>Production: <?= h(configuredDisplayValue($activeProject['production']['domain'] ?? '')) ?></span>
+        <span>Preview: <?= h(configuredDisplayValue($activeProject['preview']['domain'] ?? '')) ?></span>
+      </div>
+    <?php endif; ?>
+  </section>
+
+  <?php if ($activeProject !== null): ?>
   <div class="dashboard-columns">
   <div class="dashboard-column dashboard-column-left">
   <section class="panel" id="create-task">
@@ -1350,6 +1423,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     </section>
   </div>
   </div>
+  <?php endif; ?>
 
   <?php if (!$viewTask && isset($_GET['task']) && (string)$_GET['task'] !== ''): ?>
     <section class="panel error">
@@ -1395,7 +1469,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
         <?php if ($projectFlash !== ''): ?>
           <p class="success-message"><?= h($projectFlash) ?></p>
         <?php endif; ?>
-        <?php if ($projectActionResult !== null): ?>
+        <?php if ($projectActionResult !== null && (string)($projectActionResult['action'] ?? '') !== 'cleanup_orphaned_project'): ?>
           <?php
             $projectAction = (string)($projectActionResult['action'] ?? '');
             $projectActionTitle = !empty($projectActionResult['success']) ? 'Project action completed' : 'Project action failed';
@@ -1406,13 +1480,15 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             } elseif ($projectAction === 'delete_project') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Project deleted' : 'Project deletion failed';
             } elseif ($projectAction === 'verify_project_routing') {
-                $projectActionTitle = !empty($projectActionResult['success']) ? 'Project routing verified' : 'Project routing verification failed';
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Websites checked' : 'Website check failed';
             } elseif ($projectAction === 'initialize_repository') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Repository initialized' : 'Repository initialization failed';
             } elseif ($projectAction === 'fetch_git_repository') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Git fetch completed' : 'Git fetch failed';
             } elseif ($projectAction === 'pull_git_repository') {
                 $projectActionTitle = !empty($projectActionResult['success']) ? 'Git pull completed' : 'Git pull failed';
+            } elseif ($projectAction === 'cleanup_orphaned_project') {
+                $projectActionTitle = !empty($projectActionResult['success']) ? 'Orphaned infrastructure cleaned up' : 'Orphaned cleanup failed';
             }
             $operationSteps = operationSummarySteps($projectAction, $projectActionResult);
             $operationLogId = 'projectOperationLog';
@@ -1453,6 +1529,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $statusClass = $statusLabel === 'Ready' ? 'healthy' : ($statusLabel === 'Configuration drift' ? 'error' : 'warning');
                 $lifecycleLabel = projectLifecycleLabel($project, $projectStatus);
                 $isManaged = !empty($project['provisioning']['managed']);
+                $isActiveProject = (string)($project['id'] ?? '') === $activeProjectId;
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
                 $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
                 $gitStatus = $gitStatuses[(string)($project['id'] ?? '')] ?? gitStatus($project, $githubConfiguration);
@@ -1467,7 +1544,20 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                     <h3><?= h(configuredDisplayValue($project['name'] ?? '')) ?></h3>
                     <p class="meta"><?= h(configuredDisplayValue($project['id'] ?? '')) ?></p>
                   </div>
-                  <span class="status-pill <?= h($statusClass) ?>"><?= h($statusLabel) ?></span>
+                  <div class="project-actions">
+                    <span class="status-pill <?= h($statusClass) ?>"><?= h($statusLabel) ?></span>
+                    <?php if ($isActiveProject): ?>
+                      <span class="status-pill healthy">Active</span>
+                    <?php else: ?>
+                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                        <input type="hidden" name="action" value="select_active_project">
+                        <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                        <input type="hidden" name="target_tab" value="settings">
+                        <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                        <button type="submit" class="secondary">Use on Dashboard</button>
+                      </form>
+                    <?php endif; ?>
+                  </div>
                 </div>
                 <table class="compact-table">
                   <tbody>
@@ -1581,7 +1671,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                       <input type="hidden" name="action" value="verify_project_routing">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                      <button type="submit" class="secondary" title="Run routing checks again without changing project configuration.">Reverify Routing</button>
+                      <button type="submit" class="secondary" title="Validate Apache configuration and check Production and Preview routing.">Check Websites</button>
                     </form>
                   <?php endif; ?>
                   <p class="action-note">Alternative actions: choose Remove from Console to unregister the project, or Delete Project to remove Dev Console-managed local infrastructure.</p>
@@ -1736,6 +1826,38 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
 
       <section class="panel" id="apache">
         <h2>Apache</h2>
+        <?php if ($projectActionResult !== null && (string)($projectActionResult['action'] ?? '') === 'cleanup_orphaned_project'): ?>
+          <?php
+            $projectAction = (string)($projectActionResult['action'] ?? '');
+            $projectActionTitle = !empty($projectActionResult['success']) ? 'Orphaned infrastructure cleaned up' : 'Orphaned cleanup failed';
+            $operationSteps = operationSummarySteps($projectAction, $projectActionResult);
+            $operationLogId = 'orphanCleanupOperationLog';
+            $operationLog = (string)($projectActionResult['output'] ?? '');
+            $hasOperationLog = trim($operationLog) !== '';
+          ?>
+          <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
+            <h2><?= h($projectActionTitle) ?></h2>
+            <p><?= h((string)$projectActionResult['message']) ?></p>
+            <?php if (!empty($operationSteps)): ?>
+              <ul class="operation-summary">
+                <?php foreach ($operationSteps as $step): ?>
+                  <li>Done: <?= h($step) ?></li>
+                <?php endforeach; ?>
+              </ul>
+            <?php endif; ?>
+            <?php if ($hasOperationLog): ?>
+              <details<?= !empty($projectActionResult['success']) ? '' : ' open' ?>>
+                <summary>Show operation log</summary>
+                <div class="result-actions">
+                  <button type="button" class="secondary" data-copy-log="<?= h($operationLogId) ?>">Copy Log</button>
+                  <button type="button" class="secondary" data-download-log="<?= h($operationLogId) ?>" data-download-name="orphan-cleanup.log">Download Log</button>
+                  <span class="hint" data-log-message="<?= h($operationLogId) ?>" aria-live="polite"></span>
+                </div>
+                <pre id="<?= h($operationLogId) ?>"><?= h($operationLog) ?></pre>
+              </details>
+            <?php endif; ?>
+          </section>
+        <?php endif; ?>
         <div class="apache-summary">
           <dl class="apache-summary-grid">
             <div><dt>Status</dt><dd><?= h(apacheStatusLabel($apacheState)) ?></dd></div>
@@ -1800,6 +1922,38 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             </tbody>
           </table>
           </div>
+        <?php endif; ?>
+        <?php if (!empty($orphanedApacheInfrastructure)): ?>
+          <section class="apache-sites">
+            <h2>Orphaned Dev Console Infrastructure</h2>
+            <p class="field-help">These Dev Console Apache configurations no longer belong to a registered Project. Clean Up preserves local Git repositories and GitHub repositories.</p>
+            <?php foreach ($orphanedApacheInfrastructure as $orphan): ?>
+              <section class="project-item">
+                <div class="project-item-header">
+                  <div>
+                    <h3><?= h((string)$orphan['project_id']) ?></h3>
+                    <p class="meta">Former Project infrastructure</p>
+                  </div>
+                </div>
+                <table class="compact-table">
+                  <tbody>
+                    <tr><th>Production config</th><td><?= h(configuredDisplayValue($orphan['production']['name'] ?? '')) ?></td></tr>
+                    <tr><th>Preview config</th><td><?= h(configuredDisplayValue($orphan['preview']['name'] ?? '')) ?></td></tr>
+                    <tr><th>Production directory</th><td><?= is_dir((string)$orphan['production_path']) ? h((string)$orphan['production_path']) : 'Not present' ?></td></tr>
+                    <tr><th>Preview directory</th><td><?= is_dir((string)$orphan['preview_path']) ? h((string)$orphan['preview_path']) : 'Not present' ?></td></tr>
+                    <tr><th>Local Git repository</th><td><?= is_dir((string)$orphan['git_repository_path']) ? h((string)$orphan['git_repository_path']) . ' (preserved)' : 'Not present' ?></td></tr>
+                  </tbody>
+                </table>
+                <p class="action-note">Clean Up removes orphaned Dev Console Apache configuration and matching Production/Preview directories only. Local Git and GitHub repositories are preserved.</p>
+                <form method="post" class="project-actions" action="/?tab=settings#apache" data-preserve-settings-scroll="1" onsubmit="return confirm('Clean up orphaned Dev Console infrastructure for <?= h((string)$orphan['project_id']) ?>? Local Git and GitHub repositories will be preserved.');">
+                  <input type="hidden" name="action" value="cleanup_orphaned_project">
+                  <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                  <input type="hidden" name="project_id" value="<?= h((string)$orphan['project_id']) ?>">
+                  <button type="submit" class="danger">Clean Up</button>
+                </form>
+              </section>
+            <?php endforeach; ?>
+          </section>
         <?php endif; ?>
         <?php if (!empty($otherApacheSites)): ?>
           <details class="compact-details">

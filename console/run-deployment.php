@@ -1,8 +1,17 @@
 <?php
 require __DIR__ . '/deployment.php';
+require __DIR__ . '/config.php';
 
 $environment = (string)($argv[1] ?? '');
 $id = (string)($argv[2] ?? '');
+$projectId = (string)($argv[3] ?? '');
+if ($projectId !== '') {
+    $projectConfiguration = devConsoleLoadProjectConfiguration();
+    $project = devConsoleFindProjectById($projectConfiguration, $projectId);
+    if ($project !== null) {
+        deploymentSetProject($project);
+    }
+}
 try { $configuration = deploymentConfiguration($environment); } catch (Throwable) { exit(1); }
 $target = $configuration['target'];
 $state = readDeploymentState($environment, $id);
@@ -40,15 +49,17 @@ try {
     appendDeploymentLog($state, 'Post-deployment verification started.');
     if (!deploymentTargetIsExpected($environment)) throw new RuntimeException('Synchronization targeted the wrong directory; expected ' . $target . '.');
     if (!is_file($target . '/index.php')) throw new RuntimeException(ucfirst($environment) . ' entry page is missing.');
-    $sourceIndexHash = hash_file('sha256', DEPLOY_SOURCE . '/index.php');
+    $sourceIndexHash = hash_file('sha256', deploymentSourcePath() . '/index.php');
     $targetIndexHash = hash_file('sha256', $target . '/index.php');
     if ($sourceIndexHash === false || $targetIndexHash === false || !hash_equals($sourceIndexHash, $targetIndexHash)) {
         throw new RuntimeException('Deployed index.php does not match the source version.');
     }
     appendDeploymentLog($state, 'Source and ' . $environment . ' index.php versions match.');
-    if (!is_readable($target . '/pages/articles/articles.json')) throw new RuntimeException(ucfirst($environment) . ' articles JSON is not readable.');
-    foreach (DEPLOY_REQUIRED_DIRS as $directory) {
-        if (!is_dir($target . '/' . $directory)) throw new RuntimeException('Expected ' . $environment . ' directory is missing: ' . $directory);
+    if (deploymentActiveProject() === null) {
+        if (!is_readable($target . '/pages/articles/articles.json')) throw new RuntimeException(ucfirst($environment) . ' articles JSON is not readable.');
+        foreach (DEPLOY_REQUIRED_DIRS as $directory) {
+            if (!is_dir($target . '/' . $directory)) throw new RuntimeException('Expected ' . $environment . ' directory is missing: ' . $directory);
+        }
     }
     $health = deploymentCommand(['curl', '--silent', '--show-error', '--location', '--max-redirs', '5', '--max-time', '15', '--output', '/dev/null', '--write-out', '%{http_code}', '--resolve', $configuration['host'] . ':443:127.0.0.1', $configuration['url'] . '/']);
     if ($health['exit_code'] === 0 && trim($health['stdout']) === '200') {

@@ -840,3 +840,126 @@ function projectDelete(array $configuration, string $projectId, string $confirma
         return projectActionResult(false, $exception->getMessage(), $log);
     }
 }
+
+function projectOrphanedApacheInfrastructure(array $configuration, array $sites): array
+{
+    $registeredIds = array_flip(array_map(static fn(array $project): string => (string)($project['id'] ?? ''), devConsoleProjects($configuration)));
+    $orphans = [];
+
+    foreach ($sites as $site) {
+        $name = (string)($site['name'] ?? '');
+        if (preg_match('/^dev-console-([a-z0-9]+(?:-[a-z0-9]+)*)-(production|preview)\.conf$/', $name, $matches) !== 1) {
+            continue;
+        }
+        $projectId = $matches[1];
+        $environment = $matches[2];
+        if (isset($registeredIds[$projectId]) || !projectSafeId($projectId)) {
+            continue;
+        }
+        $path = (string)($site['path'] ?? '');
+        if ($path !== '' && is_file($path) && !projectVhostMarkersMatch($path, ['id' => $projectId], $environment)) {
+            continue;
+        }
+
+        $paths = devConsoleGeneratedEnvironmentPaths($projectId);
+        $orphans[$projectId] ??= [
+            'project_id' => $projectId,
+            'production' => null,
+            'preview' => null,
+            'production_path' => $paths['production'],
+            'preview_path' => $paths['preview'],
+            'git_repository_path' => devConsoleGeneratedRepositoryPath($projectId),
+        ];
+        $orphans[$projectId][$environment] = $site;
+    }
+
+    ksort($orphans, SORT_NATURAL | SORT_FLAG_CASE);
+    return array_values($orphans);
+}
+
+function projectCleanupOrphanedInfrastructure(array $configuration, string $projectId, array $options = []): array
+{
+    if (!projectSafeId($projectId)) {
+        return projectActionResult(false, 'Invalid project identifier.');
+    }
+    if (devConsoleFindProjectById($configuration, $projectId) !== null || devConsoleActiveProjectId($configuration) === $projectId) {
+        return projectActionResult(false, 'Clean Up is not available for a registered Project.');
+    }
+
+    $availableDir = $options['available_dir'] ?? '/etc/apache2/sites-available';
+    $enabledDir = $options['enabled_dir'] ?? '/etc/apache2/sites-enabled';
+    $allowedBase = $options['allowed_base'] ?? '/var/www/projects';
+    $runCommands = $options['run_commands'] ?? true;
+    $log = [];
+    $paths = devConsoleGeneratedEnvironmentPaths($projectId);
+    $repositoryPath = devConsoleGeneratedRepositoryPath($projectId);
+    $pseudoProject = [
+        'id' => $projectId,
+        'repository_path' => $repositoryPath,
+        'production' => ['path' => $paths['production']],
+        'preview' => ['path' => $paths['preview']],
+    ];
+
+    try {
+        projectAssertManagedPathPolicy($pseudoProject, $allowedBase);
+        $foundManagedConfig = false;
+        foreach (['production', 'preview'] as $environment) {
+            $vhostPath = projectVhostPath($pseudoProject, $environment, $availableDir);
+            $enabledPath = projectEnabledPath($pseudoProject, $environment, $enabledDir);
+            if (is_file($vhostPath) || is_file($enabledPath)) {
+                $foundManagedConfig = true;
+                $pathToCheck = is_file($vhostPath) ? $vhostPath : $enabledPath;
+                if (!projectVhostMarkersMatch($pathToCheck, $pseudoProject, $environment)) {
+                    throw new RuntimeException('Refusing to clean up unverified Apache config: ' . basename($vhostPath));
+                }
+            }
+        }
+        if (!$foundManagedConfig) {
+            return projectActionResult(false, 'No orphaned Dev Console Apache configuration found.');
+        }
+
+        if ($runCommands) {
+            foreach (['production', 'preview'] as $environment) {
+                if (file_exists(projectEnabledPath($pseudoProject, $environment, $enabledDir))) {
+                    $result = projectRunFixedCommand([projectApacheCommandPath('a2dissite'), projectEnvironmentVhostName($pseudoProject, $environment)]);
+                    projectAppendCommandLog($log, $result);
+                    if ($result['exit_code'] !== 0 && is_file(projectVhostPath($pseudoProject, $environment, $availableDir))) throw new RuntimeException('Unable to disable orphaned ' . $environment . ' site.');
+                }
+            }
+            $result = projectRunFixedCommand([projectApacheCommandPath('apache2ctl'), 'configtest']);
+            projectAppendCommandLog($log, $result);
+            if ($result['exit_code'] !== 0) throw new RuntimeException('Apache configtest failed.');
+        }
+
+        foreach (['production', 'preview'] as $environment) {
+            $enabledPath = projectEnabledPath($pseudoProject, $environment, $enabledDir);
+            if (is_link($enabledPath)) {
+                if (!@unlink($enabledPath)) throw new RuntimeException('Unable to delete enabled Apache link: ' . basename($enabledPath));
+                $log[] = 'Deleted enabled Apache link: ' . basename($enabledPath);
+            }
+            $vhostPath = projectVhostPath($pseudoProject, $environment, $availableDir);
+            if (is_file($vhostPath)) {
+                if (!@unlink($vhostPath)) throw new RuntimeException('Unable to delete Apache config: ' . basename($vhostPath));
+                $log[] = 'Deleted orphaned Apache config: ' . basename($vhostPath);
+            }
+        }
+        foreach (['production', 'preview'] as $environment) {
+            projectSafeRecursiveDelete($paths[$environment], $paths[$environment], $repositoryPath, $log, $allowedBase);
+        }
+        $log[] = 'Git repository preserved: ' . $repositoryPath;
+        $log[] = 'GitHub repository preserved.';
+
+        if ($runCommands) {
+            $result = projectRunFixedCommand([projectApacheCommandPath('apache2ctl'), 'configtest']);
+            projectAppendCommandLog($log, $result);
+            if ($result['exit_code'] !== 0) throw new RuntimeException('Apache configtest failed after cleanup.');
+            $result = projectRunFixedCommand([apacheSystemctlPath() ?: 'systemctl', 'reload', 'apache2']);
+            projectAppendCommandLog($log, $result);
+            if ($result['exit_code'] !== 0) throw new RuntimeException('Apache reload failed.');
+        }
+
+        return projectActionResult(true, 'Orphaned Dev Console infrastructure cleaned up.', $log);
+    } catch (Throwable $exception) {
+        return projectActionResult(false, $exception->getMessage(), $log);
+    }
+}

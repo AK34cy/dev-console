@@ -8,6 +8,7 @@ function devConsoleRepositoryRoot(): string
 function devConsoleDefaultProjectConfiguration(): array
 {
     return [
+        'active_project_id' => null,
         'projects' => [],
     ];
 }
@@ -142,7 +143,22 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         }
     }
 
+    $activeProjectId = null;
+    if (isset($configuration['active_project_id']) && is_scalar($configuration['active_project_id'])) {
+        $candidate = trim((string)$configuration['active_project_id']);
+        foreach ($projects as $project) {
+            if ((string)($project['id'] ?? '') === $candidate) {
+                $activeProjectId = $candidate;
+                break;
+            }
+        }
+    }
+    if ($activeProjectId === null && !empty($projects)) {
+        $activeProjectId = (string)($projects[0]['id'] ?? '');
+    }
+
     return [
+        'active_project_id' => $activeProjectId,
         'projects' => $projects,
     ];
 }
@@ -363,6 +379,63 @@ function devConsoleBuildGithubConfiguration(array $input, array $existing): arra
 function devConsoleProjects(array $configuration): array
 {
     return is_array($configuration['projects'] ?? null) ? $configuration['projects'] : [];
+}
+
+function devConsoleActiveProjectId(array $configuration): string
+{
+    $configuration = devConsoleNormalizeProjectConfiguration($configuration);
+    return is_scalar($configuration['active_project_id'] ?? null) ? (string)$configuration['active_project_id'] : '';
+}
+
+function devConsoleActiveProject(array $configuration): ?array
+{
+    $activeProjectId = devConsoleActiveProjectId($configuration);
+    return $activeProjectId === '' ? null : devConsoleFindProjectById($configuration, $activeProjectId);
+}
+
+function devConsoleSetActiveProject(array $configuration, string $projectId): array
+{
+    $configuration = devConsoleNormalizeProjectConfiguration($configuration);
+    $configuration['active_project_id'] = devConsoleFindProjectById($configuration, $projectId) === null ? null : $projectId;
+    return devConsoleNormalizeProjectConfiguration($configuration);
+}
+
+function devConsoleSaveActiveProject(string $projectId): bool
+{
+    $configuration = devConsoleLoadProjectConfiguration();
+    if ($projectId !== '' && devConsoleFindProjectById($configuration, $projectId) === null) {
+        return false;
+    }
+
+    return devConsoleSaveProjectConfiguration(devConsoleSetActiveProject($configuration, $projectId));
+}
+
+function devConsoleFirstProjectId(array $configuration): string
+{
+    $projects = devConsoleProjects($configuration);
+    return empty($projects) ? '' : (string)($projects[0]['id'] ?? '');
+}
+
+function devConsoleProjectTaskRoot(array $configuration, ?array $project): string
+{
+    if ($project === null) {
+        return dirname(devConsoleRepositoryRoot());
+    }
+    if ((string)($project['id'] ?? '') === devConsoleFirstProjectId($configuration)) {
+        return dirname(devConsoleRepositoryRoot());
+    }
+
+    return (string)($project['repository_path'] ?? dirname(devConsoleRepositoryRoot()));
+}
+
+function devConsoleProjectRunsDir(?array $project): string
+{
+    $base = devConsoleRepositoryRoot() . '/console/runs';
+    if ($project === null || (string)($project['id'] ?? '') === '') {
+        return $base;
+    }
+
+    return $base . '/projects/' . (string)$project['id'];
 }
 
 function devConsoleFindProjectById(array $configuration, string $id): ?array

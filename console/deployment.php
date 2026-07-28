@@ -16,6 +16,33 @@ const DEPLOY_EXCLUDES = [
     '/docs/', '/logs/', '/tmp/', '/temp/', '*.tmp', '*.temp', '*.bak', '*~',
 ];
 
+$DEPLOY_ACTIVE_PROJECT = null;
+
+function deploymentSetProject(?array $project): void
+{
+    global $DEPLOY_ACTIVE_PROJECT;
+    $DEPLOY_ACTIVE_PROJECT = $project;
+}
+
+function deploymentActiveProject(): ?array
+{
+    global $DEPLOY_ACTIVE_PROJECT;
+    return is_array($DEPLOY_ACTIVE_PROJECT) ? $DEPLOY_ACTIVE_PROJECT : null;
+}
+
+function deploymentSourcePath(): string
+{
+    $project = deploymentActiveProject();
+    return $project === null ? DEPLOY_SOURCE : (string)($project['repository_path'] ?? DEPLOY_SOURCE);
+}
+
+function deploymentProjectStateKey(): string
+{
+    $project = deploymentActiveProject();
+    $projectId = is_array($project) ? (string)($project['id'] ?? '') : '';
+    return $projectId === '' ? 'legacy' : $projectId;
+}
+
 function deploymentCommand(array $arguments, ?string $cwd = null): array
 {
     $command = implode(' ', array_map('escapeshellarg', $arguments));
@@ -35,12 +62,30 @@ function deploymentCommand(array $arguments, ?string $cwd = null): array
 
 function deploymentGitValue(array $arguments): string
 {
-    $result = deploymentCommand(array_merge(['git', '-C', DEPLOY_SOURCE], $arguments));
+    $result = deploymentCommand(array_merge(['git', '-C', deploymentSourcePath()], $arguments));
     return $result['exit_code'] === 0 ? trim($result['stdout']) : '';
 }
 
 function deploymentConfiguration(string $environment): array
 {
+    $project = deploymentActiveProject();
+    if ($project !== null) {
+        $configurations = [
+            'preview' => [
+                'target' => (string)($project['preview']['path'] ?? ''),
+                'url' => (string)($project['preview']['domain'] ?? '') === '' ? '' : 'http://' . (string)$project['preview']['domain'],
+                'host' => (string)($project['preview']['domain'] ?? ''),
+            ],
+            'production' => [
+                'target' => (string)($project['production']['path'] ?? ''),
+                'url' => (string)($project['production']['domain'] ?? '') === '' ? '' : 'http://' . (string)$project['production']['domain'],
+                'host' => (string)($project['production']['domain'] ?? ''),
+            ],
+        ];
+        if (!isset($configurations[$environment])) throw new RuntimeException('Invalid deployment environment.');
+        return $configurations[$environment];
+    }
+
     $configurations = [
         'preview' => ['target' => PREVIEW_DOCUMENT_ROOT_FALLBACK, 'url' => PREVIEW_URL, 'host' => 'labs.iovon.com'],
         'production' => ['target' => PRODUCTION_DOCUMENT_ROOT_FALLBACK, 'url' => PRODUCTION_URL, 'host' => 'iovon.com'],
@@ -59,7 +104,7 @@ function deploymentRsyncArguments(string $environment, bool $dryRun): array
     foreach (DEPLOY_EXCLUDES as $exclude) {
         $arguments[] = '--exclude=' . $exclude;
     }
-    $arguments[] = rtrim(DEPLOY_SOURCE, '/') . '/';
+    $arguments[] = rtrim(deploymentSourcePath(), '/') . '/';
     $arguments[] = rtrim($configuration['target'], '/') . '/';
     return $arguments;
 }
@@ -89,8 +134,24 @@ function enabledApacheDocumentRoot(string $serverName, string $fallback, array $
 
 function deploymentEnvironment(): array
 {
+    $project = deploymentActiveProject();
+    if ($project !== null) {
+        return [
+            'development_path' => deploymentSourcePath(),
+            'active_project_id' => (string)($project['id'] ?? ''),
+            'active_project_name' => (string)($project['name'] ?? ''),
+            'preview_document_root' => (string)($project['preview']['path'] ?? ''),
+            'preview_url' => (string)($project['preview']['domain'] ?? '') === '' ? '' : 'http://' . (string)$project['preview']['domain'],
+            'production_document_root' => (string)($project['production']['path'] ?? ''),
+            'production_url' => (string)($project['production']['domain'] ?? '') === '' ? '' : 'http://' . (string)$project['production']['domain'],
+            'console_url' => DEV_CONSOLE_URL,
+        ];
+    }
+
     return [
         'development_path' => DEPLOY_SOURCE,
+        'active_project_id' => '',
+        'active_project_name' => '',
         'preview_document_root' => enabledApacheDocumentRoot('labs.iovon.com', PREVIEW_DOCUMENT_ROOT_FALLBACK, ['labs-le-ssl.conf', 'labs.conf']),
         'preview_url' => PREVIEW_URL,
         'production_document_root' => enabledApacheDocumentRoot('iovon.com', PRODUCTION_DOCUMENT_ROOT_FALLBACK, ['iovon-le-ssl.conf', 'iovon.conf']),
@@ -111,10 +172,11 @@ function deploymentValidation(string $environment): array
     $target = $configuration['target'];
     $label = ucfirst($environment);
     $errors = [];
-    if (!is_dir(DEPLOY_SOURCE)) $errors[] = 'Source directory does not exist.';
+    $source = deploymentSourcePath();
+    if (!is_dir($source)) $errors[] = 'Source directory does not exist.';
     if (!is_dir($target)) $errors[] = 'Target directory does not exist.';
     if (!deploymentTargetIsExpected($environment)) $errors[] = $label . ' target must resolve to ' . $target . '.';
-    $sourceReal = realpath(DEPLOY_SOURCE);
+    $sourceReal = realpath($source);
     $targetReal = realpath($target);
     if ($sourceReal !== false && $sourceReal === $targetReal) $errors[] = 'Source and target directories must be different.';
     if (deploymentGitValue(['rev-parse', '--is-inside-work-tree']) !== 'true') $errors[] = 'Source is not a valid Git repository.';
@@ -122,8 +184,10 @@ function deploymentValidation(string $environment): array
     if (deploymentGitValue(['branch', '--show-current']) !== 'main') $errors[] = 'Source Git branch is not main.';
     if (PHP_BINARY === '' || !is_executable(PHP_BINARY)) $errors[] = 'PHP is not available.';
     if (!is_writable($target)) $errors[] = $label . ' target is not writable by the deployment process.';
-    foreach (DEPLOY_REQUIRED_FILES as $file) {
-        if (!is_file(DEPLOY_SOURCE . '/' . $file)) $errors[] = 'Required source file is missing: ' . $file;
+    if (deploymentActiveProject() === null) {
+        foreach (DEPLOY_REQUIRED_FILES as $file) {
+            if (!is_file(DEPLOY_SOURCE . '/' . $file)) $errors[] = 'Required source file is missing: ' . $file;
+        }
     }
     if (trim((string)shell_exec('command -v rsync 2>/dev/null')) === '') $errors[] = 'rsync is not available.';
     return $errors;
@@ -150,7 +214,10 @@ function deploymentChangeSummary(string $output): array
 function deploymentStateDir(string $environment): string
 {
     deploymentConfiguration($environment);
-    return DEPLOY_STATE_DIR . '/' . $environment;
+    $projectKey = deploymentProjectStateKey();
+    return $projectKey === 'legacy'
+        ? DEPLOY_STATE_DIR . '/' . $environment
+        : DEPLOY_STATE_DIR . '/deployments/' . $projectKey . '/' . $environment;
 }
 
 function ensureDeploymentStateDir(string $environment): void
@@ -203,6 +270,7 @@ function newDeploymentState(string $environment, string $status, array $summary,
     $id = 'deploy-' . gmdate('Ymd\THis') . '-' . bin2hex(random_bytes(4));
     return [
         'id' => $id, 'environment' => $environment, 'start_time' => date('c'), 'finish_time' => null,
+        'project_id' => deploymentProjectStateKey() === 'legacy' ? null : deploymentProjectStateKey(),
         'source_commit' => deploymentGitValue(['rev-parse', 'HEAD']),
         'source_message' => deploymentGitValue(['log', '-1', '--pretty=%s']),
         'branch' => deploymentGitValue(['branch', '--show-current']), 'status' => $status,
@@ -222,7 +290,7 @@ function deploymentOverview(string $environment): array
         if ($result['exit_code'] === 0) $deployedCommit = trim($result['stdout']);
     }
     return [
-        'source' => DEPLOY_SOURCE, 'target' => $configuration['target'], 'url' => $configuration['url'],
+        'source' => deploymentSourcePath(), 'target' => $configuration['target'], 'url' => $configuration['url'],
         'branch' => deploymentGitValue(['branch', '--show-current']),
         'commit' => deploymentGitValue(['rev-parse', 'HEAD']),
         'message' => deploymentGitValue(['log', '-1', '--pretty=%s']),
@@ -339,7 +407,7 @@ function topCpuProcesses(): array
 
 function dashboardCachePath(string $name): string
 {
-    return DEPLOY_STATE_DIR . '/dashboard-' . preg_replace('/[^a-z0-9-]/', '', strtolower($name)) . '.json';
+    return DEPLOY_STATE_DIR . '/dashboard-' . preg_replace('/[^a-z0-9-]/', '', strtolower(deploymentProjectStateKey() . '-' . $name)) . '.json';
 }
 
 function readDashboardCache(string $name, ?int $maximumAge = null): ?array
@@ -385,7 +453,7 @@ function slowDashboardValues(): array
             'Kernel' => php_uname('r'),
         ],
         'statistics' => [
-            'development' => directoryStatistics(DEPLOY_SOURCE, true),
+            'development' => directoryStatistics(deploymentSourcePath(), true),
             'preview' => directoryStatistics($environment['preview_document_root']),
             'production' => directoryStatistics($environment['production_document_root']),
         ],
@@ -428,8 +496,8 @@ function operationalDashboard(): array
     $production = $metric('production status', static fn (): array => deploymentOverview('production'), $previous['_production'] ?? []);
     $memory = $metric('memory', static fn (): array => memoryStatus(), $previous['server']['memory'] ?? ['total' => 0, 'used' => 0, 'free' => 0, 'percentage' => 0]);
     $disk = $metric('disk', static function (): array {
-        $total = @disk_total_space(DEPLOY_SOURCE) ?: 0;
-        $free = @disk_free_space(DEPLOY_SOURCE) ?: 0;
+        $total = @disk_total_space(deploymentSourcePath()) ?: 0;
+        $free = @disk_free_space(deploymentSourcePath()) ?: 0;
         $used = max(0, $total - $free);
         return ['total' => $total, 'used' => $used, 'free' => $free, 'percentage' => $total > 0 ? round($used / $total * 100, 1) : 0];
     }, $previous['server']['disk'] ?? ['total' => 0, 'used' => 0, 'free' => 0, 'percentage' => 0]);

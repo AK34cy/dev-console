@@ -1,7 +1,12 @@
 <?php
-$repoRoot = dirname(__DIR__, 2);
-$runsDir = __DIR__ . '/runs';
+require __DIR__ . '/config.php';
+
 $taskId = (string)($argv[1] ?? '');
+$projectId = (string)($argv[2] ?? '');
+$projectConfiguration = devConsoleLoadProjectConfiguration();
+$project = $projectId === '' ? null : devConsoleFindProjectById($projectConfiguration, $projectId);
+$repoRoot = devConsoleProjectTaskRoot($projectConfiguration, $project);
+$runsDir = devConsoleProjectRunsDir($project);
 
 function workerIsTaskId(string $taskId): bool
 {
