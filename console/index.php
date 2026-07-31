@@ -224,52 +224,6 @@ function taskDefaultTemplate(string $taskId): string
     return "# {$taskId}\n\n## Title\n\n...\n";
 }
 
-function taskDocumentationContent(array $project): string
-{
-    $projectName = projectMessageName($project, (string)($project['id'] ?? ''));
-    $projectId = (string)($project['id'] ?? '');
-
-    return "# {$projectName} Task Workflow\n\n"
-        . "This repository is managed by IOVON Dev Console for Project `{$projectId}`.\n\n"
-        . "## Project structure\n\n"
-        . "- `TASKS/TODO/` contains open tasks.\n"
-        . "- `TASKS/DONE/` contains completed tasks.\n"
-        . "- `TASKS/ATTACHMENTS/<TASK-ID>/` contains files attached to a task.\n\n"
-        . "## Task files\n\n"
-        . "Task files are named `TASK-001.md`, `TASK-002.md`, and so on. Numbering is project-specific and always uses the next available task number for this repository.\n\n"
-        . "Every task starts with YAML metadata owned by Dev Console:\n\n"
-        . "```yaml\n---\nproject_id: {$projectId}\n---\n```\n\n"
-        . "Keep this metadata intact when creating task files manually. The editable body should begin after the closing `---` marker.\n\n"
-        . "## Recommended workflow\n\n"
-        . "1. Create a task in Dev Console.\n"
-        . "2. Attach supporting files when needed.\n"
-        . "3. Use the task in the current workflow.\n"
-        . "4. Run Codex from Dev Console.\n"
-        . "5. Move completed work from `TASKS/TODO/` to `TASKS/DONE/` when finished.\n\n"
-        . "## Manual task creation\n\n"
-        . "Create the next numbered file in `TASKS/TODO/`, include the YAML metadata above, and use the same `project_id`. Attachments belong in `TASKS/ATTACHMENTS/<TASK-ID>/`.\n\n"
-        . "## Running Codex\n\n"
-        . "Run Codex from the Dev Console Dashboard so it uses the selected Project, task source, attachments, and repository path consistently.\n";
-}
-
-function ensureProjectTaskDocumentation(string $repoRoot, array $project): ?string
-{
-    $tasksDirectory = rtrim($repoRoot, '/') . '/TASKS';
-    if (!is_dir($tasksDirectory) && !mkdir($tasksDirectory, 0755, true) && !is_dir($tasksDirectory)) {
-        throw new RuntimeException('Unable to create TASKS documentation directory.');
-    }
-
-    $path = $tasksDirectory . '/README.md';
-    $content = taskDocumentationContent($project);
-    if (!is_file($path) || (string)file_get_contents($path) !== $content) {
-        if (file_put_contents($path, $content, LOCK_EX) === false) {
-            throw new RuntimeException('Unable to write TASKS documentation.');
-        }
-    }
-
-    return $path;
-}
-
 function taskBelongsToProject(string $body, string $projectId, bool $allowImplicitOwnership): bool
 {
     $metadataProjectId = taskProjectId($body);
@@ -1352,7 +1306,7 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
         $pathsToAdd = [relativePath($repoRoot, $taskPath)];
         $createdTaskPath = $pathsToAdd[0];
         if ($activeProject !== null) {
-            $documentationPath = ensureProjectTaskDocumentation($repoRoot, $activeProject);
+            $documentationPath = gitEnsureTaskDocumentation($activeProject, $repoRoot);
             if ($documentationPath !== null) {
                 $documentationRelativePath = relativePath($repoRoot, $documentationPath);
                 if (!in_array($documentationRelativePath, $pathsToAdd, true)) {
