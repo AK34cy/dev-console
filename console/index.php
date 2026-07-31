@@ -206,7 +206,68 @@ function taskProjectId(string $body): string
 
 function taskBodyWithProjectMetadata(string $body, string $projectId): string
 {
-    return "---\nproject_id: " . $projectId . "\n---\n\n" . rtrim($body);
+    return taskMetadataBlock($projectId) . "\n\n" . rtrim(taskEditableBody($body));
+}
+
+function taskMetadataBlock(string $projectId): string
+{
+    return "---\nproject_id: " . $projectId . "\n---";
+}
+
+function taskEditableBody(string $body): string
+{
+    return preg_replace('/\A---\s*\R.*?\R---\s*(?:\R|$)/s', '', $body, 1) ?? $body;
+}
+
+function taskDefaultTemplate(string $taskId): string
+{
+    return "# {$taskId}\n\n## Title\n\n...\n";
+}
+
+function taskDocumentationContent(array $project): string
+{
+    $projectName = projectMessageName($project, (string)($project['id'] ?? ''));
+    $projectId = (string)($project['id'] ?? '');
+
+    return "# {$projectName} Task Workflow\n\n"
+        . "This repository is managed by IOVON Dev Console for Project `{$projectId}`.\n\n"
+        . "## Project structure\n\n"
+        . "- `TASKS/TODO/` contains open tasks.\n"
+        . "- `TASKS/DONE/` contains completed tasks.\n"
+        . "- `TASKS/ATTACHMENTS/<TASK-ID>/` contains files attached to a task.\n\n"
+        . "## Task files\n\n"
+        . "Task files are named `TASK-001.md`, `TASK-002.md`, and so on. Numbering is project-specific and always uses the next available task number for this repository.\n\n"
+        . "Every task starts with YAML metadata owned by Dev Console:\n\n"
+        . "```yaml\n---\nproject_id: {$projectId}\n---\n```\n\n"
+        . "Keep this metadata intact when creating task files manually. The editable body should begin after the closing `---` marker.\n\n"
+        . "## Recommended workflow\n\n"
+        . "1. Create a task in Dev Console.\n"
+        . "2. Attach supporting files when needed.\n"
+        . "3. Use the task in the current workflow.\n"
+        . "4. Run Codex from Dev Console.\n"
+        . "5. Move completed work from `TASKS/TODO/` to `TASKS/DONE/` when finished.\n\n"
+        . "## Manual task creation\n\n"
+        . "Create the next numbered file in `TASKS/TODO/`, include the YAML metadata above, and use the same `project_id`. Attachments belong in `TASKS/ATTACHMENTS/<TASK-ID>/`.\n\n"
+        . "## Running Codex\n\n"
+        . "Run Codex from the Dev Console Dashboard so it uses the selected Project, task source, attachments, and repository path consistently.\n";
+}
+
+function ensureProjectTaskDocumentation(string $repoRoot, array $project): ?string
+{
+    $tasksDirectory = rtrim($repoRoot, '/') . '/TASKS';
+    if (!is_dir($tasksDirectory) && !mkdir($tasksDirectory, 0755, true) && !is_dir($tasksDirectory)) {
+        throw new RuntimeException('Unable to create TASKS documentation directory.');
+    }
+
+    $path = $tasksDirectory . '/README.md';
+    $content = taskDocumentationContent($project);
+    if (!is_file($path) || (string)file_get_contents($path) !== $content) {
+        if (file_put_contents($path, $content, LOCK_EX) === false) {
+            throw new RuntimeException('Unable to write TASKS documentation.');
+        }
+    }
+
+    return $path;
 }
 
 function taskBelongsToProject(string $body, string $projectId, bool $allowImplicitOwnership): bool
@@ -371,7 +432,6 @@ function taskFileEntries(array $contexts, string $projectId): array
         foreach (taskFileEntriesForContext($context, $projectId) as $entry) {
             $key = (string)$entry['task_id'];
             if (isset($seen[$key])) {
-                $GLOBALS['taskIsolationWarnings'][] = 'Ambiguous task "' . $key . '" exists in more than one task storage location for this Project and one copy was excluded.';
                 continue;
             }
             $seen[$key] = true;
@@ -384,6 +444,50 @@ function taskFileEntries(array $contexts, string $projectId): array
     });
 
     return $entries;
+}
+
+function legacyTasksDetected(array $tasks): bool
+{
+    foreach ($tasks as $task) {
+        if ((string)($task['source'] ?? '') === 'legacy') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function groupedTaskEntries(array $tasks, string $runsDir): array
+{
+    $groups = [
+        'TODO' => [],
+        'IN PROGRESS' => [],
+        'DONE' => [],
+    ];
+
+    foreach ($tasks as $task) {
+        $status = (string)($task['status'] ?? '');
+        if ($status === 'DONE') {
+            $groups['DONE'][] = $task;
+            continue;
+        }
+
+        $runStatus = codexRunStatus($runsDir, (string)$task['task_id'], (string)($task['source'] ?? 'project'));
+        if (in_array($runStatus, ['queued', 'running'], true)) {
+            $groups['IN PROGRESS'][] = $task;
+        } else {
+            $groups['TODO'][] = $task;
+        }
+    }
+
+    foreach ($groups as &$groupTasks) {
+        usort($groupTasks, static function (array $left, array $right): int {
+            return ((int)$left['number']) <=> ((int)$right['number']);
+        });
+    }
+    unset($groupTasks);
+
+    return $groups;
 }
 
 function existingTaskNumbers(array $contexts, string $projectId): array
@@ -692,7 +796,7 @@ function startCodexRun(array $contexts, string $projectId, string $runsDir, stri
         throw new RuntimeException('Task file is not in TODO.');
     }
 
-    $status = codexRunStatus($runsDir, $taskId);
+    $status = codexRunStatus($runsDir, $taskId, $source);
     if ($status === 'running' || $status === 'queued') {
         return;
     }
@@ -921,6 +1025,8 @@ function operationSummarySteps(string $action, array $result): array
 $taskContexts = taskStorageContexts($projectConfiguration, $activeProject);
 $nextNumber = $activeProjectId === '' ? 1 : nextTaskNumber($taskContexts, $activeProjectId);
 $latestTasks = $activeProjectId === '' ? [] : taskFileEntries($taskContexts, $activeProjectId);
+$legacyTasksDetected = legacyTasksDetected($latestTasks);
+$taskGroups = groupedTaskEntries($latestTasks, $runsDir);
 $requestedTaskFile = (string)($_GET['task'] ?? '');
 $requestedTaskSource = (string)($_GET['task_source'] ?? '');
 $viewTask = $activeProjectId === '' ? null : findTaskForView($taskContexts, $activeProjectId, $requestedTaskFile, $requestedTaskSource);
@@ -951,7 +1057,6 @@ $projectFormValues = [
 $projectFlash = '';
 $results = [];
 $taskPushWarning = '';
-$taskIsolationWarnings = [];
 $taskRepositoryReadiness = taskRepositoryReadiness($activeProject, $githubConfiguration);
 $taskCreationReady = !empty($taskRepositoryReadiness['ready']);
 $taskCreationUnavailableReason = (string)($taskRepositoryReadiness['reason'] ?? '');
@@ -1246,6 +1351,15 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
 
         $pathsToAdd = [relativePath($repoRoot, $taskPath)];
         $createdTaskPath = $pathsToAdd[0];
+        if ($activeProject !== null) {
+            $documentationPath = ensureProjectTaskDocumentation($repoRoot, $activeProject);
+            if ($documentationPath !== null) {
+                $documentationRelativePath = relativePath($repoRoot, $documentationPath);
+                if (!in_array($documentationRelativePath, $pathsToAdd, true)) {
+                    $pathsToAdd[] = $documentationRelativePath;
+                }
+            }
+        }
 
         if (!empty($uploads)) {
             $taskAttachmentDir = $attachmentsRoot . '/' . $taskId;
@@ -1315,11 +1429,9 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
         $prompt = codexPromptForTask($taskContexts, $activeProjectId, $taskId, 'project');
 
         $nextNumber = nextTaskNumber($taskContexts, $activeProjectId);
-        $latestTasks = array_slice(taskFileEntries($taskContexts, $activeProjectId), 0, 12);
-        $taskGroups = ['TODO' => [], 'DONE' => []];
-        foreach ($latestTasks as $task) {
-            $taskGroups[$task['status']][] = $task;
-        }
+        $latestTasks = taskFileEntries($taskContexts, $activeProjectId);
+        $legacyTasksDetected = legacyTasksDetected($latestTasks);
+        $taskGroups = groupedTaskEntries($latestTasks, $runsDir);
     } catch (Throwable $exception) {
         $error = $exception->getMessage();
         if (empty($taskCommitted ?? false) && isset($taskPath) && is_file($taskPath)) {
@@ -1358,8 +1470,10 @@ $activeRunStatus = $activeTaskId === '' ? 'not_started' : codexRunStatus($runsDi
 $taskGitCompleted = $activeTaskId !== '';
 $taskGitPushed = $activeTaskId !== '' && $taskPushWarning === '';
 $editorTaskId = $viewTask ? pathinfo($viewTask['filename'], PATHINFO_FILENAME) : '';
-$editorBody = ($createdTaskId === '' && $viewTask) ? $viewTask['body'] : '';
+$editorBody = ($createdTaskId === '' && $viewTask) ? taskEditableBody((string)$viewTask['body']) : '';
 $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $editorTaskId;
+$taskMetadataPreview = $activeProjectId === '' ? '' : taskMetadataBlock($activeProjectId);
+$taskDefaultTemplate = taskDefaultTemplate(taskNumber($nextNumber));
 $previewDeploymentOverview = deploymentOverview('preview');
 $productionDeploymentOverview = deploymentOverview('production');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
@@ -1396,12 +1510,18 @@ foreach ($projects as $project) {
     }
     $gitStatuses[(string)($project['id'] ?? '')] = gitStatus($project, $githubConfiguration);
 }
+$activeGitStatus = $activeProjectId === '' ? [] : ($gitStatuses[$activeProjectId] ?? []);
 $projectsForDisplay = devConsoleProjectsForDisplay($projectConfiguration);
 $serverAddress = (string)($_SERVER['SERVER_ADDR'] ?? '');
 if ($serverAddress === '' || in_array($serverAddress, ['127.0.0.1', '::1'], true)) {
     $serverAddress = 'SERVER_IP';
 }
-$initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'settings' || !empty($projectFormErrors) || $projectFlash !== '' || $projectActionResult !== null || $apacheActionResult !== null || $githubActionResult !== null) ? 'settings' : 'dashboard';
+$requestedTab = (string)($_GET['tab'] ?? '');
+if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], true)) {
+    $initialTab = $requestedTab;
+} else {
+    $initialTab = $requestPath === '/' && (!empty($projectFormErrors) || $projectFlash !== '' || $projectActionResult !== null || $apacheActionResult !== null || $githubActionResult !== null) ? 'settings' : 'dashboard';
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -1432,6 +1552,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     label { display: block; font-weight: 700; margin: 18px 0 8px; }
     textarea { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 8px; box-sizing: border-box; color: #10242f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.5; min-height: 390px; padding: 14px; resize: vertical; tab-size: 2; width: 100%; }
     textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
+    .metadata-preview { background: #f7fcfe; border: 1px solid var(--line); color: var(--muted); margin: 8px 0 14px; min-height: 0; padding: 10px 12px; }
     input[type="text"], input[type="password"], select { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 6px; box-sizing: border-box; color: #10242f; font-size: 14px; padding: 9px 10px; width: 100%; }
     input[type="text"]:focus, input[type="password"]:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
     button, .button-link { align-items: center; background: var(--blue); border: 0; border-radius: 5px; color: #fff; cursor: pointer; display: inline-flex; font-size: 15px; font-weight: 700; gap: 8px; margin-top: 16px; padding: 11px 18px; text-decoration: none; }
@@ -1455,6 +1576,9 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .attachment-list ul { list-style: none; margin: 0; padding: 0; }
     .attachment-list li { margin-top: 4px; }
     .task-list-scroll { max-height: 620px; overflow-y: auto; padding-right: 6px; }
+    .task-group { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+    .task-group:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+    .task-group h3 { color: var(--blue); font-size: 13px; letter-spacing: 0; margin: 0 0 6px; }
     .task-list { list-style: none; margin: 0; padding: 0; }
     .task-list > li { border-top: 1px solid var(--line); padding: 8px 0; }
     .task-list li:first-child { border-top: 0; }
@@ -1565,15 +1689,11 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     .field-help { color: var(--muted); font-size: 12px; margin: 5px 0 0; }
     .project-list { display: grid; gap: 12px; }
     .project-item { background: #f8fbfc; border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
-    .project-item > summary { cursor: pointer; list-style: none; }
-    .project-item > summary::-webkit-details-marker { display: none; }
     .project-summary { align-items: center; display: flex; flex-wrap: wrap; gap: 8px 12px; justify-content: space-between; }
     .project-summary > span:first-child { display: grid; gap: 2px; margin-right: auto; }
     .project-summary .button-link { font-size: 12px; margin-top: 0; padding: 6px 9px; }
-    .project-item .hide-details { display: none; }
-    .project-item[open] .project-summary { border-bottom: 1px solid var(--line); margin-bottom: 12px; padding-bottom: 10px; }
-    .project-item[open] .show-details { display: none; }
-    .project-item[open] .hide-details { display: inline-flex; }
+    .project-card-toggle { font-size: 12px; margin-top: 0; padding: 6px 9px; }
+    .project-details { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
     .project-item-header { align-items: flex-start; display: flex; gap: 12px; justify-content: space-between; }
     .project-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .project-actions form { margin: 0; }
@@ -1692,8 +1812,10 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
     <?php endif; ?>
     <p id="nextTaskNumber"><strong>Next task number:</strong> <?= h(taskNumber($nextNumber)) ?></p>
     <form method="post" enctype="multipart/form-data" id="taskForm" data-created="<?= h($createdTaskPath !== '' && $error === '' ? '1' : '0') ?>">
+      <label>Task metadata</label>
+      <pre class="metadata-preview" aria-readonly="true"><?= h($taskMetadataPreview) ?></pre>
       <label for="task_body">Task markdown body</label>
-      <textarea id="task_body" name="task_body" required spellcheck="false" placeholder="# TASK-<?= h(sprintf('%03d', $nextNumber)) ?>&#10;&#10;## Title&#10;&#10;..."><?= h($editorBody) ?></textarea>
+      <textarea id="task_body" name="task_body" required spellcheck="false" data-default-template="<?= h($taskDefaultTemplate) ?>" placeholder="# TASK-<?= h(sprintf('%03d', $nextNumber)) ?>&#10;&#10;## Title&#10;&#10;..."><?= h($editorBody) ?></textarea>
       <div class="form-actions">
         <button type="button" class="secondary" id="clearDraft">Clear draft</button>
         <span class="hint" id="draftStatus">Draft autosaves in this browser.</span>
@@ -1712,9 +1834,15 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   </section>
 
       <section class="panel">
-        <h2>Current Task Workflow</h2>
+        <h2>Current Workflow</h2>
         <?php if ($activeTaskId !== '' && $error === ''): ?>
-          <p class="meta">Current task: <strong><?= h($activeTaskId) ?></strong> · <?= h($activeTaskStatus) ?></p>
+          <dl class="dashboard-list">
+            <div><dt>Current Task</dt><dd><strong><?= h($activeTaskId) ?></strong></dd></div>
+            <div><dt>Status</dt><dd><?= h($activeTaskStatus) ?></dd></div>
+            <div><dt>Current commit</dt><dd><?= h(configuredDisplayValue($activeGitStatus['subject'] ?? '')) ?><?= ($activeGitStatus['local_commit'] ?? '') !== '' ? '<br><code title="' . h((string)$activeGitStatus['local_commit']) . '">' . h(shortSha((string)$activeGitStatus['local_commit'])) . '</code>' : '' ?></dd></div>
+            <div><dt>Current branch</dt><dd><?= h(configuredDisplayValue($activeGitStatus['branch'] ?? '')) ?></dd></div>
+            <div><dt>Task location</dt><dd><code><?= h($activeTaskPath) ?></code></dd></div>
+          </dl>
           <ul class="workflow-steps">
             <li><span class="step-state done">Done</span><span>Task file created<?php if ($activeTaskPath !== ''): ?>: <code><?= h($activeTaskPath) ?></code><?php endif; ?></span></li>
             <li><span class="step-state <?= h($taskGitCompleted ? 'done' : 'pending') ?>"><?= h($taskGitCompleted ? 'Done' : 'Ready') ?></span><span>Task committed locally<?php if ($commitHash !== ''): ?>: <code title="<?= h($commitHash) ?>"><?= h(shortSha($commitHash)) ?></code><?php endif; ?></span></li>
@@ -1727,7 +1855,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
             <?php else: ?>
               <button type="button" disabled title="<?= h($activeTaskStatus === 'TODO' ? 'Codex CLI is not installed on this server.' : 'Only TODO tasks can be run with Codex.') ?>">Run Codex</button>
             <?php endif; ?>
-            <a class="button-link" href="?task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>" target="_blank" rel="noopener">Open TASK</a>
+            <a class="button-link" href="?tab=dashboard&task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>" target="_blank" rel="noopener">Open TASK</a>
             <?php if ($activeTaskStatus === 'TODO' && !$codexCliReady): ?>
               <span class="hint">Codex CLI is not installed on this server.</span>
             <?php endif; ?>
@@ -1750,7 +1878,13 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
       <section class="panel">
         <h2>Activity</h2>
         <?php if ($activeTaskId !== '' && $error === ''): ?>
-          <div class="codex-run-panel" id="codexRunPanel" data-task="<?= h($activeTaskId) ?>">
+          <ul class="operation-summary">
+            <li>Done: Task selected</li>
+            <li><?= $taskGitCompleted ? 'Done' : 'Ready' ?>: Local commit</li>
+            <li><?= $taskGitPushed ? 'Done' : 'Pending' ?>: GitHub synchronized</li>
+            <li><?= h($activeRunStatus === 'not_started' ? 'Ready: Codex not started' : statusLabel($activeRunStatus) . ': Codex run') ?></li>
+          </ul>
+          <div class="codex-run-panel" id="codexRunPanel" data-task="<?= h($activeTaskId) ?>" data-task-source="<?= h($activeTaskSource) ?>">
             <p><strong>Run status:</strong> <span class="codex-status" id="codexStatus"><?= h(statusLabel($activeRunStatus)) ?></span></p>
             <pre class="codex-console" id="codexConsole">Loading activity...</pre>
             <div class="prompt-actions">
@@ -1797,34 +1931,40 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
 
     <section class="panel">
       <h2>Tasks</h2>
-      <?php if (!empty($taskIsolationWarnings)): ?>
-        <ul class="operation-summary">
-          <?php foreach (array_unique($taskIsolationWarnings) as $warning): ?>
-            <li><?= h($warning) ?></li>
-          <?php endforeach; ?>
-        </ul>
+      <?php if ($legacyTasksDetected): ?>
+        <p class="field-help">Legacy tasks detected. They belong to the previous global task storage and are associated with the default Project.</p>
       <?php endif; ?>
       <?php if (empty($latestTasks)): ?>
         <p class="meta">No task files found yet.</p>
       <?php else: ?>
         <div class="task-list-scroll">
-          <ul class="task-list">
-            <?php foreach ($latestTasks as $task): ?>
-              <li>
-                <div class="task-row-header">
-                  <span class="task-summary-label"><?= h($task['task_id']) ?></span>
-                  <span class="badge <?= h(strtolower($task['status'])) ?>"><?= h($task['status']) ?></span>
-                </div>
-                <?php if ($task['title'] !== ''): ?><span class="task-title"><?= h($task['title']) ?></span><?php endif; ?>
-                <div class="task-metadata">
-                  <?php if ($task['commit'] !== ''): ?><span>Commit: <code title="<?= h($task['commit']) ?>"><?= h(shortSha($task['commit'])) ?></code></span><?php endif; ?>
-                  <?php if ($task['milestone'] !== ''): ?><span class="milestone">⭐ <?= h($task['milestone']) ?></span><?php endif; ?>
-                  <?php if ($task['tag'] !== ''): ?><span>Tag: <?= h($task['tag']) ?></span><?php endif; ?>
-                </div>
-                <a class="button-link secondary" href="?task=<?= h(rawurlencode($task['filename'])) ?>&task_source=<?= h(rawurlencode((string)$task['source'])) ?>">Use in Workflow</a>
-              </li>
-            <?php endforeach; ?>
-          </ul>
+          <?php foreach ($taskGroups as $groupName => $groupTasks): ?>
+            <section class="task-group">
+              <h3><?= h($groupName) ?></h3>
+              <?php if (empty($groupTasks)): ?>
+                <p class="meta">No <?= h(strtolower($groupName)) ?> tasks.</p>
+              <?php else: ?>
+                <ul class="task-list">
+                  <?php foreach ($groupTasks as $task): ?>
+                    <li>
+                      <div class="task-row-header">
+                        <span class="task-summary-label"><?= h($task['task_id']) ?></span>
+                        <span class="badge <?= h(strtolower((string)$task['status'])) ?>"><?= h($task['status']) ?></span>
+                      </div>
+                      <?php if ($task['title'] !== ''): ?><span class="task-title"><?= h($task['title']) ?></span><?php endif; ?>
+                      <div class="task-metadata">
+                        <?php if ((string)($task['source'] ?? '') === 'legacy'): ?><span>Legacy storage</span><?php endif; ?>
+                        <?php if ($task['commit'] !== ''): ?><span>Commit: <code title="<?= h($task['commit']) ?>"><?= h(shortSha($task['commit'])) ?></code></span><?php endif; ?>
+                        <?php if ($task['milestone'] !== ''): ?><span class="milestone">Milestone: <?= h($task['milestone']) ?></span><?php endif; ?>
+                        <?php if ($task['tag'] !== ''): ?><span>Tag: <?= h($task['tag']) ?></span><?php endif; ?>
+                      </div>
+                      <a class="button-link secondary" href="?tab=dashboard&task=<?= h(rawurlencode($task['filename'])) ?>&task_source=<?= h(rawurlencode((string)$task['source'])) ?>">Use in Workflow</a>
+                    </li>
+                  <?php endforeach; ?>
+                </ul>
+              <?php endif; ?>
+            </section>
+          <?php endforeach; ?>
         </div>
       <?php endif; ?>
     </section>
@@ -1921,19 +2061,19 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                 $gitCanPull = !empty($gitStatus['can_pull']) && in_array($gitStatus['status'], ['CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND'], true);
                 $gitCanPush = !empty($gitStatus['can_fetch']) && in_array($gitStatus['status'], ['AHEAD', 'AHEAD / BEHIND', 'REMOTE UNAVAILABLE'], true);
               ?>
-              <details class="project-item"<?= $cardOpen ? ' open' : '' ?>>
-                <summary class="project-summary">
+              <section class="project-item" data-project-card data-expanded="<?= $cardOpen ? '1' : '0' ?>">
+                <div class="project-summary">
                   <span>
                     <strong><?= h(configuredDisplayValue($project['name'] ?? '')) ?></strong>
                     <span class="meta"><?= h(configuredDisplayValue($project['id'] ?? '')) ?></span>
                   </span>
                   <span class="status-pill <?= h($statusClass) ?>"><?= h($lifecycleLabel) ?></span>
-                  <?php if ($isActiveProject): ?><span class="status-pill healthy">Active</span><?php endif; ?>
+                  <?php if ($isActiveProject): ?><span class="status-pill healthy">Current</span><?php endif; ?>
                   <span>Production: <?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?></span>
                   <span>Preview: <?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?></span>
-                  <span class="button-link secondary show-details">Show details</span>
-                  <span class="button-link secondary hide-details">Hide details</span>
-                </summary>
+                  <button type="button" class="secondary project-card-toggle" data-project-toggle aria-expanded="<?= $cardOpen ? 'true' : 'false' ?>"><?= $cardOpen ? 'Hide details' : 'Show details' ?></button>
+                </div>
+                <div class="project-details"<?= $cardOpen ? '' : ' hidden' ?>>
                 <?php if ($cardActionResult !== null): ?>
                   <?php renderOperationResult($cardActionResult, 'projectOperationLog-' . $projectIdForCard, ((string)($cardActionResult['action'] ?? 'project-operation')) . '-' . $projectIdForCard . '.log'); ?>
                 <?php endif; ?>
@@ -1945,14 +2085,14 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   <div class="project-actions">
                     <span class="status-pill <?= h($statusClass) ?>"><?= h($statusLabel) ?></span>
                     <?php if ($isActiveProject): ?>
-                      <span class="status-pill healthy">Active</span>
+                      <span class="status-pill healthy">Current</span>
                     <?php else: ?>
                       <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
                         <input type="hidden" name="action" value="select_active_project">
                         <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                         <input type="hidden" name="target_tab" value="settings">
                         <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                        <button type="submit" class="secondary">Use on Dashboard</button>
+                        <button type="submit" class="secondary">Open on Dashboard</button>
                       </form>
                     <?php endif; ?>
                   </div>
@@ -2077,7 +2217,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                       <input type="hidden" name="action" value="verify_project_routing">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                      <button type="submit" class="secondary" title="Validate Apache configuration and check Production and Preview routing.">Check Websites</button>
+                      <button type="submit" class="secondary" title="Validate Apache configuration and check Production and Preview routing.">Reverify Routing</button>
                     </form>
                   <?php endif; ?>
                   <p class="action-note">Alternative actions: choose Remove from Console to unregister the project, or Delete Project to remove Dev Console-managed local infrastructure.</p>
@@ -2097,7 +2237,8 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                     <button type="submit" class="danger" title="Removes Dev Console-managed directories and Apache configuration. Preserves Git repositories."<?= $isManaged ? '' : ' disabled' ?>>Delete Project</button>
                   </form>
                 </div>
-              </details>
+                </div>
+              </section>
             <?php endforeach; ?>
           </div>
         <?php endif; ?>
@@ -2347,8 +2488,6 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
                   <span>Preview config: <?= empty($orphan['preview']) ? 'No' : 'Yes' ?></span>
                   <span>Dirs: <?= is_dir((string)$orphan['production_path']) || is_dir((string)$orphan['preview_path']) ? 'Present' : 'Not present' ?></span>
                   <span>Git: <?= is_dir((string)$orphan['git_repository_path']) ? 'Present' : 'Not present' ?></span>
-                  <span class="button-link secondary show-details">Show details</span>
-                  <span class="button-link secondary hide-details">Hide details</span>
                 </summary>
                 <table class="compact-table">
                   <tbody>
@@ -2643,7 +2782,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   }
 
   if (textarea && !textarea.value) {
-    textarea.value = localStorage.getItem(draftKey) || '';
+    textarea.value = localStorage.getItem(draftKey) || textarea.dataset.defaultTemplate || '';
   }
 
   textarea?.addEventListener('input', () => {
@@ -2656,7 +2795,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
   clearDraft?.addEventListener('click', () => {
     localStorage.removeItem(draftKey);
     if (textarea) {
-      textarea.value = '';
+      textarea.value = textarea.dataset.defaultTemplate || '';
       textarea.focus();
     }
     if (draftStatus) {
@@ -2666,7 +2805,24 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
       editorHeading.textContent = 'Create New Task';
     }
     viewingTaskNote?.remove();
-    window.history.replaceState(null, '', window.location.pathname);
+    window.history.replaceState(null, '', `${window.location.pathname}?tab=dashboard`);
+  });
+
+  document.querySelectorAll('[data-project-card]').forEach((card) => {
+    const toggle = card.querySelector('[data-project-toggle]');
+    const details = card.querySelector('.project-details');
+    const setExpanded = (expanded) => {
+      card.dataset.expanded = expanded ? '1' : '0';
+      if (details) details.hidden = !expanded;
+      if (toggle) {
+        toggle.textContent = expanded ? 'Hide details' : 'Show details';
+        toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      }
+    };
+    setExpanded(card.dataset.expanded === '1');
+    toggle?.addEventListener('click', () => {
+      setExpanded(card.dataset.expanded !== '1');
+    });
   });
 
   let pendingFiles = [];
@@ -2788,7 +2944,7 @@ $initialTab = $requestPath === '/' && ((string)($_GET['tab'] ?? '') === 'setting
           if (status === 'completed') {
             window.setTimeout(() => {
               saveScrollPosition();
-              window.location.href = `?task=${encodeURIComponent(`${taskForCodexPanel()}.md`)}&task_source=${encodeURIComponent(taskSourceForCodexPanel())}`;
+              window.location.href = `?tab=dashboard&task=${encodeURIComponent(`${taskForCodexPanel()}.md`)}&task_source=${encodeURIComponent(taskSourceForCodexPanel())}`;
             }, 1000);
           }
         }

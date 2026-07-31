@@ -512,11 +512,42 @@ function gitWriteInitialProjectFiles(array $project, string $path): void
 
     $readme = '# ' . $projectName . "\n\nCreated by IOVON Dev Console.\n\nRepository initialized automatically.\n";
     $gitignore = ".env\n.env.*\nvendor/\nnode_modules/\n.DS_Store\n";
+    $projectId = (string)($project['id'] ?? '');
+    $taskReadme = "# {$projectName} Task Workflow\n\n"
+        . "This repository is managed by IOVON Dev Console for Project `{$projectId}`.\n\n"
+        . "## Project structure\n\n"
+        . "- `TASKS/TODO/` contains open tasks.\n"
+        . "- `TASKS/DONE/` contains completed tasks.\n"
+        . "- `TASKS/ATTACHMENTS/<TASK-ID>/` contains files attached to a task.\n\n"
+        . "## Task files\n\n"
+        . "Task files are named `TASK-001.md`, `TASK-002.md`, and so on. Numbering is project-specific and always uses the next available task number for this repository.\n\n"
+        . "Every task starts with YAML metadata owned by Dev Console:\n\n"
+        . "```yaml\n---\nproject_id: {$projectId}\n---\n```\n\n"
+        . "Keep this metadata intact when creating task files manually. The editable body should begin after the closing `---` marker.\n\n"
+        . "## Recommended workflow\n\n"
+        . "1. Create a task in Dev Console.\n"
+        . "2. Attach supporting files when needed.\n"
+        . "3. Use the task in the current workflow.\n"
+        . "4. Run Codex from Dev Console.\n"
+        . "5. Move completed work from `TASKS/TODO/` to `TASKS/DONE/` when finished.\n\n"
+        . "## Manual task creation\n\n"
+        . "Create the next numbered file in `TASKS/TODO/`, include the YAML metadata above, and use the same `project_id`. Attachments belong in `TASKS/ATTACHMENTS/<TASK-ID>/`.\n\n"
+        . "## Running Codex\n\n"
+        . "Run Codex from the Dev Console Dashboard so it uses the selected Project, task source, attachments, and repository path consistently.\n";
     if (@file_put_contents(rtrim($path, '/') . '/README.md', $readme, LOCK_EX) === false) {
         throw new RuntimeException('Unable to write README.md.');
     }
     if (@file_put_contents(rtrim($path, '/') . '/.gitignore', $gitignore, LOCK_EX) === false) {
         throw new RuntimeException('Unable to write .gitignore.');
+    }
+    foreach (['TASKS/TODO', 'TASKS/DONE', 'TASKS/ATTACHMENTS'] as $directory) {
+        $taskDirectory = rtrim($path, '/') . '/' . $directory;
+        if (!is_dir($taskDirectory) && !@mkdir($taskDirectory, 0755, true) && !is_dir($taskDirectory)) {
+            throw new RuntimeException('Unable to create TASKS directory.');
+        }
+    }
+    if (@file_put_contents(rtrim($path, '/') . '/TASKS/README.md', $taskReadme, LOCK_EX) === false) {
+        throw new RuntimeException('Unable to write TASKS/README.md.');
     }
 }
 
@@ -765,7 +796,7 @@ function gitInitializeLocalRepository(array $configuration, array $project, arra
     foreach ([
         ['git', '-C', $path, 'config', 'user.name', 'IOVON Dev Console'],
         ['git', '-C', $path, 'config', 'user.email', 'dev-console@localhost'],
-        ['git', '-C', $path, 'add', 'README.md', '.gitignore'],
+        ['git', '-C', $path, 'add', 'README.md', '.gitignore', 'TASKS/README.md'],
         ['git', '-C', $path, 'commit', '-m', 'Initialize project repository'],
     ] as $arguments) {
         $result = gitRunFixedCommand($arguments, 30, [], false);
