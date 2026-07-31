@@ -1552,7 +1552,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
     label { display: block; font-weight: 700; margin: 18px 0 8px; }
     textarea { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 8px; box-sizing: border-box; color: #10242f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.5; min-height: 390px; padding: 14px; resize: vertical; tab-size: 2; width: 100%; }
     textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
-    .metadata-preview { background: #f7fcfe; border: 1px solid var(--line); color: var(--muted); margin: 8px 0 14px; min-height: 0; padding: 10px 12px; }
+    .metadata-preview { background: #f7fcfe; border: 1px solid var(--line); color: var(--muted); margin: 8px 0 14px; min-height: 78px; padding: 10px 12px; resize: none; }
     input[type="text"], input[type="password"], select { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 6px; box-sizing: border-box; color: #10242f; font-size: 14px; padding: 9px 10px; width: 100%; }
     input[type="text"]:focus, input[type="password"]:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
     button, .button-link { align-items: center; background: var(--blue); border: 0; border-radius: 5px; color: #fff; cursor: pointer; display: inline-flex; font-size: 15px; font-weight: 700; gap: 8px; margin-top: 16px; padding: 11px 18px; text-decoration: none; }
@@ -1775,7 +1775,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
         <p class="meta">No Projects are registered yet. Create a Project in Settings to use the Dashboard.</p>
       </div>
     <?php else: ?>
-      <form method="post" action="/?tab=dashboard" data-preserve-settings-scroll="1">
+      <form method="post" action="/?tab=dashboard" data-project-selection-form>
         <input type="hidden" name="action" value="select_active_project">
         <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
         <input type="hidden" name="target_tab" value="dashboard">
@@ -1812,8 +1812,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
     <?php endif; ?>
     <p id="nextTaskNumber"><strong>Next task number:</strong> <?= h(taskNumber($nextNumber)) ?></p>
     <form method="post" enctype="multipart/form-data" id="taskForm" data-created="<?= h($createdTaskPath !== '' && $error === '' ? '1' : '0') ?>">
-      <label>Task metadata</label>
-      <pre class="metadata-preview" aria-readonly="true"><?= h($taskMetadataPreview) ?></pre>
+      <label for="task_metadata">Task metadata</label>
+      <textarea id="task_metadata" class="metadata-preview" readonly rows="3" aria-readonly="true" tabindex="-1"><?= h($taskMetadataPreview) ?></textarea>
       <label for="task_body">Task markdown body</label>
       <textarea id="task_body" name="task_body" required spellcheck="false" data-default-template="<?= h($taskDefaultTemplate) ?>" placeholder="# TASK-<?= h(sprintf('%03d', $nextNumber)) ?>&#10;&#10;## Title&#10;&#10;..."><?= h($editorBody) ?></textarea>
       <div class="form-actions">
@@ -1934,39 +1934,35 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
       <?php if ($legacyTasksDetected): ?>
         <p class="field-help">Legacy tasks detected. They belong to the previous global task storage and are associated with the default Project.</p>
       <?php endif; ?>
-      <?php if (empty($latestTasks)): ?>
-        <p class="meta">No task files found yet.</p>
-      <?php else: ?>
-        <div class="task-list-scroll">
-          <?php foreach ($taskGroups as $groupName => $groupTasks): ?>
-            <section class="task-group">
-              <h3><?= h($groupName) ?></h3>
-              <?php if (empty($groupTasks)): ?>
-                <p class="meta">No <?= h(strtolower($groupName)) ?> tasks.</p>
-              <?php else: ?>
-                <ul class="task-list">
-                  <?php foreach ($groupTasks as $task): ?>
-                    <li>
-                      <div class="task-row-header">
-                        <span class="task-summary-label"><?= h($task['task_id']) ?></span>
-                        <span class="badge <?= h(strtolower((string)$task['status'])) ?>"><?= h($task['status']) ?></span>
-                      </div>
-                      <?php if ($task['title'] !== ''): ?><span class="task-title"><?= h($task['title']) ?></span><?php endif; ?>
-                      <div class="task-metadata">
-                        <?php if ((string)($task['source'] ?? '') === 'legacy'): ?><span>Legacy storage</span><?php endif; ?>
-                        <?php if ($task['commit'] !== ''): ?><span>Commit: <code title="<?= h($task['commit']) ?>"><?= h(shortSha($task['commit'])) ?></code></span><?php endif; ?>
-                        <?php if ($task['milestone'] !== ''): ?><span class="milestone">Milestone: <?= h($task['milestone']) ?></span><?php endif; ?>
-                        <?php if ($task['tag'] !== ''): ?><span>Tag: <?= h($task['tag']) ?></span><?php endif; ?>
-                      </div>
-                      <a class="button-link secondary" href="?tab=dashboard&task=<?= h(rawurlencode($task['filename'])) ?>&task_source=<?= h(rawurlencode((string)$task['source'])) ?>">Use in Workflow</a>
-                    </li>
-                  <?php endforeach; ?>
-                </ul>
-              <?php endif; ?>
-            </section>
-          <?php endforeach; ?>
-        </div>
-      <?php endif; ?>
+      <div class="task-list-scroll">
+        <?php foreach ($taskGroups as $groupName => $groupTasks): ?>
+          <section class="task-group">
+            <h3><?= h($groupName) ?></h3>
+            <?php if (empty($groupTasks)): ?>
+              <p class="meta">No <?= h(strtolower($groupName)) ?> tasks.</p>
+            <?php else: ?>
+              <ul class="task-list">
+                <?php foreach ($groupTasks as $task): ?>
+                  <li>
+                    <div class="task-row-header">
+                      <span class="task-summary-label"><?= h($task['task_id']) ?></span>
+                      <span class="badge <?= h(strtolower((string)$task['status'])) ?>"><?= h($task['status']) ?></span>
+                    </div>
+                    <?php if ($task['title'] !== ''): ?><span class="task-title"><?= h($task['title']) ?></span><?php endif; ?>
+                    <div class="task-metadata">
+                      <?php if ((string)($task['source'] ?? '') === 'legacy'): ?><span>Legacy storage</span><?php endif; ?>
+                      <?php if ($task['commit'] !== ''): ?><span>Commit: <code title="<?= h($task['commit']) ?>"><?= h(shortSha($task['commit'])) ?></code></span><?php endif; ?>
+                      <?php if ($task['milestone'] !== ''): ?><span class="milestone">Milestone: <?= h($task['milestone']) ?></span><?php endif; ?>
+                      <?php if ($task['tag'] !== ''): ?><span>Tag: <?= h($task['tag']) ?></span><?php endif; ?>
+                    </div>
+                    <a class="button-link secondary" href="?tab=dashboard&task=<?= h(rawurlencode($task['filename'])) ?>&task_source=<?= h(rawurlencode((string)$task['source'])) ?>">Use in Workflow</a>
+                  </li>
+                <?php endforeach; ?>
+              </ul>
+            <?php endif; ?>
+          </section>
+        <?php endforeach; ?>
+      </div>
     </section>
 
     <section class="panel deployment-panel production" id="productionDeployment">
@@ -2068,7 +2064,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
                     <span class="meta"><?= h(configuredDisplayValue($project['id'] ?? '')) ?></span>
                   </span>
                   <span class="status-pill <?= h($statusClass) ?>"><?= h($lifecycleLabel) ?></span>
-                  <?php if ($isActiveProject): ?><span class="status-pill healthy">Current</span><?php endif; ?>
+                  <?php if ($isActiveProject): ?><span class="status-pill healthy">CURRENT</span><?php endif; ?>
                   <span>Production: <?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?></span>
                   <span>Preview: <?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?></span>
                   <button type="button" class="secondary project-card-toggle" data-project-toggle aria-expanded="<?= $cardOpen ? 'true' : 'false' ?>"><?= $cardOpen ? 'Hide details' : 'Show details' ?></button>
@@ -2085,9 +2081,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
                   <div class="project-actions">
                     <span class="status-pill <?= h($statusClass) ?>"><?= h($statusLabel) ?></span>
                     <?php if ($isActiveProject): ?>
-                      <span class="status-pill healthy">Current</span>
+                      <span class="status-pill healthy">CURRENT</span>
                     <?php else: ?>
-                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" data-project-selection-form>
                         <input type="hidden" name="action" value="select_active_project">
                         <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                         <input type="hidden" name="target_tab" value="settings">
@@ -2575,6 +2571,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
   const scrollKey = 'iovon.devConsole.scrollPosition';
   const settingsScrollKey = 'iovon.devConsole.settingsScrollPosition';
   let scrollSaveFrame = null;
+  const selectedTab = () => tabButtons.find((button) => button.classList.contains('active'))?.dataset.tabTarget || 'dashboard';
   const activateTab = (target) => {
     tabButtons.forEach((button) => {
       button.classList.toggle('active', button.dataset.tabTarget === target);
@@ -2585,6 +2582,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
     pageContexts.forEach((context) => {
       context.hidden = context.dataset.pageContext !== target;
     });
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', target);
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
   };
   tabButtons.forEach((button) => {
     button.addEventListener('click', () => activateTab(button.dataset.tabTarget || 'dashboard'));
@@ -2615,6 +2615,14 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
   document.querySelectorAll('#settingsTab form[data-preserve-settings-scroll="1"]').forEach((settingsForm) => {
     settingsForm.addEventListener('submit', () => {
       sessionStorage.setItem(settingsScrollKey, String(window.scrollY));
+    });
+  });
+  document.querySelectorAll('form[data-project-selection-form]').forEach((projectForm) => {
+    projectForm.addEventListener('submit', () => {
+      const target = selectedTab();
+      const targetInput = projectForm.querySelector('input[name="target_tab"]');
+      if (targetInput) targetInput.value = target;
+      projectForm.action = target === 'settings' ? '/?tab=settings#projects' : '/?tab=dashboard';
     });
   });
   document.querySelectorAll('[data-delete-project-form="1"]').forEach((deleteForm) => {
