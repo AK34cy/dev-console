@@ -835,7 +835,7 @@ function taskRepositoryReadiness(?array $project, array $githubConfiguration): a
 
 function codexCliInstalled(): bool
 {
-    $diagnostics = serverToolsDiagnostics();
+    $diagnostics = serverToolsDiagnostics(false);
     return !empty($diagnostics['tools']['codex']['available_to_service_user']);
 }
 
@@ -885,6 +885,7 @@ function projectActionTitle(string $projectAction, bool $success): string
     if ($projectAction === 'push_git_repository') return $success ? 'Git push completed' : 'Git push failed';
     if ($projectAction === 'cleanup_orphaned_project') return $success ? 'Orphaned infrastructure cleaned up' : 'Orphaned cleanup failed';
     if ($projectAction === 'refresh_server_diagnostics') return $success ? 'Server diagnostics refreshed' : 'Server diagnostics failed';
+    if ($projectAction === 'server_tool_action') return $success ? 'Server tool action completed' : 'Server tool action failed';
 
     return $success ? 'Project action completed' : 'Project action failed';
 }
@@ -1148,6 +1149,25 @@ if ($action === 'refresh_server_diagnostics') {
     exit;
 }
 
+if ($action === 'server_tool_action') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $serverDiagnosticsResult = [
+            'success' => false,
+            'message' => 'Invalid server tool request.',
+            'action' => 'server_tool_action',
+            'output' => '',
+            'summary_steps' => [],
+        ];
+    } else {
+        $toolId = is_scalar($_POST['tool_id'] ?? null) ? (string)$_POST['tool_id'] : '';
+        $toolAction = is_scalar($_POST['tool_action'] ?? null) ? (string)$_POST['tool_action'] : '';
+        $serverDiagnosticsResult = serverToolsRunManagedAction($toolId, $toolAction);
+    }
+    $_SESSION['server_diagnostics_result'] = $serverDiagnosticsResult;
+    header('Location: /?tab=server-management#server-tools');
+    exit;
+}
+
 if (in_array($action, apacheAllowedActions(), true)) {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $apacheActionResult = [
@@ -1280,7 +1300,7 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'server_tool_action', 'create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -2568,18 +2588,20 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                   <tr>
                     <th>Tool</th>
                     <th>Status</th>
-                    <th>Version</th>
+                    <th>Installed version</th>
+                    <th>Latest available</th>
                     <th>Executable</th>
-                    <th>Service user</th>
-                    <th>Purpose</th>
+                    <th>Installation source</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <?php foreach ($serverTools as $tool): ?>
+                  <?php foreach ($serverTools as $toolId => $tool): ?>
                     <?php if ((string)($tool['required_group'] ?? '') !== $toolGroup) continue; ?>
                     <?php
                       $diagnosticStatus = (string)($tool['diagnostic_status'] ?? 'Diagnostic unavailable');
                       $statusClass = $diagnosticStatus === 'Installed' ? 'healthy' : ($toolGroup === 'required' ? 'error' : 'warning');
+                      $actions = serverToolsAllowedActionsForTool((string)$toolId, $tool);
                     ?>
                     <tr>
                       <td>
@@ -2588,13 +2610,31 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                       </td>
                       <td class="tool-status"><span class="status-pill <?= h($statusClass) ?>"><?= h($diagnosticStatus) ?></span></td>
                       <td><?= h(configuredDisplayValue($tool['version'] ?? '')) ?></td>
+                      <td><?= h(configuredDisplayValue($tool['latest_version'] ?? '')) ?></td>
                       <td class="path-value"><?= h(configuredDisplayValue($tool['executable_path'] ?? '')) ?></td>
-                      <td><?= !empty($tool['available_to_service_user']) ? 'Executable' : 'Unavailable' ?></td>
                       <td>
-                        <?= h(configuredDisplayValue($tool['purpose'] ?? '')) ?><br>
-                        <span class="meta"><?= h(configuredDisplayValue($tool['dependency_relationship'] ?? '')) ?></span><br>
-                        <span class="meta"><?= h(configuredDisplayValue($tool['package_source'] ?? '')) ?></span><br>
+                        <?= h(configuredDisplayValue($tool['package_source'] ?? '')) ?><br>
+                        <span class="meta"><?= h(configuredDisplayValue($tool['purpose'] ?? '')) ?></span><br>
+                        <span class="meta">Service user: <?= !empty($tool['available_to_service_user']) ? 'Executable' : 'Unavailable' ?></span><br>
                         <span class="meta">Last checked: <?= h(configuredDisplayValue($tool['last_checked_at'] ?? '')) ?></span>
+                      </td>
+                      <td>
+                        <div class="project-actions">
+                          <?php foreach ($actions as $toolAction): ?>
+                            <form method="post" action="/?tab=server-management#server-tools">
+                              <input type="hidden" name="action" value="server_tool_action">
+                              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                              <input type="hidden" name="tool_id" value="<?= h((string)$toolId) ?>">
+                              <input type="hidden" name="tool_action" value="<?= h((string)$toolAction) ?>">
+                              <button type="submit" class="<?= $toolAction === 'refresh' ? 'secondary' : '' ?>"><?= h(serverToolsActionLabel((string)$toolAction)) ?></button>
+                            </form>
+                          <?php endforeach; ?>
+                        </div>
+                        <?php if ((string)$toolId === 'npm'): ?>
+                          <p class="field-help">npm is installed and updated with Node.js.</p>
+                        <?php elseif (in_array((string)$toolId, ['git', 'php'], true)): ?>
+                          <p class="field-help">Diagnostics only.</p>
+                        <?php endif; ?>
                       </td>
                     </tr>
                   <?php endforeach; ?>
