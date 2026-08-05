@@ -1,7 +1,8 @@
 <?php
-require __DIR__ . '/deployment.php';
 require __DIR__ . '/config.php';
 require __DIR__ . '/process.php';
+require __DIR__ . '/server-tools.php';
+require __DIR__ . '/deployment.php';
 require __DIR__ . '/apache.php';
 require __DIR__ . '/projects.php';
 require __DIR__ . '/git.php';
@@ -834,8 +835,8 @@ function taskRepositoryReadiness(?array $project, array $githubConfiguration): a
 
 function codexCliInstalled(): bool
 {
-    $result = processRunCommand(['codex', '--version'], ['timeout' => 5]);
-    return !empty($result['success']);
+    $diagnostics = serverToolsDiagnostics();
+    return !empty($diagnostics['tools']['codex']['available_to_service_user']);
 }
 
 function extractCommitHash(string $output): string
@@ -883,6 +884,7 @@ function projectActionTitle(string $projectAction, bool $success): string
     if ($projectAction === 'pull_git_repository') return $success ? 'Git pull completed' : 'Git pull failed';
     if ($projectAction === 'push_git_repository') return $success ? 'Git push completed' : 'Git push failed';
     if ($projectAction === 'cleanup_orphaned_project') return $success ? 'Orphaned infrastructure cleaned up' : 'Orphaned cleanup failed';
+    if ($projectAction === 'refresh_server_diagnostics') return $success ? 'Server diagnostics refreshed' : 'Server diagnostics failed';
 
     return $success ? 'Project action completed' : 'Project action failed';
 }
@@ -936,6 +938,9 @@ function projectLifecycleLabel(array $project, array $projectStatus): string
 
 function operationSummarySteps(string $action, array $result): array
 {
+    if (!empty($result['summary_steps']) && is_array($result['summary_steps'])) {
+        return array_values(array_filter(array_map('strval', $result['summary_steps'])));
+    }
     if (empty($result['success'])) {
         return [];
     }
@@ -1003,6 +1008,7 @@ $error = '';
 $apacheActionResult = null;
 $projectActionResult = null;
 $githubActionResult = null;
+$serverDiagnosticsResult = null;
 $projectFormErrors = [];
 $projectFormValues = [
     'project_name' => '',
@@ -1122,6 +1128,23 @@ if ($action === 'run-codex' && $requestMethod === 'POST') {
         http_response_code(400);
         sendJson(['ok' => false, 'error' => $exception->getMessage()]);
     }
+    exit;
+}
+
+if ($action === 'refresh_server_diagnostics') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $serverDiagnosticsResult = [
+            'success' => false,
+            'message' => 'Invalid diagnostics refresh request.',
+            'action' => 'refresh_server_diagnostics',
+            'output' => '',
+            'summary_steps' => [],
+        ];
+    } else {
+        $serverDiagnosticsResult = serverToolsRefreshResult();
+    }
+    $_SESSION['server_diagnostics_result'] = $serverDiagnosticsResult;
+    header('Location: /?tab=server-management#server-tools');
     exit;
 }
 
@@ -1257,7 +1280,7 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -1450,6 +1473,11 @@ $apacheActionResult = is_array($_SESSION['apache_action_result'] ?? null) ? $_SE
 unset($_SESSION['apache_action_result']);
 $githubActionResult = is_array($_SESSION['github_action_result'] ?? null) ? $_SESSION['github_action_result'] : $githubActionResult;
 unset($_SESSION['github_action_result']);
+$serverDiagnosticsResult = is_array($_SESSION['server_diagnostics_result'] ?? null) ? $_SESSION['server_diagnostics_result'] : $serverDiagnosticsResult;
+unset($_SESSION['server_diagnostics_result']);
+$serverDiagnostics = is_array($serverDiagnosticsResult['diagnostics'] ?? null) ? $serverDiagnosticsResult['diagnostics'] : serverToolsDiagnostics();
+$serverContext = is_array($serverDiagnostics['context'] ?? null) ? $serverDiagnostics['context'] : [];
+$serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostics['tools'] : [];
 $projectStatuses = [];
 $gitStatuses = [];
 foreach ($projects as $project) {
@@ -1471,7 +1499,7 @@ if ($serverAddress === '' || in_array($serverAddress, ['127.0.0.1', '::1'], true
     $serverAddress = 'SERVER_IP';
 }
 $requestedTab = (string)($_GET['tab'] ?? '');
-if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], true)) {
+if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 'server-management'], true)) {
     $initialTab = $requestedTab;
 } else {
     $initialTab = $requestPath === '/' && (!empty($projectFormErrors) || $projectFlash !== '' || $projectActionResult !== null || $apacheActionResult !== null || $githubActionResult !== null) ? 'settings' : 'dashboard';
@@ -1621,6 +1649,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
     .compact-table th { color: var(--muted); width: 45%; }
     .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr); }
+    .server-layout { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
     .settings-service-row { align-items: start; display: grid; gap: 14px; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .settings-service-row > .panel { margin-top: 0; }
     .settings-table { border-collapse: collapse; font-size: 12px; width: 100%; }
@@ -1630,6 +1659,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
     .table-scroll { overflow-x: auto; width: 100%; }
     .table-scroll .settings-table { min-width: 680px; }
     .table-scroll .settings-table.compact-sites { min-width: 560px; }
+    .tool-status { white-space: nowrap; }
     .site-path, .path-value { overflow-wrap: anywhere; word-break: normal; }
     #projects, #github, #apache { scroll-margin-top: 18px; }
     #createProject { scroll-margin-top: 18px; }
@@ -1697,6 +1727,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
       <nav class="tab-nav" aria-label="Primary">
         <button type="button" class="tab-button <?= $initialTab === 'dashboard' ? 'active' : '' ?>" data-tab-target="dashboard">Dashboard</button>
         <button type="button" class="tab-button <?= $initialTab === 'settings' ? 'active' : '' ?>" data-tab-target="settings">Settings</button>
+        <button type="button" class="tab-button <?= $initialTab === 'server-management' ? 'active' : '' ?>" data-tab-target="server-management">Server Management</button>
       </nav>
     </div>
     <div class="page-context" aria-live="polite">
@@ -1707,6 +1738,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
       <div data-page-context="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
         <strong>Settings</strong>
         <span>Projects and server configuration</span>
+      </div>
+      <div data-page-context="server-management"<?= $initialTab === 'server-management' ? '' : ' hidden' ?>>
+        <strong>Server Management</strong>
+        <span>Read-only server diagnostics</span>
       </div>
     </div>
   </header>
@@ -2491,6 +2526,84 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings'], t
         <?php endif; ?>
       </section>
       </div>
+    </div>
+  </section>
+
+  <section id="serverManagementTab" data-tab-panel="server-management"<?= $initialTab === 'server-management' ? '' : ' hidden' ?>>
+    <div class="server-layout">
+      <section class="panel">
+        <div class="dashboard-header">
+          <h2>Server Management</h2>
+          <form method="post" action="/?tab=server-management#server-tools">
+            <input type="hidden" name="action" value="refresh_server_diagnostics">
+            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+            <button type="submit" class="secondary">Refresh Diagnostics</button>
+          </form>
+        </div>
+        <?php if ($serverDiagnosticsResult !== null): ?>
+          <?php renderOperationResult($serverDiagnosticsResult, 'serverDiagnosticsOperationLog', 'server-diagnostics.log'); ?>
+        <?php endif; ?>
+      </section>
+
+      <section class="panel" id="server-context">
+        <h2>Server Context</h2>
+        <dl class="apache-summary-grid">
+          <div><dt>Service</dt><dd><?= h(configuredDisplayValue($serverContext['service_name'] ?? '')) ?></dd></div>
+          <div><dt>User</dt><dd><?= h(configuredDisplayValue($serverContext['user'] ?? '')) ?></dd></div>
+          <div><dt>Group</dt><dd><?= h(configuredDisplayValue($serverContext['group'] ?? '')) ?></dd></div>
+          <div><dt>Working directory</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['working_directory'] ?? '')) ?></dd></div>
+          <div><dt>PATH</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['path'] ?? '')) ?></dd></div>
+          <div><dt>PHP executable</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['php_executable'] ?? '')) ?></dd></div>
+        </dl>
+      </section>
+
+      <section class="panel" id="server-tools">
+        <h2>Server Tools</h2>
+        <?php foreach (['required' => ['Required Tools', true], 'optional' => ['Optional / Project-dependent Tools', false]] as $toolGroup => [$toolGroupLabel, $toolGroupOpen]): ?>
+          <details class="compact-details"<?= $toolGroupOpen ? ' open' : '' ?>>
+            <summary><?= h($toolGroupLabel) ?></summary>
+            <div class="table-scroll">
+              <table class="settings-table compact-sites">
+                <thead>
+                  <tr>
+                    <th>Tool</th>
+                    <th>Status</th>
+                    <th>Version</th>
+                    <th>Executable</th>
+                    <th>Service user</th>
+                    <th>Purpose</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($serverTools as $tool): ?>
+                    <?php if ((string)($tool['required_group'] ?? '') !== $toolGroup) continue; ?>
+                    <?php
+                      $diagnosticStatus = (string)($tool['diagnostic_status'] ?? 'Diagnostic unavailable');
+                      $statusClass = $diagnosticStatus === 'Installed' ? 'healthy' : ($toolGroup === 'required' ? 'error' : 'warning');
+                    ?>
+                    <tr>
+                      <td>
+                        <strong><?= h(configuredDisplayValue($tool['display_name'] ?? '')) ?></strong><br>
+                        <span class="meta"><?= h(configuredDisplayValue($tool['requirement'] ?? '')) ?></span>
+                      </td>
+                      <td class="tool-status"><span class="status-pill <?= h($statusClass) ?>"><?= h($diagnosticStatus) ?></span></td>
+                      <td><?= h(configuredDisplayValue($tool['version'] ?? '')) ?></td>
+                      <td class="path-value"><?= h(configuredDisplayValue($tool['executable_path'] ?? '')) ?></td>
+                      <td><?= !empty($tool['available_to_service_user']) ? 'Executable' : 'Unavailable' ?></td>
+                      <td>
+                        <?= h(configuredDisplayValue($tool['purpose'] ?? '')) ?><br>
+                        <span class="meta"><?= h(configuredDisplayValue($tool['dependency_relationship'] ?? '')) ?></span><br>
+                        <span class="meta"><?= h(configuredDisplayValue($tool['package_source'] ?? '')) ?></span><br>
+                        <span class="meta">Last checked: <?= h(configuredDisplayValue($tool['last_checked_at'] ?? '')) ?></span>
+                      </td>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          </details>
+        <?php endforeach; ?>
+      </section>
     </div>
   </section>
 

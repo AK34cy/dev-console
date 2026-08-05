@@ -121,6 +121,14 @@ Example response:
 
 If Git metadata is unavailable, `git_commit` is returned as `null`.
 
+## Server Management
+
+Server Management is read-only in Task 007A. The Server Tools diagnostics use a
+fixed allowlist: Codex CLI, Node.js, npm, Composer, Git, and PHP. Results reflect
+whether each tool is available to the Dev Console service user. Missing optional
+or project-dependent tools such as Composer, Node.js, and npm are not global
+errors. Install and update actions will be added in a later task.
+
 ## Updating
 
 Update the repository checkout, then rerun the bootstrap so the installed

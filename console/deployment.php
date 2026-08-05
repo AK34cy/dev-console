@@ -442,16 +442,20 @@ function slowDashboardValues(): array
     }
     $values = [
         'environment' => $environment,
-        'software' => [
-            'PHP' => PHP_VERSION,
-            'Composer' => installedVersion(['composer', '--version'], '/Composer(?: version)?\s+([^\s]+)/i'),
-            'Node.js' => installedVersion(['node', '--version']),
-            'npm' => installedVersion(['npm', '--version']),
-            'Git' => installedVersion(['git', '--version'], '/git version\s+(.+)/i'),
-            'Codex CLI' => installedVersion(['codex', '--version'], '/codex(?:-cli)?\s+(.+)/i'),
-            'Operating System' => $osName !== '' ? $osName : 'Not detected',
-            'Kernel' => php_uname('r'),
-        ],
+        'software' => array_merge(
+            function_exists('serverToolsDashboardSoftware') ? serverToolsDashboardSoftware() : [
+                'PHP' => PHP_VERSION,
+                'Composer' => installedVersion(['composer', '--version'], '/Composer(?: version)?\s+([^\s]+)/i'),
+                'Node.js' => installedVersion(['node', '--version']),
+                'npm' => installedVersion(['npm', '--version']),
+                'Git' => installedVersion(['git', '--version'], '/git version\s+(.+)/i'),
+                'Codex CLI' => installedVersion(['codex', '--version'], '/codex(?:-cli)?\s+(.+)/i'),
+            ],
+            [
+                'Operating System' => $osName !== '' ? $osName : 'Not detected',
+                'Kernel' => php_uname('r'),
+            ]
+        ),
         'statistics' => [
             'development' => directoryStatistics(deploymentSourcePath(), true),
             'preview' => directoryStatistics($environment['preview_document_root']),
