@@ -1115,6 +1115,20 @@ if ($action === 'environment-status') {
     exit;
 }
 
+if ($action === 'server-tool-operation-status') {
+    $operationId = is_scalar($_GET['id'] ?? null) ? (string)$_GET['id'] : '';
+    try {
+        if (!serverToolsValidateOperationId($operationId)) {
+            throw new RuntimeException('Invalid server tool operation ID.');
+        }
+        sendJson(['ok' => true, 'operation' => serverToolsOperationStatus($operationId)]);
+    } catch (Throwable $exception) {
+        http_response_code(400);
+        sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+    }
+    exit;
+}
+
 if ($action === 'run-codex' && $requestMethod === 'POST') {
     $taskId = (string)($_POST['task'] ?? '');
     $taskSource = (string)($_POST['task_source'] ?? 'project');
@@ -1151,20 +1165,19 @@ if ($action === 'refresh_server_diagnostics') {
 
 if ($action === 'server_tool_action') {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
-        $serverDiagnosticsResult = [
-            'success' => false,
-            'message' => 'Invalid server tool request.',
-            'action' => 'server_tool_action',
-            'output' => '',
-            'summary_steps' => [],
-        ];
+        http_response_code(403);
+        sendJson(['ok' => false, 'error' => 'Invalid server tool request.']);
     } else {
-        $toolId = is_scalar($_POST['tool_id'] ?? null) ? (string)$_POST['tool_id'] : '';
-        $toolAction = is_scalar($_POST['tool_action'] ?? null) ? (string)$_POST['tool_action'] : '';
-        $serverDiagnosticsResult = serverToolsRunManagedAction($toolId, $toolAction);
+        try {
+            $toolId = is_scalar($_POST['tool_id'] ?? null) ? (string)$_POST['tool_id'] : '';
+            $toolAction = is_scalar($_POST['tool_action'] ?? null) ? (string)$_POST['tool_action'] : '';
+            $operation = serverToolsStartOperation($toolId, $toolAction);
+            sendJson(['ok' => true, 'operation' => $operation]);
+        } catch (Throwable $exception) {
+            http_response_code(400);
+            sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+        }
     }
-    $_SESSION['server_diagnostics_result'] = $serverDiagnosticsResult;
-    header('Location: /?tab=server-management#server-tools');
     exit;
 }
 
@@ -1495,6 +1508,21 @@ $githubActionResult = is_array($_SESSION['github_action_result'] ?? null) ? $_SE
 unset($_SESSION['github_action_result']);
 $serverDiagnosticsResult = is_array($_SESSION['server_diagnostics_result'] ?? null) ? $_SESSION['server_diagnostics_result'] : $serverDiagnosticsResult;
 unset($_SESSION['server_diagnostics_result']);
+$serverToolOperationId = is_scalar($_GET['server_tool_operation'] ?? null) ? (string)$_GET['server_tool_operation'] : '';
+if (serverToolsValidateOperationId($serverToolOperationId)) {
+    try {
+        $serverToolOperation = serverToolsOperationStatus($serverToolOperationId);
+        if (in_array((string)($serverToolOperation['status'] ?? ''), ['completed', 'failed'], true) && is_array($serverToolOperation['result'] ?? null)) {
+            $serverDiagnosticsResult = $serverToolOperation['result'];
+            $serverDiagnosticsResult['output'] = (string)($serverToolOperation['log'] ?? '');
+            if (is_array($serverToolOperation['diagnostics'] ?? null)) {
+                $serverDiagnosticsResult['diagnostics'] = $serverToolOperation['diagnostics'];
+            }
+        }
+    } catch (Throwable) {
+        // Ignore stale or invalid operation state during page rendering.
+    }
+}
 $serverDiagnostics = is_array($serverDiagnosticsResult['diagnostics'] ?? null) ? $serverDiagnosticsResult['diagnostics'] : serverToolsDiagnostics();
 $serverContext = is_array($serverDiagnostics['context'] ?? null) ? $serverDiagnostics['context'] : [];
 $serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostics['tools'] : [];
@@ -1551,6 +1579,13 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
     .result-actions button { font-size: 12px; margin-top: 0; padding: 7px 10px; }
     .operation-summary { background: #f7fcfe; border: 1px solid var(--line); border-radius: 7px; display: grid; gap: 6px; list-style: none; margin: 12px 0; padding: 10px; }
     .operation-summary li { color: var(--green); font-size: 13px; font-weight: 700; }
+    .tool-operation-panel { border-left: 4px solid var(--blue); }
+    .tool-operation-panel.failed { border-left-color: #8a1f1f; }
+    .tool-operation-grid { display: grid; gap: 8px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 12px 0; }
+    .tool-operation-grid div { background: #f7fcfe; border: 1px solid var(--line); border-radius: 7px; padding: 9px; }
+    .tool-operation-grid dt { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .tool-operation-grid dd { font-size: 13px; font-weight: 700; margin: 4px 0 0; overflow-wrap: anywhere; }
+    .tool-operation-log { max-height: 360px; min-height: 120px; }
     label { display: block; font-weight: 700; margin: 18px 0 8px; }
     textarea { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 8px; box-sizing: border-box; color: #10242f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.5; min-height: 390px; padding: 14px; resize: vertical; tab-size: 2; width: 100%; }
     textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
@@ -2563,6 +2598,23 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
         <?php if ($serverDiagnosticsResult !== null): ?>
           <?php renderOperationResult($serverDiagnosticsResult, 'serverDiagnosticsOperationLog', 'server-diagnostics.log'); ?>
         <?php endif; ?>
+        <section class="result-block tool-operation-panel" id="serverToolOperationPanel" hidden>
+          <h2>Server tool operation</h2>
+          <p id="serverToolOperationMessage">Starting...</p>
+          <dl class="tool-operation-grid">
+            <div><dt>Tool</dt><dd id="serverToolOperationTool">-</dd></div>
+            <div><dt>Action</dt><dd id="serverToolOperationAction">-</dd></div>
+            <div><dt>Status</dt><dd id="serverToolOperationStatus">Starting</dd></div>
+            <div><dt>Elapsed</dt><dd id="serverToolOperationElapsed">0s</dd></div>
+          </dl>
+          <p><strong>Stage:</strong> <span id="serverToolOperationStage">Starting</span></p>
+          <div class="result-actions">
+            <button type="button" class="secondary" data-copy-log="serverToolLiveLog">Copy Log</button>
+            <button type="button" class="secondary" data-download-log="serverToolLiveLog" data-download-name="server-tool-operation.log">Download Log</button>
+            <span class="hint" data-log-message="serverToolLiveLog" aria-live="polite"></span>
+          </div>
+          <pre id="serverToolLiveLog" class="tool-operation-log">Waiting for operation log...</pre>
+        </section>
       </section>
 
       <section class="panel" id="server-context">
@@ -2621,7 +2673,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                       <td>
                         <div class="project-actions">
                           <?php foreach ($actions as $toolAction): ?>
-                            <form method="post" action="/?tab=server-management#server-tools">
+                            <form method="post" action="/?tab=server-management#server-tools" data-server-tool-form="1" data-tool-id="<?= h((string)$toolId) ?>" data-tool-name="<?= h(configuredDisplayValue($tool['display_name'] ?? '')) ?>" data-tool-action="<?= h((string)$toolAction) ?>" data-action-label="<?= h(serverToolsActionLabel((string)$toolAction)) ?>">
                               <input type="hidden" name="action" value="server_tool_action">
                               <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                               <input type="hidden" name="tool_id" value="<?= h((string)$toolId) ?>">
@@ -2774,6 +2826,106 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
       link.remove();
     });
   });
+
+  const serverToolPanel = document.getElementById('serverToolOperationPanel');
+  const serverToolMessage = document.getElementById('serverToolOperationMessage');
+  const serverToolTool = document.getElementById('serverToolOperationTool');
+  const serverToolAction = document.getElementById('serverToolOperationAction');
+  const serverToolStatus = document.getElementById('serverToolOperationStatus');
+  const serverToolElapsed = document.getElementById('serverToolOperationElapsed');
+  const serverToolStage = document.getElementById('serverToolOperationStage');
+  const serverToolLog = document.getElementById('serverToolLiveLog');
+  const serverToolForms = Array.from(document.querySelectorAll('[data-server-tool-form="1"]'));
+  const formatElapsed = (seconds) => {
+    const value = Math.max(0, Number(seconds) || 0);
+    const minutes = Math.floor(value / 60);
+    const remainder = value % 60;
+    return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
+  };
+  const setServerToolButtons = (toolId, disabled) => {
+    serverToolForms.forEach((form) => {
+      if (form.dataset.toolId !== toolId) return;
+      form.querySelectorAll('button').forEach((button) => { button.disabled = disabled; });
+    });
+  };
+  const showServerToolOperation = (operation) => {
+    if (!serverToolPanel) return;
+    serverToolPanel.hidden = false;
+    serverToolPanel.classList.toggle('failed', operation.status === 'failed');
+    if (serverToolTool) serverToolTool.textContent = operation.tool_name || '-';
+    if (serverToolAction) serverToolAction.textContent = operation.action_label || operation.tool_action || '-';
+    if (serverToolStatus) serverToolStatus.textContent = String(operation.status || 'starting').replace(/^\w/, (letter) => letter.toUpperCase());
+    if (serverToolStage) serverToolStage.textContent = operation.stage || 'Starting';
+    if (serverToolElapsed) serverToolElapsed.textContent = formatElapsed(operation.elapsed_seconds || 0);
+    if (serverToolMessage) serverToolMessage.textContent = operation.message || 'Operation running.';
+    if (serverToolLog) {
+      const nextLog = operation.log && operation.log.trim() !== '' ? operation.log : 'Waiting for operation log...';
+      serverToolLog.textContent = nextLog;
+      serverToolLog.scrollTop = serverToolLog.scrollHeight;
+    }
+  };
+  const pollServerToolOperation = (operationId, toolId) => {
+    let poll = null;
+    const update = async () => {
+      const response = await fetch(`?action=server-tool-operation-status&id=${encodeURIComponent(operationId)}`, { cache: 'no-store' });
+      const payload = await response.json();
+      if (!payload.ok) throw new Error(payload.error || 'Unable to read server tool operation.');
+      showServerToolOperation(payload.operation);
+      if (payload.operation.status === 'completed' || payload.operation.status === 'failed') {
+        clearInterval(poll);
+        setServerToolButtons(toolId, false);
+        window.setTimeout(() => {
+          window.location.href = `/?tab=server-management&server_tool_operation=${encodeURIComponent(operationId)}#server-tools`;
+        }, 900);
+      }
+    };
+    update().catch((error) => {
+      clearInterval(poll);
+      setServerToolButtons(toolId, false);
+      if (serverToolPanel) serverToolPanel.hidden = false;
+      if (serverToolPanel) serverToolPanel.classList.add('failed');
+      if (serverToolMessage) serverToolMessage.textContent = error.message;
+      if (serverToolStatus) serverToolStatus.textContent = 'Failed';
+      if (serverToolStage) serverToolStage.textContent = 'Failed';
+    });
+    poll = window.setInterval(() => update().catch((error) => {
+      clearInterval(poll);
+      setServerToolButtons(toolId, false);
+      if (serverToolMessage) serverToolMessage.textContent = error.message;
+      if (serverToolStatus) serverToolStatus.textContent = 'Failed';
+    }), 1000);
+  };
+  serverToolForms.forEach((form) => {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const toolId = form.dataset.toolId || '';
+      setServerToolButtons(toolId, true);
+      showServerToolOperation({
+        tool_name: form.dataset.toolName || toolId,
+        tool_action: form.dataset.toolAction || '',
+        action_label: form.dataset.actionLabel || '',
+        status: 'starting',
+        stage: 'Starting',
+        elapsed_seconds: 0,
+        message: 'Starting server tool operation.',
+        log: '',
+      });
+      try {
+        const response = await fetch('/?tab=server-management#server-tools', { method: 'POST', body: new FormData(form) });
+        const payload = await response.json();
+        if (!payload.ok) throw new Error(payload.error || 'Unable to start server tool operation.');
+        showServerToolOperation(payload.operation);
+        pollServerToolOperation(payload.operation.id, toolId);
+      } catch (error) {
+        setServerToolButtons(toolId, false);
+        if (serverToolPanel) serverToolPanel.classList.add('failed');
+        if (serverToolMessage) serverToolMessage.textContent = error.message;
+        if (serverToolStatus) serverToolStatus.textContent = 'Failed';
+        if (serverToolStage) serverToolStage.textContent = 'Failed';
+      }
+    });
+  });
+
   const projectNameInput = document.getElementById('project_name');
   const productionDomainInput = document.getElementById('production_domain');
   const projectIdPreview = document.getElementById('projectIdPreview');
