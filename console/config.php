@@ -41,6 +41,7 @@ function devConsoleEmptyProject(): array
     return [
         'id' => '',
         'name' => '',
+        'managed_server_id' => '',
         'repository_path' => '',
         'branch' => 'main',
         'production' => [
@@ -97,7 +98,7 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         }
 
         $project = devConsoleEmptyProject();
-        foreach (['id', 'name', 'repository_path', 'branch'] as $field) {
+        foreach (['id', 'name', 'managed_server_id', 'repository_path', 'branch'] as $field) {
             if (isset($projectInput[$field]) && is_scalar($projectInput[$field])) {
                 $project[$field] = trim((string)$projectInput[$field]);
             }
@@ -386,6 +387,54 @@ function devConsoleProjects(array $configuration): array
     return is_array($configuration['projects'] ?? null) ? $configuration['projects'] : [];
 }
 
+function devConsoleFindManagedServerById(array $managedServers, string $serverId): ?array
+{
+    if ($serverId === '') {
+        return null;
+    }
+    foreach ($managedServers as $server) {
+        if ((string)($server['id'] ?? '') === $serverId) {
+            return $server;
+        }
+    }
+
+    return null;
+}
+
+function devConsoleManagedServerLabel(?array $server, string $serverId = ''): string
+{
+    if ($server === null) {
+        return $serverId === '' ? 'Not assigned' : 'Unknown server (' . $serverId . ')';
+    }
+    $name = (string)($server['name'] ?? '');
+    $id = (string)($server['id'] ?? '');
+    return $name === '' ? $id : $name . ' (' . $id . ')';
+}
+
+function devConsoleManagedServerStatusLabel(?array $server): string
+{
+    if ($server === null) {
+        return 'Not assigned';
+    }
+    return match ((string)($server['status'] ?? 'never_tested')) {
+        'reachable' => 'Reachable',
+        'unreachable' => 'Unreachable',
+        default => 'Never Tested',
+    };
+}
+
+function devConsoleProjectsReferencingManagedServer(array $configuration, string $serverId): array
+{
+    $matches = [];
+    foreach (devConsoleProjects($configuration) as $project) {
+        if ((string)($project['managed_server_id'] ?? '') === $serverId) {
+            $matches[] = $project;
+        }
+    }
+
+    return $matches;
+}
+
 function devConsoleActiveProjectId(array $configuration): string
 {
     $configuration = devConsoleNormalizeProjectConfiguration($configuration);
@@ -599,10 +648,11 @@ function devConsoleScalarInput(array $input, string $key): string
     return is_scalar($value) ? trim((string)$value) : '';
 }
 
-function devConsoleValidateNewProject(array $configuration, array $input): array
+function devConsoleValidateNewProject(array $configuration, array $input, array $managedServers = []): array
 {
     $name = devConsoleScalarInput($input, 'project_name');
     $productionDomain = devConsoleNormalizeDomain(devConsoleScalarInput($input, 'production_domain'));
+    $managedServerId = devConsoleScalarInput($input, 'managed_server_id');
     $projectId = devConsoleProjectIdFromName($name);
     $repositoryPath = $projectId === '' ? '' : devConsoleGeneratedRepositoryPath($projectId);
     $branch = 'main';
@@ -627,6 +677,13 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
         $errors[] = 'Project name must contain at least one letter or number.';
     } elseif (devConsoleFindProjectById($configuration, $projectId) !== null) {
         $errors[] = 'A project with this name already exists.';
+    }
+    if (empty($managedServers)) {
+        $errors[] = 'Create a Managed Server before creating a Project.';
+    } elseif ($managedServerId === '') {
+        $errors[] = 'Managed Server is required.';
+    } elseif (devConsoleFindManagedServerById($managedServers, $managedServerId) === null) {
+        $errors[] = 'Selected Managed Server does not exist.';
     }
 
     if (!devConsoleIsAbsoluteUnixPath($repositoryPath)) {
@@ -669,6 +726,7 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
     $project = [
         'id' => $projectId,
         'name' => $name,
+        'managed_server_id' => $managedServerId,
         'repository_path' => $repositoryPath,
         'branch' => $branch,
         'last_activity_at' => date('c'),
@@ -691,6 +749,94 @@ function devConsoleValidateNewProject(array $configuration, array $input): array
     ];
 }
 
+function devConsoleValidateProjectUpdate(array $configuration, array $input, array $managedServers = []): array
+{
+    $configuration = devConsoleNormalizeProjectConfiguration($configuration);
+    $projectId = devConsoleScalarInput($input, 'project_id');
+    $existing = devConsoleFindProjectById($configuration, $projectId);
+    $name = devConsoleScalarInput($input, 'project_name');
+    $productionDomain = devConsoleNormalizeDomain(devConsoleScalarInput($input, 'production_domain'));
+    $previewDomain = $productionDomain === '' ? '' : devConsoleGeneratedPreviewDomain($productionDomain);
+    $managedServerId = devConsoleScalarInput($input, 'managed_server_id');
+    $errors = [];
+
+    if ($existing === null) {
+        $errors[] = 'Project not found.';
+    }
+    if ($name === '' || strlen($name) > 255 || devConsoleHasControlCharacters($name)) {
+        $errors[] = 'Project name is required and must not contain invalid characters.';
+    }
+    if (!devConsoleIsHostname($productionDomain)) {
+        $errors[] = 'Production domain must be a hostname without scheme, port, path, query, or fragment.';
+    } elseif (str_starts_with($productionDomain, 'preview.')) {
+        $errors[] = 'Production domain must not begin with preview.';
+    }
+    if (!devConsoleIsHostname($previewDomain)) {
+        $errors[] = 'Generated Preview domain is too long or invalid.';
+    }
+    if ($managedServerId !== '' && devConsoleFindManagedServerById($managedServers, $managedServerId) === null) {
+        $errors[] = 'Selected Managed Server does not exist.';
+    }
+
+    foreach (devConsoleProjects($configuration) as $project) {
+        if ((string)($project['id'] ?? '') === $projectId) {
+            continue;
+        }
+        foreach (['production', 'preview'] as $environment) {
+            $existingDomain = devConsoleNormalizeDomain((string)($project[$environment]['domain'] ?? ''));
+            if ($existingDomain !== '' && ($existingDomain === $productionDomain || $existingDomain === $previewDomain)) {
+                $errors[] = 'Domain is already registered by another project environment.';
+            }
+        }
+    }
+
+    $project = $existing ?? devConsoleEmptyProject();
+    $project['name'] = $name;
+    $project['managed_server_id'] = $managedServerId;
+    $project['production']['domain'] = $productionDomain;
+    $project['preview']['domain'] = $previewDomain;
+    $project['last_activity_at'] = date('c');
+
+    return [
+        'valid' => empty($errors),
+        'errors' => array_values(array_unique($errors)),
+        'project' => $project,
+    ];
+}
+
+function devConsoleUpdateProjectInConfiguration(array $configuration, array $project): array
+{
+    $configuration = devConsoleNormalizeProjectConfiguration($configuration);
+    foreach ($configuration['projects'] as $index => $existing) {
+        if ((string)($existing['id'] ?? '') === (string)($project['id'] ?? '')) {
+            $configuration['projects'][$index] = $project;
+            break;
+        }
+    }
+
+    return devConsoleNormalizeProjectConfiguration($configuration);
+}
+
+function devConsoleUpdateProject(array $input, array $managedServers = []): array
+{
+    $configuration = devConsoleLoadProjectConfiguration();
+    $validation = devConsoleValidateProjectUpdate($configuration, $input, $managedServers);
+    if (!$validation['valid']) {
+        return $validation + ['saved' => false];
+    }
+    $updatedConfiguration = devConsoleUpdateProjectInConfiguration($configuration, $validation['project']);
+    if (!devConsoleSaveProjectConfiguration($updatedConfiguration)) {
+        return [
+            'valid' => false,
+            'saved' => false,
+            'errors' => ['Unable to save project configuration.'],
+            'project' => $validation['project'],
+        ];
+    }
+
+    return $validation + ['saved' => true];
+}
+
 function devConsoleAppendProjectToConfiguration(array $configuration, array $project): array
 {
     $configuration = devConsoleNormalizeProjectConfiguration($configuration);
@@ -702,10 +848,10 @@ function devConsoleAppendProjectToConfiguration(array $configuration, array $pro
     return devConsoleNormalizeProjectConfiguration($configuration);
 }
 
-function devConsoleAppendProject(array $input): array
+function devConsoleAppendProject(array $input, array $managedServers = []): array
 {
     $configuration = devConsoleLoadProjectConfiguration();
-    $validation = devConsoleValidateNewProject($configuration, $input);
+    $validation = devConsoleValidateNewProject($configuration, $input, $managedServers);
     if (!$validation['valid']) {
         return $validation + ['saved' => false];
     }

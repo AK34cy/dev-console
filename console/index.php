@@ -1019,6 +1019,7 @@ $projectFormErrors = [];
 $projectFormValues = [
     'project_name' => '',
     'production_domain' => '',
+    'managed_server_id' => '',
 ];
 $projectFlash = '';
 $results = [];
@@ -1311,10 +1312,14 @@ if ($action === 'save_managed_server') {
 if ($action === 'remove_managed_server') {
     $managedServersForAction = managedServersLoad();
     $serverId = managedServersNormalizeId(is_scalar($_POST['server_id'] ?? null) ? (string)$_POST['server_id'] : '');
+    $referencingProjects = devConsoleProjectsReferencingManagedServer(devConsoleLoadProjectConfiguration(), $serverId);
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $_SESSION['managed_server_result'] = ['success' => false, 'message' => 'Invalid managed server request.'];
     } elseif (managedServersFind($managedServersForAction, $serverId) === null) {
         $_SESSION['managed_server_result'] = ['success' => false, 'message' => 'Managed server not found.'];
+    } elseif (!empty($referencingProjects)) {
+        $names = array_map(static fn(array $project): string => projectMessageName($project, (string)($project['id'] ?? '')), $referencingProjects);
+        $_SESSION['managed_server_result'] = ['success' => false, 'message' => 'Managed server is assigned to Project(s): ' . implode(', ', $names) . '. Reassign those Projects before removing this server.'];
     } elseif (managedServersSave(managedServersRemove($managedServersForAction, $serverId))) {
         $_SESSION['managed_server_result'] = ['success' => true, 'message' => 'Managed server removed.'];
     } else {
@@ -1333,7 +1338,7 @@ if ($action === 'create_project') {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $projectFormErrors[] = 'Invalid project request.';
     } else {
-        $projectResult = devConsoleAppendProject($projectFormValues);
+        $projectResult = devConsoleAppendProject($projectFormValues, managedServersLoad());
         if (!empty($projectResult['valid']) && !empty($projectResult['saved'])) {
             $_SESSION['project_flash'] = 'Project "' . projectMessageName($projectResult['project'] ?? null, $projectFormValues['project_name']) . '" created.';
             header('Location: /?tab=projects#projects');
@@ -1342,6 +1347,21 @@ if ($action === 'create_project') {
 
         $projectFormErrors = $projectResult['errors'] ?? ['Unable to create project.'];
     }
+}
+
+if ($action === 'update_project') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $_SESSION['project_flash'] = 'Invalid project update request.';
+    } else {
+        $projectResult = devConsoleUpdateProject($_POST, managedServersLoad());
+        if (!empty($projectResult['valid']) && !empty($projectResult['saved'])) {
+            $_SESSION['project_flash'] = 'Project "' . projectMessageName($projectResult['project'] ?? null, (string)($_POST['project_id'] ?? '')) . '" updated.';
+        } else {
+            $_SESSION['project_flash'] = 'Project update failed: ' . implode(' ', $projectResult['errors'] ?? ['Unable to update project.']);
+        }
+    }
+    header('Location: /?tab=projects#projects');
+    exit;
 }
 
 if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project'], true)) {
@@ -1408,7 +1428,7 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'server_tool_action', 'create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli', 'save_managed_server', 'remove_managed_server', 'test_managed_server']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'server_tool_action', 'create_project', 'update_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli', 'save_managed_server', 'remove_managed_server', 'test_managed_server']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -1624,6 +1644,7 @@ $serverDiagnostics = is_array($serverDiagnosticsResult['diagnostics'] ?? null) ?
 $serverContext = is_array($serverDiagnostics['context'] ?? null) ? $serverDiagnostics['context'] : [];
 $serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostics['tools'] : [];
 $managedServers = managedServersLoad();
+$activeManagedServer = $activeProject === null ? null : devConsoleFindManagedServerById($managedServers, (string)($activeProject['managed_server_id'] ?? ''));
 $projectStatuses = [];
 $gitStatuses = [];
 foreach ($projects as $project) {
@@ -1947,6 +1968,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       </form>
       <div class="project-identity">
         <span><strong><?= h((string)($activeProject['name'] ?? '')) ?></strong></span>
+        <span>Server: <?= h(devConsoleManagedServerLabel($activeManagedServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></span>
+        <span>Status: <?= h(devConsoleManagedServerStatusLabel($activeManagedServer)) ?></span>
         <span>Production: <?= h(configuredDisplayValue($activeProject['production']['domain'] ?? '')) ?></span>
         <span>Preview: <?= h(configuredDisplayValue($activeProject['preview']['domain'] ?? '')) ?></span>
       </div>
@@ -2201,6 +2224,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                 $lifecycleLabel = projectLifecycleLabel($project, $projectStatus);
                 $isManaged = !empty($project['provisioning']['managed']);
                 $isActiveProject = $projectIdForCard === $activeProjectId;
+                $projectManagedServerId = (string)($project['managed_server_id'] ?? '');
+                $projectManagedServer = devConsoleFindManagedServerById($managedServers, $projectManagedServerId);
+                $projectManagedServerStatusClass = $projectManagedServer === null ? 'warning' : managedServersStatusClass($projectManagedServer);
                 $cardActionResult = $projectActionResult !== null
                     && (string)($projectActionResult['project_id'] ?? '') === $projectIdForCard
                     && !in_array((string)($projectActionResult['action'] ?? ''), ['remove_project', 'delete_project', 'cleanup_orphaned_project'], true)
@@ -2224,6 +2250,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                   </span>
                   <span class="status-pill <?= h($statusClass) ?>"><?= h($lifecycleLabel) ?></span>
                   <?php if ($isActiveProject): ?><span class="status-pill healthy">CURRENT</span><?php endif; ?>
+                  <span>Server: <?= h(devConsoleManagedServerLabel($projectManagedServer, $projectManagedServerId)) ?></span>
+                  <span>Server status: <?= h(devConsoleManagedServerStatusLabel($projectManagedServer)) ?></span>
                   <span>Production: <?= h(configuredDisplayValue($project['production']['domain'] ?? '')) ?></span>
                   <span>Preview: <?= h(configuredDisplayValue($project['preview']['domain'] ?? '')) ?></span>
                   <button type="button" class="secondary project-card-toggle" data-project-toggle aria-expanded="<?= $cardOpen ? 'true' : 'false' ?>"><?= $cardOpen ? 'Hide details' : 'Show details' ?></button>
@@ -2250,16 +2278,48 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                         <button type="submit" class="secondary">Open on Dashboard</button>
                       </form>
                     <?php endif; ?>
+                    <button type="button" class="secondary" data-project-edit-toggle aria-expanded="false">Edit</button>
                   </div>
                 </div>
                 <table class="compact-table">
                   <tbody>
                     <tr><th>Lifecycle</th><td><?= h($lifecycleLabel) ?></td></tr>
+                    <tr><th>Managed Server ID</th><td><?= h(configuredDisplayValue($projectManagedServerId)) ?></td></tr>
+                    <tr><th>Server display name</th><td><?= h(configuredDisplayValue($projectManagedServer['name'] ?? '')) ?></td></tr>
+                    <tr><th>Managed Server</th><td><?= h(devConsoleManagedServerLabel($projectManagedServer, $projectManagedServerId)) ?></td></tr>
+                    <tr><th>Server host</th><td><?= h(configuredDisplayValue($projectManagedServer['host'] ?? '')) ?></td></tr>
+                    <tr><th>SSH user</th><td><?= h(configuredDisplayValue($projectManagedServer['user'] ?? '')) ?></td></tr>
+                    <tr><th>Server status</th><td><span class="status-pill <?= h($projectManagedServerStatusClass) ?>"><?= h(devConsoleManagedServerStatusLabel($projectManagedServer)) ?></span></td></tr>
+                    <tr><th>Last server check</th><td><?= h(configuredDisplayValue($projectManagedServer['last_connection_test_at'] ?? '')) ?></td></tr>
                     <tr><th>Repository</th><td><?= h(configuredDisplayValue($project['repository_path'] ?? '')) ?></td></tr>
                     <tr><th>Branch</th><td><?= h(configuredDisplayValue($project['branch'] ?? '')) ?></td></tr>
                     <tr><th>Set up</th><td><?= h(configuredDisplayValue($project['provisioning']['provisioned_at'] ?? '')) ?></td></tr>
                   </tbody>
                 </table>
+                <div class="project-details" data-project-edit-panel hidden>
+                  <form method="post" class="project-form" action="/?tab=projects#projects">
+                    <input type="hidden" name="action" value="update_project">
+                    <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                    <input type="hidden" name="project_id" value="<?= h($projectIdForCard) ?>">
+                    <fieldset>
+                      <legend>Edit Project</legend>
+                      <label for="project_name_<?= h($projectIdForCard) ?>">Project name</label>
+                      <input id="project_name_<?= h($projectIdForCard) ?>" name="project_name" type="text" required maxlength="120" value="<?= h((string)($project['name'] ?? '')) ?>">
+                      <label for="production_domain_<?= h($projectIdForCard) ?>">Production domain</label>
+                      <input id="production_domain_<?= h($projectIdForCard) ?>" name="production_domain" type="text" required maxlength="253" value="<?= h((string)($project['production']['domain'] ?? '')) ?>">
+                      <label for="managed_server_id_<?= h($projectIdForCard) ?>">Managed Server</label>
+                      <select id="managed_server_id_<?= h($projectIdForCard) ?>" name="managed_server_id">
+                        <option value="">Not assigned</option>
+                        <?php foreach ($managedServers as $serverOption): ?>
+                          <?php $serverOptionId = (string)($serverOption['id'] ?? ''); ?>
+                          <option value="<?= h($serverOptionId) ?>"<?= $serverOptionId === $projectManagedServerId ? ' selected' : '' ?>><?= h(devConsoleManagedServerLabel($serverOption) . ' - ' . devConsoleManagedServerStatusLabel($serverOption)) ?></option>
+                        <?php endforeach; ?>
+                      </select>
+                      <p class="field-help">Changing the Managed Server only updates Project configuration. It does not deploy, copy files, or run SSH commands.</p>
+                    </fieldset>
+                    <button type="submit">Save Project</button>
+                  </form>
+                </div>
                 <div class="environment-grid">
                   <?php foreach (['production' => 'Production', 'preview' => 'Preview'] as $environmentKey => $environmentLabel): ?>
                     <?php
@@ -2420,6 +2480,19 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
               <label for="project_name">Project name</label>
               <input id="project_name" name="project_name" type="text" required maxlength="120" placeholder="Client Website" value="<?= h($projectFormValues['project_name']) ?>">
               <p class="field-help">Used to generate the project ID and server directories.</p>
+              <label for="managed_server_id">Managed Server</label>
+              <?php if (empty($managedServers)): ?>
+                <p class="field-help">No Managed Servers are configured yet. Add one on the <a href="/?tab=servers#add-server">Servers page</a> before creating a Project.</p>
+              <?php else: ?>
+                <select id="managed_server_id" name="managed_server_id" required>
+                  <option value="">Select configured server</option>
+                  <?php foreach ($managedServers as $serverOption): ?>
+                    <?php $serverOptionId = (string)($serverOption['id'] ?? ''); ?>
+                    <option value="<?= h($serverOptionId) ?>"<?= $serverOptionId === (string)$projectFormValues['managed_server_id'] ? ' selected' : '' ?>><?= h(devConsoleManagedServerLabel($serverOption) . ' - ' . devConsoleManagedServerStatusLabel($serverOption)) ?></option>
+                  <?php endforeach; ?>
+                </select>
+                <p class="field-help">This records where Preview and Production will live later. It does not deploy anything.</p>
+              <?php endif; ?>
             </fieldset>
 
             <fieldset>
@@ -2441,7 +2514,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
               </dl>
             </section>
 
-            <button type="submit">Create Project</button>
+            <button type="submit"<?= empty($managedServers) ? ' disabled title="Add a Managed Server before creating a Project."' : '' ?>>Create Project</button>
           </form>
       </section>
 
@@ -3032,6 +3105,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const copyCodexMessage = document.getElementById('copyCodexMessage');
   const csrfToken = <?= json_encode($csrfToken, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const activeProjectId = <?= json_encode($activeProjectId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const activeManagedServerLabel = <?= json_encode(devConsoleManagedServerLabel($activeManagedServer, (string)($activeProject['managed_server_id'] ?? '')), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const activeManagedServerStatus = <?= json_encode(devConsoleManagedServerStatusLabel($activeManagedServer), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const draftKey = `dev-console-task-draft-${activeProjectId || 'none'}`;
   const environmentDashboard = document.getElementById('environmentDashboard');
   const dashboardUpdated = document.getElementById('dashboardUpdated');
@@ -3517,7 +3592,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       environmentDashboard.innerHTML =
         `<section class="dashboard-card"><div class="health-row">${healthItem('Preview', previewHealth)}${healthItem('Production', productionHealth)}${healthItem('Dev Console', consoleHealth)}${healthItem('Git', gitHealth)}${healthItem('Apache', webHealth)}${healthItem('Tailscale', consoleHealth)}</div></section>` +
         `<div class="summary-grid">` +
-        dashboardCard('Development', [['Branch', dashboardEscape(development.branch)], ['Commit', `<code>${dashboardEscape(development.commit)}</code>`], ['Current task', dashboardEscape(activeTask)]]) +
+        dashboardCard('Development', [['Branch', dashboardEscape(development.branch)], ['Commit', `<code>${dashboardEscape(development.commit)}</code>`], ['Current task', dashboardEscape(activeTask)], ['Server', dashboardEscape(activeManagedServerLabel)], ['Server status', dashboardEscape(activeManagedServerStatus)]]) +
         dashboardCard('Preview', [['Status', dashboardStatus(preview.status)], ['URL', dashboardLink(preview.url)]]) +
         dashboardCard('Production', [['Status', dashboardStatus(production.status)], ['URL', dashboardLink(production.url)]]) +
         dashboardCard('Dev Console', [['Status', dashboardStatus(data.environment.console.status)], ['URL', dashboardLink(data.environment.console.url)]]) +
@@ -3577,6 +3652,22 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     setExpanded(card.dataset.expanded === '1');
     toggle?.addEventListener('click', () => {
       setExpanded(card.dataset.expanded !== '1');
+    });
+  });
+
+  document.querySelectorAll('[data-project-card]').forEach((card) => {
+    const toggle = card.querySelector('[data-project-edit-toggle]');
+    const panel = card.querySelector('[data-project-edit-panel]');
+    const setEditing = (editing) => {
+      if (panel) panel.hidden = !editing;
+      if (toggle) {
+        toggle.textContent = editing ? 'Hide edit' : 'Edit';
+        toggle.setAttribute('aria-expanded', editing ? 'true' : 'false');
+      }
+    };
+    setEditing(false);
+    toggle?.addEventListener('click', () => {
+      setEditing(panel ? panel.hidden : false);
     });
   });
 
