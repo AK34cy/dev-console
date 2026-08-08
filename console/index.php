@@ -3,6 +3,7 @@ require __DIR__ . '/config.php';
 require __DIR__ . '/process.php';
 require __DIR__ . '/server-tools.php';
 require __DIR__ . '/servers.php';
+require __DIR__ . '/preview-deployment.php';
 require __DIR__ . '/deployment.php';
 require __DIR__ . '/apache.php';
 require __DIR__ . '/projects.php';
@@ -1116,6 +1117,20 @@ if ($action === 'deployment-status') {
     sendJson(['ok' => true, 'deployment' => $state, 'log' => $log]); exit;
 }
 
+if ($action === 'preview-deployment-status') {
+    $operationId = is_scalar($_GET['id'] ?? null) ? (string)$_GET['id'] : '';
+    try {
+        if (!previewDeploymentValidateOperationId($operationId)) {
+            throw new RuntimeException('Invalid Preview deployment operation ID.');
+        }
+        sendJson(['ok' => true, 'operation' => previewDeploymentStatus($operationId)]);
+    } catch (Throwable $exception) {
+        http_response_code(400);
+        sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+    }
+    exit;
+}
+
 if ($action === 'environment-status') {
     sendJson(['ok' => true, 'dashboard' => operationalDashboard()]);
     exit;
@@ -1131,6 +1146,25 @@ if ($action === 'server-tool-operation-status') {
     } catch (Throwable $exception) {
         http_response_code(400);
         sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+    }
+    exit;
+}
+
+if ($action === 'deploy_preview_managed') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        http_response_code(403);
+        sendJson(['ok' => false, 'error' => 'Invalid Preview deployment request.']);
+    } else {
+        try {
+            if ($activeProject === null) {
+                throw new RuntimeException('Select a Project before deploying Preview.');
+            }
+            $operation = previewDeploymentStart(devConsoleLoadProjectConfiguration(), $activeProjectId);
+            sendJson(['ok' => true, 'operation' => $operation]);
+        } catch (Throwable $exception) {
+            http_response_code(400);
+            sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+        }
     }
     exit;
 }
@@ -1428,7 +1462,7 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'server_tool_action', 'create_project', 'update_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli', 'save_managed_server', 'remove_managed_server', 'test_managed_server']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'server_tool_action', 'create_project', 'update_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli', 'save_managed_server', 'remove_managed_server', 'test_managed_server', 'deploy_preview_managed']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -1645,6 +1679,8 @@ $serverContext = is_array($serverDiagnostics['context'] ?? null) ? $serverDiagno
 $serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostics['tools'] : [];
 $managedServers = managedServersLoad();
 $activeManagedServer = $activeProject === null ? null : devConsoleFindManagedServerById($managedServers, (string)($activeProject['managed_server_id'] ?? ''));
+$managedPreviewDeploymentOverview = $activeProject === null ? null : previewDeploymentOverview($activeProject, $activeManagedServer);
+$managedPreviewDeploymentReadiness = previewDeploymentReadiness($activeProject, $managedServers);
 $projectStatuses = [];
 $gitStatuses = [];
 foreach ($projects as $project) {
@@ -2085,20 +2121,50 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 
       <section class="panel deployment-panel" id="previewDeployment">
         <h2>Preview Deployment</h2>
+        <?php
+          $previewServer = is_array($managedPreviewDeploymentOverview['managed_server'] ?? null) ? $managedPreviewDeploymentOverview['managed_server'] : null;
+          $previewStatus = (string)($managedPreviewDeploymentOverview['status'] ?? 'never_deployed');
+          $previewStatusLabel = match ($previewStatus) {
+              'deployed' => 'Deployed',
+              'failed' => 'Failed',
+              'running' => 'Running',
+              default => 'Never deployed',
+          };
+          $previewStatusClass = $previewStatus === 'deployed' ? 'success' : ($previewStatus === 'failed' ? 'failed' : 'pending');
+          $previewCommit = (string)($managedPreviewDeploymentOverview['commit'] ?? '');
+          $previewDuration = $managedPreviewDeploymentOverview['duration_ms'] ?? null;
+          $previewReady = !empty($managedPreviewDeploymentReadiness['ready']);
+          $previewReasons = $managedPreviewDeploymentReadiness['reasons'] ?? [];
+          $previewWarnings = $managedPreviewDeploymentReadiness['warnings'] ?? [];
+          $previewOperationId = $previewStatus === 'running' ? (string)($managedPreviewDeploymentOverview['operation_id'] ?? '') : '';
+        ?>
         <dl class="deployment-details">
-          <div><dt>Source path</dt><dd><code><?= h($previewDeploymentOverview['source']) ?></code></dd></div>
-          <div><dt>Target path</dt><dd><code><?= h($previewDeploymentOverview['target']) ?></code></dd></div>
-          <div><dt>Preview URL</dt><dd><a href="<?= h($previewDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h($previewDeploymentOverview['url']) ?></a></dd></div>
-          <div><dt>Current Git branch</dt><dd><?= h($previewDeploymentOverview['branch']) ?></dd></div>
-          <div><dt>Development commit</dt><dd><code title="<?= h($previewDeploymentOverview['commit']) ?>"><?= h(shortSha($previewDeploymentOverview['commit'])) ?></code></dd></div>
-          <div><dt>Commit message</dt><dd><?= h($previewDeploymentOverview['message']) ?></dd></div>
-          <div><dt>Preview version</dt><dd><code title="<?= h($previewDeploymentOverview['deployed_commit']) ?>"><?= h($previewDeploymentOverview['deployed_commit'] === '' ? 'Not detected' : shortSha($previewDeploymentOverview['deployed_commit'])) ?></code></dd></div>
-          <div><dt>Last Preview deployment</dt><dd id="previewLastDeploymentTime"><?= h((string)($previewDeploymentOverview['latest']['finish_time'] ?? $previewDeploymentOverview['latest']['start_time'] ?? 'Never')) ?></dd></div>
-          <div><dt>Preview status</dt><dd><span id="previewDeploymentStatus" class="deployment-status <?= h((string)($previewDeploymentOverview['latest']['status'] ?? 'pending')) ?>"><?= h(isset($previewDeploymentOverview['latest']['status']) ? ucfirst((string)$previewDeploymentOverview['latest']['status']) : 'Not started') ?></span></dd></div>
+          <div><dt>Managed Server</dt><dd><?= h(devConsoleManagedServerLabel($previewServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></dd></div>
+          <div><dt>Remote path</dt><dd><code><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['remote_path'] ?? '')) ?></code></dd></div>
+          <div><dt>Preview URL</dt><dd><?php if ((string)($managedPreviewDeploymentOverview['url'] ?? '') !== ''): ?><a href="<?= h((string)$managedPreviewDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h((string)$managedPreviewDeploymentOverview['url']) ?></a><?php else: ?>Not configured<?php endif; ?></dd></div>
+          <div><dt>Repository</dt><dd><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['repository'] ?? '')) ?></dd></div>
+          <div><dt>Branch</dt><dd id="previewDeploymentBranch"><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['branch'] ?? '')) ?></dd></div>
+          <div><dt>GitHub commit</dt><dd id="previewDeploymentSourceCommit"><?= h($previewReady ? 'Resolved at deployment time' : 'Unavailable') ?></dd></div>
+          <div><dt>Status</dt><dd><span id="previewDeploymentStatus" class="deployment-status <?= h($previewStatusClass) ?>"><?= h($previewStatusLabel) ?></span></dd></div>
+          <div><dt>Preview version</dt><dd><code id="previewDeploymentCommit" title="<?= h($previewCommit) ?>"><?= h($previewCommit === '' ? 'Not deployed' : shortSha($previewCommit)) ?></code></dd></div>
+          <div><dt>Last deployment</dt><dd id="previewLastDeploymentTime"><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['deployed_at'] ?? '')) ?></dd></div>
+          <div><dt>Duration</dt><dd id="previewDeploymentDuration"><?= h($previewDuration === null ? 'Not configured' : ((string)round(((int)$previewDuration) / 1000, 1) . 's')) ?></dd></div>
         </dl>
-        <button type="button" id="deployPreview">Deploy to Preview</button>
+        <?php if (!empty($previewWarnings)): ?>
+          <ul class="operation-summary">
+            <?php foreach ($previewWarnings as $warning): ?><li>Warning: <?= h((string)$warning) ?></li><?php endforeach; ?>
+          </ul>
+        <?php endif; ?>
+        <?php if (!$previewReady): ?>
+          <p class="field-help"><?= h(implode(' ', array_map('strval', $previewReasons))) ?></p>
+        <?php endif; ?>
+        <button type="button" id="deployPreview" data-operation-id="<?= h($previewOperationId) ?>"<?= $previewReady ? '' : ' disabled title="' . h(implode(' ', array_map('strval', $previewReasons))) . '"' ?>>Deploy to Preview</button>
+        <dl class="tool-operation-grid" id="previewDeploymentProgress"<?= $previewOperationId !== '' ? '' : ' hidden' ?>>
+          <div><dt>Stage</dt><dd id="previewDeploymentStage">Preparing</dd></div>
+          <div><dt>Elapsed</dt><dd id="previewDeploymentElapsed">0s</dd></div>
+        </dl>
         <p class="deployment-error" id="previewDeploymentError" aria-live="assertive"></p>
-        <pre class="codex-console" id="previewDeploymentLog"><?= h(isset($previewDeploymentOverview['latest']['log_path']) && is_file($previewDeploymentOverview['latest']['log_path']) ? (string)file_get_contents($previewDeploymentOverview['latest']['log_path']) : 'No deployment log yet.') ?></pre>
+        <pre class="codex-console" id="previewDeploymentLog">No deployment log yet.</pre>
       </section>
   </div>
 
@@ -2742,11 +2808,19 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           </section>
         <?php endif; ?>
 
+        <?php
+          $githubConnectionFailed = $githubActionResult !== null
+              && empty($githubActionResult['success'])
+              && in_array((string)($githubActionResult['action'] ?? ''), ['save_github_configuration', 'test_github_connection'], true);
+          $githubConnectionLabel = !empty($githubConfiguration['verified'])
+              ? 'Verified'
+              : ($githubConnectionFailed ? 'Failed' : ($githubConfigured ? 'Not verified' : 'Not configured'));
+        ?>
         <dl class="apache-summary-grid">
           <div><dt>Account / organization</dt><dd><?= h(configuredDisplayValue($githubConfigured ? (string)$githubConfiguration['account'] : '')) ?></dd></div>
           <div><dt>Authentication</dt><dd><?= $githubConfigured ? 'Configured' : 'Not configured' ?></dd></div>
           <div><dt>GitHub CLI</dt><dd><?= $githubCliInstalled ? 'Installed' : 'Not installed' ?></dd></div>
-          <div><dt>Connection</dt><dd><?= !empty($githubConfiguration['verified']) ? 'Verified' : ($githubConfigured ? 'Not verified' : 'Not configured') ?></dd></div>
+          <div><dt>Connection</dt><dd><?= h($githubConnectionLabel) ?></dd></div>
           <div><dt>Last verified</dt><dd><?= h(configuredDisplayValue($githubConfiguration['last_verified_at'] ?? '')) ?></dd></div>
           <?php if ($githubConfigured): ?>
             <div><dt>Authenticated login</dt><dd><?= h(configuredDisplayValue($githubConfiguration['authenticated_login'] ?? '')) ?></dd></div>
@@ -3892,6 +3966,13 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const previewDeploymentError = document.getElementById('previewDeploymentError');
   const previewDeploymentLog = document.getElementById('previewDeploymentLog');
   const previewDeploymentStatus = document.getElementById('previewDeploymentStatus');
+  const previewDeploymentStage = document.getElementById('previewDeploymentStage');
+  const previewDeploymentElapsed = document.getElementById('previewDeploymentElapsed');
+  const previewDeploymentProgress = document.getElementById('previewDeploymentProgress');
+  const previewDeploymentCommit = document.getElementById('previewDeploymentCommit');
+  const previewDeploymentSourceCommit = document.getElementById('previewDeploymentSourceCommit');
+  const previewDeploymentBranch = document.getElementById('previewDeploymentBranch');
+  const previewDeploymentDuration = document.getElementById('previewDeploymentDuration');
   let confirmedSummary = null;
   let previewConfirmedSummary = null;
   let deploymentStep = 1;
@@ -3942,24 +4023,78 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     const items = payload.summary.files.length ? payload.summary.files.map((file) => `<li>${escapeHtml(file)}</li>`).join('') : '<li>No file changes.</li>';
     return `<dl class="deployment-details"><div><dt>Source</dt><dd><code>${escapeHtml(payload.overview.source)}</code></dd></div><div><dt>Target</dt><dd><code>${escapeHtml(payload.overview.target)}</code></dd></div><div><dt>Branch</dt><dd>${escapeHtml(payload.overview.branch)}</dd></div><div><dt>Commit</dt><dd><code>${escapeHtml(payload.overview.commit)}</code></dd></div><div><dt>Message</dt><dd>${escapeHtml(payload.overview.message)}</dd></div><div><dt>Changes</dt><dd>${Number(payload.summary.added)} added · ${Number(payload.summary.updated)} updated · ${Number(payload.summary.deleted)} deleted</dd></div></dl><ul class="change-list">${items}</ul>`;
   };
+  const setPreviewManagedStatus = (operation) => {
+    if (!operation) return;
+    const result = operation.result || {};
+    if (previewDeploymentProgress) previewDeploymentProgress.hidden = false;
+    if (previewDeploymentStage) previewDeploymentStage.textContent = operation.stage || 'Preparing';
+    if (previewDeploymentElapsed) previewDeploymentElapsed.textContent = formatElapsed(operation.elapsed_seconds || 0);
+    if (previewDeploymentLog) {
+      previewDeploymentLog.textContent = operation.log && operation.log.trim() !== '' ? operation.log : 'Waiting for deployment log...';
+      previewDeploymentLog.scrollTop = previewDeploymentLog.scrollHeight;
+    }
+    const status = operation.status === 'completed' ? 'deployed' : (operation.status === 'failed' ? 'failed' : 'running');
+    if (previewDeploymentStatus) {
+      previewDeploymentStatus.textContent = status === 'deployed' ? 'Deployed' : (status === 'failed' ? 'Failed' : 'Running');
+      previewDeploymentStatus.className = `deployment-status ${status === 'deployed' ? 'success' : status}`;
+    }
+    if (previewDeploymentError) previewDeploymentError.textContent = operation.status === 'failed' ? (operation.message || 'Preview deployment failed.') : '';
+    if (result.commit && previewDeploymentCommit) {
+      previewDeploymentCommit.textContent = result.commit.slice(0, 7);
+      previewDeploymentCommit.title = result.commit;
+    }
+    if (result.commit && previewDeploymentSourceCommit) {
+      previewDeploymentSourceCommit.textContent = result.commit.slice(0, 12);
+      previewDeploymentSourceCommit.title = result.commit;
+    }
+    if (result.branch && previewDeploymentBranch) previewDeploymentBranch.textContent = result.branch;
+    if (result.duration_ms && previewDeploymentDuration) previewDeploymentDuration.textContent = `${(Number(result.duration_ms) / 1000).toFixed(1)}s`;
+    const lastDeployment = document.getElementById('previewLastDeploymentTime');
+    if (lastDeployment && operation.finished_at) lastDeployment.textContent = operation.finished_at;
+  };
+  const pollPreviewManagedDeployment = (operationId) => {
+    if (!operationId) return;
+    clearInterval(deploymentPolls.preview);
+    const update = async () => {
+      const response = await fetch(`?action=preview-deployment-status&id=${encodeURIComponent(operationId)}`, { cache: 'no-store' });
+      const payload = await response.json();
+      if (!payload.ok) throw new Error(payload.error || 'Unable to read Preview deployment.');
+      setPreviewManagedStatus(payload.operation);
+      if (['completed', 'failed'].includes(payload.operation.status)) {
+        clearInterval(deploymentPolls.preview);
+        if (previewDeployButton) previewDeployButton.disabled = false;
+      }
+    };
+    update().catch((error) => {
+      clearInterval(deploymentPolls.preview);
+      if (previewDeploymentError) previewDeploymentError.textContent = error.message;
+      if (previewDeployButton) previewDeployButton.disabled = false;
+    });
+    deploymentPolls.preview = setInterval(() => update().catch((error) => {
+      clearInterval(deploymentPolls.preview);
+      if (previewDeploymentError) previewDeploymentError.textContent = error.message;
+      if (previewDeployButton) previewDeployButton.disabled = false;
+    }), 2000);
+  };
   previewDeployButton?.addEventListener('click', async () => {
-    previewDeploymentError.textContent = ''; previewModalError.textContent = ''; previewDeployButton.disabled = true;
-    previewConfirmButton.disabled = false;
+    if (previewDeploymentError) previewDeploymentError.textContent = '';
+    previewDeployButton.disabled = true;
     try {
-      const payload = await postDeployment('deployment-preview', { environment: 'preview' });
-      previewConfirmedSummary = payload.summary;
-      previewSummaryBox.innerHTML = deploymentSummaryHtml(payload);
-      previewDeployDialog.showModal();
-    } catch (error) { previewDeploymentError.textContent = error.message; previewDeployButton.disabled = false; setDeploymentStatus('preview', 'failed'); }
+      const payload = await postDeployment('deploy_preview_managed');
+      setPreviewManagedStatus(payload.operation);
+      pollPreviewManagedDeployment(payload.operation.id);
+    } catch (error) {
+      if (previewDeploymentError) previewDeploymentError.textContent = error.message;
+      previewDeployButton.disabled = false;
+      if (previewDeploymentStatus) {
+        previewDeploymentStatus.textContent = 'Failed';
+        previewDeploymentStatus.className = 'deployment-status failed';
+      }
+    }
   });
-  previewCancelButton?.addEventListener('click', () => { previewDeployDialog.close(); previewDeployButton.disabled = false; });
-  previewConfirmButton?.addEventListener('click', async () => {
-    previewConfirmButton.disabled = true; previewModalError.textContent = '';
-    try {
-      const payload = await postDeployment('deployment-start', { environment: 'preview', summary: JSON.stringify(previewConfirmedSummary) });
-      previewDeployDialog.close(); setDeploymentStatus('preview', 'pending'); pollDeployment('preview', payload.deployment.id);
-    } catch (error) { previewModalError.textContent = error.message; previewConfirmButton.disabled = false; }
-  });
+  if (previewDeployButton?.dataset.operationId) {
+    pollPreviewManagedDeployment(previewDeployButton.dataset.operationId);
+  }
   deployButton?.addEventListener('click', async () => {
     deploymentError.textContent = ''; modalError.textContent = ''; deployButton.disabled = true;
     try {

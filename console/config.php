@@ -52,6 +52,16 @@ function devConsoleEmptyProject(): array
             'domain' => '',
             'path' => '',
         ],
+        'preview_deployment' => [
+            'status' => 'never_deployed',
+            'commit' => null,
+            'branch' => null,
+            'deployed_at' => null,
+            'managed_server_id' => null,
+            'duration_ms' => null,
+            'operation_id' => null,
+            'message' => null,
+        ],
         'git' => [
             'provider' => null,
             'repository_owner' => null,
@@ -128,6 +138,20 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         }
         if (isset($gitInput['bootstrap_status']) && is_scalar($gitInput['bootstrap_status']) && in_array((string)$gitInput['bootstrap_status'], ['not_started', 'local_created', 'remote_created', 'ready', 'failed'], true)) {
             $project['git']['bootstrap_status'] = (string)$gitInput['bootstrap_status'];
+        }
+
+        $previewDeploymentInput = is_array($projectInput['preview_deployment'] ?? null) ? $projectInput['preview_deployment'] : [];
+        if (isset($previewDeploymentInput['status']) && is_scalar($previewDeploymentInput['status']) && in_array((string)$previewDeploymentInput['status'], ['never_deployed', 'running', 'deployed', 'failed'], true)) {
+            $project['preview_deployment']['status'] = (string)$previewDeploymentInput['status'];
+        }
+        foreach (['commit', 'branch', 'deployed_at', 'managed_server_id', 'operation_id', 'message'] as $field) {
+            if (array_key_exists($field, $previewDeploymentInput)) {
+                $value = $previewDeploymentInput[$field];
+                $project['preview_deployment'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
+            }
+        }
+        if (array_key_exists('duration_ms', $previewDeploymentInput)) {
+            $project['preview_deployment']['duration_ms'] = is_numeric($previewDeploymentInput['duration_ms']) ? (int)$previewDeploymentInput['duration_ms'] : null;
         }
 
         $provisioningInput = is_array($projectInput['provisioning'] ?? null) ? $projectInput['provisioning'] : [];
