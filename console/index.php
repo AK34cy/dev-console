@@ -2,6 +2,7 @@
 require __DIR__ . '/config.php';
 require __DIR__ . '/process.php';
 require __DIR__ . '/server-tools.php';
+require __DIR__ . '/servers.php';
 require __DIR__ . '/deployment.php';
 require __DIR__ . '/apache.php';
 require __DIR__ . '/projects.php';
@@ -110,6 +111,7 @@ $csrfToken = (string)$_SESSION['csrf_token'];
 
 $projectConfiguration = devConsoleLoadProjectConfiguration();
 $projects = devConsoleProjects($projectConfiguration);
+$managedServers = managedServersLoad();
 $activeProject = devConsoleActiveProject($projectConfiguration);
 $activeProjectId = $activeProject === null ? '' : (string)($activeProject['id'] ?? '');
 deploymentSetProject($activeProject);
@@ -806,28 +808,28 @@ function taskRepositoryReadiness(?array $project, array $githubConfiguration): a
         return ['ready' => false, 'reason' => 'Repository path is not valid for this Project.'];
     }
     if (!is_dir($path) || is_link($path)) {
-        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'];
+        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Projects before creating tasks.'];
     }
 
     $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
     if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') {
-        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Settings before creating tasks.'];
+        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Projects before creating tasks.'];
     }
     if ((string)($project['git']['bootstrap_status'] ?? '') !== 'ready' || empty($project['git']['connected'])) {
-        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Settings before creating tasks.'];
+        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Projects before creating tasks.'];
     }
     if ($error = gitAssertConnectedRepository($project, $githubConfiguration)) {
         return ['ready' => false, 'reason' => $error];
     }
     $status = gitStatus($project, $githubConfiguration);
     if (in_array((string)$status['status'], ['INITIALIZATION INCOMPLETE', 'NOT INITIALIZED', 'INVALID REPOSITORY', 'REMOTE UNAVAILABLE'], true)) {
-        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Settings before creating tasks.'];
+        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Projects before creating tasks.'];
     }
     if (in_array((string)$status['status'], ['AHEAD', 'AHEAD / BEHIND', 'CHANGES PRESENT'], true)) {
-        return ['ready' => false, 'reason' => 'Repository synchronization is pending. Use Push in Settings before creating another task.'];
+        return ['ready' => false, 'reason' => 'Repository synchronization is pending. Use Push in Projects before creating another task.'];
     }
     if ((string)$status['status'] !== 'CONNECTED') {
-        return ['ready' => false, 'reason' => 'Repository is not ready for task creation. Review Git status in Settings.'];
+        return ['ready' => false, 'reason' => 'Repository is not ready for task creation. Review Git status in Projects.'];
     }
 
     return ['ready' => true, 'reason' => ''];
@@ -1010,6 +1012,9 @@ $apacheActionResult = null;
 $projectActionResult = null;
 $githubActionResult = null;
 $serverDiagnosticsResult = null;
+$managedServerActionResult = null;
+$managedServerFormErrors = [];
+$managedServerFormValues = managedServersEmptyServer();
 $projectFormErrors = [];
 $projectFormValues = [
     'project_name' => '',
@@ -1129,6 +1134,30 @@ if ($action === 'server-tool-operation-status') {
     exit;
 }
 
+if ($action === 'managed-server-operation-status') {
+    $operationId = is_scalar($_GET['id'] ?? null) ? (string)$_GET['id'] : '';
+    try {
+        if (!managedServerOperationValidateId($operationId)) {
+            throw new RuntimeException('Invalid managed server operation ID.');
+        }
+        sendJson(['ok' => true, 'operation' => managedServerOperationStatus($operationId)]);
+    } catch (Throwable $exception) {
+        http_response_code(400);
+        sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+    }
+    exit;
+}
+
+if ($action === 'detect-ssh-keys') {
+    try {
+        sendJson(['ok' => true, 'keys' => managedServersDetectSshKeys()]);
+    } catch (Throwable $exception) {
+        http_response_code(400);
+        sendJson(['ok' => false, 'error' => 'Unable to detect SSH keys.']);
+    }
+    exit;
+}
+
 if ($action === 'run-codex' && $requestMethod === 'POST') {
     $taskId = (string)($_POST['task'] ?? '');
     $taskSource = (string)($_POST['task_source'] ?? 'project');
@@ -1181,6 +1210,23 @@ if ($action === 'server_tool_action') {
     exit;
 }
 
+if ($action === 'test_managed_server') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        http_response_code(403);
+        sendJson(['ok' => false, 'error' => 'Invalid managed server request.']);
+    } else {
+        try {
+            $serverId = managedServersNormalizeId(is_scalar($_POST['server_id'] ?? null) ? (string)$_POST['server_id'] : '');
+            $operation = managedServerStartConnectionTest(managedServersLoad(), $serverId);
+            sendJson(['ok' => true, 'operation' => $operation]);
+        } catch (Throwable $exception) {
+            http_response_code(400);
+            sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+        }
+    }
+    exit;
+}
+
 if (in_array($action, apacheAllowedActions(), true)) {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $apacheActionResult = [
@@ -1206,7 +1252,8 @@ if ($action === 'select_active_project') {
     } else {
         $_SESSION['project_flash'] = 'Project "' . projectMessageName($projectForSelection, $projectId) . '" selected for Dashboard.';
     }
-    $targetTab = (string)($_POST['target_tab'] ?? 'settings') === 'dashboard' ? 'dashboard' : 'settings';
+    $targetCandidate = (string)($_POST['target_tab'] ?? 'projects');
+    $targetTab = in_array($targetCandidate, ['dashboard', 'projects', 'settings'], true) ? $targetCandidate : 'projects';
     header('Location: /?tab=' . $targetTab);
     exit;
 }
@@ -1229,6 +1276,54 @@ if (in_array($action, ['save_github_configuration', 'test_github_connection', 'r
     exit;
 }
 
+if ($action === 'save_managed_server') {
+    foreach (['server_id', 'server_name', 'server_host', 'server_port', 'server_user', 'server_key', 'server_description'] as $field) {
+        $target = match ($field) {
+            'server_id' => 'id',
+            'server_name' => 'name',
+            'server_host' => 'host',
+            'server_port' => 'port',
+            'server_user' => 'user',
+            'server_key' => 'key',
+            default => 'description',
+        };
+        $managedServerFormValues[$target] = devConsoleScalarInput($_POST, $field);
+    }
+    $existingId = managedServersNormalizeId(is_scalar($_POST['existing_server_id'] ?? null) ? (string)$_POST['existing_server_id'] : '');
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $managedServerFormErrors[] = 'Invalid managed server request.';
+    } else {
+        $managedServersForAction = managedServersLoad();
+        $serverResult = managedServersBuildFromInput($_POST, $managedServersForAction, $existingId);
+        $managedServerFormValues = $serverResult['server'];
+        if (!empty($serverResult['valid']) && managedServersSave(managedServersUpsert($managedServersForAction, $serverResult['server'], $existingId))) {
+            $_SESSION['managed_server_result'] = [
+                'success' => true,
+                'message' => 'Managed server saved.',
+            ];
+            header('Location: /?tab=servers#managed-servers');
+            exit;
+        }
+        $managedServerFormErrors = $serverResult['errors'] ?? ['Unable to save managed server.'];
+    }
+}
+
+if ($action === 'remove_managed_server') {
+    $managedServersForAction = managedServersLoad();
+    $serverId = managedServersNormalizeId(is_scalar($_POST['server_id'] ?? null) ? (string)$_POST['server_id'] : '');
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $_SESSION['managed_server_result'] = ['success' => false, 'message' => 'Invalid managed server request.'];
+    } elseif (managedServersFind($managedServersForAction, $serverId) === null) {
+        $_SESSION['managed_server_result'] = ['success' => false, 'message' => 'Managed server not found.'];
+    } elseif (managedServersSave(managedServersRemove($managedServersForAction, $serverId))) {
+        $_SESSION['managed_server_result'] = ['success' => true, 'message' => 'Managed server removed.'];
+    } else {
+        $_SESSION['managed_server_result'] = ['success' => false, 'message' => 'Unable to remove managed server.'];
+    }
+    header('Location: /?tab=servers#managed-servers');
+    exit;
+}
+
 if ($action === 'create_project') {
     foreach ($projectFormValues as $field => $fallback) {
         $value = $_POST[$field] ?? $fallback;
@@ -1241,7 +1336,7 @@ if ($action === 'create_project') {
         $projectResult = devConsoleAppendProject($projectFormValues);
         if (!empty($projectResult['valid']) && !empty($projectResult['saved'])) {
             $_SESSION['project_flash'] = 'Project "' . projectMessageName($projectResult['project'] ?? null, $projectFormValues['project_name']) . '" created.';
-            header('Location: /?tab=settings#projects');
+            header('Location: /?tab=projects#projects');
             exit;
         }
 
@@ -1309,11 +1404,11 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
         devConsoleSaveProjectConfiguration(devConsoleTouchProject($projectConfigurationForAction, $projectId));
     }
     $_SESSION['project_action_result'] = $projectActionResult;
-    header('Location: /?tab=settings#' . ($action === 'cleanup_orphaned_project' ? 'apache' : 'projects'));
+    header('Location: /?tab=' . ($action === 'cleanup_orphaned_project' ? 'settings#apache' : 'projects#projects'));
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'server_tool_action', 'create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli']), true)) {
+if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'server_tool_action', 'create_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli', 'save_managed_server', 'remove_managed_server', 'test_managed_server']), true)) {
     try {
         $body = trim((string)($_POST['task_body'] ?? ''));
 
@@ -1416,7 +1511,7 @@ if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedAct
                     'last_error_at' => date('c'),
                 ]));
             }
-            $taskPushWarning = 'Task "' . $taskId . '" created and committed locally for Project "' . projectMessageName($activeProject, $activeProjectId) . '", but synchronization with GitHub failed. Use Push in Settings to retry.';
+            $taskPushWarning = 'Task "' . $taskId . '" created and committed locally for Project "' . projectMessageName($activeProject, $activeProjectId) . '", but synchronization with GitHub failed. Use Push in Projects to retry.';
         } else {
             $results[] = taskGitAuthenticatedCommand(['fetch', '--prune', 'origin'], $repoRoot, $githubConfiguration);
             if (end($results)['exit_code'] === 0) {
@@ -1506,6 +1601,8 @@ $apacheActionResult = is_array($_SESSION['apache_action_result'] ?? null) ? $_SE
 unset($_SESSION['apache_action_result']);
 $githubActionResult = is_array($_SESSION['github_action_result'] ?? null) ? $_SESSION['github_action_result'] : $githubActionResult;
 unset($_SESSION['github_action_result']);
+$managedServerActionResult = is_array($_SESSION['managed_server_result'] ?? null) ? $_SESSION['managed_server_result'] : $managedServerActionResult;
+unset($_SESSION['managed_server_result']);
 $serverDiagnosticsResult = is_array($_SESSION['server_diagnostics_result'] ?? null) ? $_SESSION['server_diagnostics_result'] : $serverDiagnosticsResult;
 unset($_SESSION['server_diagnostics_result']);
 $serverToolOperationId = is_scalar($_GET['server_tool_operation'] ?? null) ? (string)$_GET['server_tool_operation'] : '';
@@ -1526,6 +1623,7 @@ if (serverToolsValidateOperationId($serverToolOperationId)) {
 $serverDiagnostics = is_array($serverDiagnosticsResult['diagnostics'] ?? null) ? $serverDiagnosticsResult['diagnostics'] : serverToolsDiagnostics();
 $serverContext = is_array($serverDiagnostics['context'] ?? null) ? $serverDiagnostics['context'] : [];
 $serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostics['tools'] : [];
+$managedServers = managedServersLoad();
 $projectStatuses = [];
 $gitStatuses = [];
 foreach ($projects as $project) {
@@ -1547,10 +1645,17 @@ if ($serverAddress === '' || in_array($serverAddress, ['127.0.0.1', '::1'], true
     $serverAddress = 'SERVER_IP';
 }
 $requestedTab = (string)($_GET['tab'] ?? '');
-if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 'server-management'], true)) {
+if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 'servers', 'server-management', 'settings'], true)) {
     $initialTab = $requestedTab;
 } else {
-    $initialTab = $requestPath === '/' && (!empty($projectFormErrors) || $projectFlash !== '' || $projectActionResult !== null || $apacheActionResult !== null || $githubActionResult !== null) ? 'settings' : 'dashboard';
+    $initialTab = 'dashboard';
+    if ($requestPath === '/' && (!empty($projectFormErrors) || $projectFlash !== '' || ($projectActionResult !== null && (string)($projectActionResult['action'] ?? '') !== 'cleanup_orphaned_project'))) {
+        $initialTab = 'projects';
+    } elseif ($requestPath === '/' && (!empty($managedServerFormErrors) || $managedServerActionResult !== null)) {
+        $initialTab = 'servers';
+    } elseif ($requestPath === '/' && ($apacheActionResult !== null || $githubActionResult !== null || ($projectActionResult !== null && (string)($projectActionResult['action'] ?? '') === 'cleanup_orphaned_project'))) {
+        $initialTab = 'settings';
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -1781,8 +1886,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
       <p class="meta">Internal task creator. Run only on <code>127.0.0.1:8090</code>.</p>
       <nav class="tab-nav" aria-label="Primary">
         <button type="button" class="tab-button <?= $initialTab === 'dashboard' ? 'active' : '' ?>" data-tab-target="dashboard">Dashboard</button>
-        <button type="button" class="tab-button <?= $initialTab === 'settings' ? 'active' : '' ?>" data-tab-target="settings">Settings</button>
+        <button type="button" class="tab-button <?= $initialTab === 'projects' ? 'active' : '' ?>" data-tab-target="projects">Projects</button>
+        <button type="button" class="tab-button <?= $initialTab === 'servers' ? 'active' : '' ?>" data-tab-target="servers">Servers</button>
         <button type="button" class="tab-button <?= $initialTab === 'server-management' ? 'active' : '' ?>" data-tab-target="server-management">Server Management</button>
+        <button type="button" class="tab-button <?= $initialTab === 'settings' ? 'active' : '' ?>" data-tab-target="settings">Settings</button>
       </nav>
     </div>
     <div class="page-context" aria-live="polite">
@@ -1792,7 +1899,15 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
       </div>
       <div data-page-context="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
         <strong>Settings</strong>
-        <span>Projects and server configuration</span>
+        <span>GitHub and local service configuration</span>
+      </div>
+      <div data-page-context="projects"<?= $initialTab === 'projects' ? '' : ' hidden' ?>>
+        <strong>Projects</strong>
+        <span>Project lifecycle and task setup</span>
+      </div>
+      <div data-page-context="servers"<?= $initialTab === 'servers' ? '' : ' hidden' ?>>
+        <strong>Servers</strong>
+        <span>Managed remote Linux servers</span>
       </div>
       <div data-page-context="server-management"<?= $initialTab === 'server-management' ? '' : ' hidden' ?>>
         <strong>Server Management</strong>
@@ -1816,7 +1931,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
     <?php if ($activeProject === null): ?>
       <div>
         <h2>Project</h2>
-        <p class="meta">No Projects are registered yet. Create a Project in Settings to use the Dashboard.</p>
+        <p class="meta">No Projects are registered yet. Create a Project in Projects to use the Dashboard.</p>
       </div>
     <?php else: ?>
       <form method="post" action="/?tab=dashboard" data-project-selection-form>
@@ -1847,7 +1962,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
       <p class="meta" id="viewingTaskNote">Viewing existing task. Editing here will not update the saved task.</p>
     <?php endif; ?>
     <?php if (!$taskCreationReady): ?>
-      <p class="error"><?= h($taskCreationUnavailableReason === '' ? 'Repository is not ready for task creation. Review Git status in Settings.' : $taskCreationUnavailableReason) ?></p>
+      <p class="error"><?= h($taskCreationUnavailableReason === '' ? 'Repository is not ready for task creation. Review Git status in Projects.' : $taskCreationUnavailableReason) ?></p>
     <?php endif; ?>
     <?php if ($taskPushWarning !== ''): ?>
       <p class="success-message"><?= h($taskPushWarning) ?></p>
@@ -1873,7 +1988,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
         <div class="selected-files" id="selectedFiles">No files selected.</div>
       </label>
 
-      <button type="submit"<?= $taskCreationReady ? '' : ' disabled title="' . h($taskCreationUnavailableReason === '' ? 'Review Git status in Settings before creating tasks.' : $taskCreationUnavailableReason) . '"' ?>>Create Task</button>
+      <button type="submit"<?= $taskCreationReady ? '' : ' disabled title="' . h($taskCreationUnavailableReason === '' ? 'Review Git status in Projects before creating tasks.' : $taskCreationUnavailableReason) . '"' ?>>Create Task</button>
     </form>
   </section>
 
@@ -1890,7 +2005,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
           <ul class="workflow-steps">
             <li><span class="step-state done">Done</span><span>Task file created<?php if ($activeTaskPath !== ''): ?>: <code><?= h($activeTaskPath) ?></code><?php endif; ?></span></li>
             <li><span class="step-state <?= h($taskGitCompleted ? 'done' : 'pending') ?>"><?= h($taskGitCompleted ? 'Done' : 'Ready') ?></span><span>Task committed locally<?php if ($commitHash !== ''): ?>: <code title="<?= h($commitHash) ?>"><?= h(shortSha($commitHash)) ?></code><?php endif; ?></span></li>
-            <li><span class="step-state <?= h($taskGitPushed ? 'done' : 'pending') ?>"><?= h($taskGitPushed ? 'Done' : 'Pending') ?></span><span><?= h($taskGitPushed ? 'Task synchronized with GitHub' : 'GitHub synchronization needs retry from Settings') ?></span></li>
+            <li><span class="step-state <?= h($taskGitPushed ? 'done' : 'pending') ?>"><?= h($taskGitPushed ? 'Done' : 'Pending') ?></span><span><?= h($taskGitPushed ? 'Task synchronized with GitHub' : 'GitHub synchronization needs retry from Projects') ?></span></li>
             <li><span class="step-state <?= h(in_array($activeRunStatus, ['completed', 'failed'], true) ? 'done' : 'pending') ?>"><?= h(statusLabel($activeRunStatus)) ?></span><span>Codex run status</span></li>
           </ul>
           <div class="prompt-actions">
@@ -2063,7 +2178,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
   </dialog>
   </section>
 
-  <section id="settingsTab" data-tab-panel="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
+  <section id="projectsTab" data-tab-panel="projects"<?= $initialTab === 'projects' ? '' : ' hidden' ?>>
     <div class="settings-layout">
       <section class="panel" id="projects">
         <h2>Projects</h2>
@@ -2127,10 +2242,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                     <?php if ($isActiveProject): ?>
                       <span class="status-pill healthy">CURRENT</span>
                     <?php else: ?>
-                      <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" data-project-selection-form>
+                      <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1" data-project-selection-form>
                         <input type="hidden" name="action" value="select_active_project">
                         <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                        <input type="hidden" name="target_tab" value="settings">
+                        <input type="hidden" name="target_tab" value="projects">
                         <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
                         <button type="submit" class="secondary">Open on Dashboard</button>
                       </form>
@@ -2207,7 +2322,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                   <?php elseif ($gitStatus['status'] !== 'INVALID REPOSITORY'): ?>
                     <div class="project-actions">
                       <?php if ($gitCanInitialize): ?>
-                        <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                        <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
                           <input type="hidden" name="action" value="initialize_repository">
                           <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                           <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
@@ -2215,7 +2330,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                         </form>
                       <?php endif; ?>
                       <?php if ($gitCanFetch): ?>
-                        <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                        <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
                           <input type="hidden" name="action" value="fetch_git_repository">
                           <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                           <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
@@ -2223,7 +2338,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                         </form>
                       <?php endif; ?>
                       <?php if ($gitCanPull): ?>
-                        <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                        <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
                           <input type="hidden" name="action" value="pull_git_repository">
                           <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                           <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
@@ -2231,7 +2346,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                         </form>
                       <?php endif; ?>
                       <?php if ($gitCanPush): ?>
-                        <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                        <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
                           <input type="hidden" name="action" value="push_git_repository">
                           <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                           <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
@@ -2243,7 +2358,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                 </section>
                 <div class="project-actions">
                   <?php if ($statusLabel !== 'Ready'): ?>
-                    <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                    <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
                       <input type="hidden" name="action" value="provision_project">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
@@ -2253,7 +2368,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                     <p class="lifecycle-note">Configured: <?= h(configuredDisplayValue($project['provisioning']['provisioned_at'] ?? '')) ?></p>
                   <?php endif; ?>
                   <?php if ($statusLabel === 'Ready'): ?>
-                    <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+                    <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
                       <input type="hidden" name="action" value="verify_project_routing">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
@@ -2262,14 +2377,14 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
                   <?php endif; ?>
                   <p class="action-note">Alternative actions: choose Remove from Console to unregister the project, or Delete Project to remove Dev Console-managed local infrastructure.</p>
                   <p class="action-note">Remove from Console removes only the project registration from Dev Console. Directories, Apache configuration, and Git repositories remain.</p>
-                  <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove this project from Dev Console?\nServer files will not be deleted.');">
+                  <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1" onsubmit="return confirm('Remove this project from Dev Console?\nServer files will not be deleted.');">
                     <input type="hidden" name="action" value="remove_project">
                     <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                     <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
                     <button type="submit" class="secondary" title="Removes only this project record.">Remove from Console</button>
                   </form>
                   <p class="action-note">Delete Project removes the project registration and local project infrastructure. The local Git repository and GitHub repository are preserved.</p>
-                  <form method="post" action="/?tab=settings#projects" data-preserve-settings-scroll="1" data-delete-project-form="1" data-project-id="<?= h((string)$project['id']) ?>">
+                  <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1" data-delete-project-form="1" data-project-id="<?= h((string)$project['id']) ?>">
                     <input type="hidden" name="action" value="delete_project">
                     <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                     <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
@@ -2296,7 +2411,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
               </ul>
             </section>
           <?php endif; ?>
-          <form method="post" class="project-form" action="/?tab=settings#projects" data-preserve-settings-scroll="1">
+          <form method="post" class="project-form" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
             <input type="hidden" name="action" value="create_project">
             <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
 
@@ -2330,6 +2445,203 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
           </form>
       </section>
 
+    </div>
+  </section>
+
+  <section id="serversTab" data-tab-panel="servers"<?= $initialTab === 'servers' ? '' : ' hidden' ?>>
+    <div class="server-layout">
+      <section class="panel" id="managed-servers">
+        <div class="dashboard-header">
+          <h2>Managed Servers</h2>
+          <span class="meta"><?= h((string)count($managedServers)) ?> configured</span>
+        </div>
+        <?php if ($managedServerActionResult !== null): ?>
+          <section class="result-block <?= !empty($managedServerActionResult['success']) ? '' : 'error' ?>">
+            <h2><?= !empty($managedServerActionResult['success']) ? 'Server configuration saved' : 'Server configuration failed' ?></h2>
+            <p><?= h((string)($managedServerActionResult['message'] ?? '')) ?></p>
+          </section>
+        <?php endif; ?>
+        <section class="result-block tool-operation-panel" id="managedServerOperationPanel" hidden>
+          <h2>SSH connection test</h2>
+          <p id="managedServerOperationMessage">Starting...</p>
+          <dl class="tool-operation-grid">
+            <div><dt>Server</dt><dd id="managedServerOperationServer">-</dd></div>
+            <div><dt>Status</dt><dd id="managedServerOperationStatus">Starting</dd></div>
+            <div><dt>Stage</dt><dd id="managedServerOperationStage">Starting</dd></div>
+            <div><dt>Elapsed</dt><dd id="managedServerOperationElapsed">0s</dd></div>
+          </dl>
+          <dl class="apache-summary-grid" id="managedServerConnectionDetails" hidden>
+            <div><dt>Hostname</dt><dd id="managedServerResultHostname">-</dd></div>
+            <div><dt>OS</dt><dd id="managedServerResultOs">-</dd></div>
+            <div><dt>Kernel</dt><dd id="managedServerResultKernel">-</dd></div>
+            <div><dt>Current user</dt><dd id="managedServerResultUser">-</dd></div>
+            <div><dt>Working directory</dt><dd id="managedServerResultWorkingDirectory">-</dd></div>
+            <div><dt>Round-trip time</dt><dd id="managedServerResultRtt">-</dd></div>
+          </dl>
+          <div class="result-actions">
+            <button type="button" class="secondary" data-copy-log="managedServerLiveLog">Copy Log</button>
+            <button type="button" class="secondary" data-download-log="managedServerLiveLog" data-download-name="managed-server-connection.log">Download Log</button>
+            <span class="hint" data-log-message="managedServerLiveLog" aria-live="polite"></span>
+          </div>
+          <pre id="managedServerLiveLog" class="tool-operation-log">Waiting for operation log...</pre>
+        </section>
+
+        <?php if (empty($managedServers)): ?>
+          <p class="meta">No managed servers configured yet.</p>
+        <?php else: ?>
+          <div class="project-list">
+            <?php foreach ($managedServers as $server): ?>
+              <?php $serverId = (string)($server['id'] ?? ''); ?>
+              <section class="project-item" data-server-card>
+                <div class="project-summary">
+                  <span>
+                    <strong><?= h(configuredDisplayValue($server['name'] ?? '')) ?></strong>
+                    <span class="meta"><?= h(configuredDisplayValue($server['id'] ?? '')) ?></span>
+                  </span>
+                  <span class="status-pill <?= h(managedServersStatusClass($server)) ?>"><?= h(managedServersStatusLabel($server)) ?></span>
+                  <span>Host: <?= h(configuredDisplayValue($server['host'] ?? '')) ?></span>
+                  <span>Hostname: <?= h(configuredDisplayValue($server['remote_hostname'] ?? '')) ?></span>
+                  <span>OS: <?= h(configuredDisplayValue($server['remote_os'] ?? '')) ?></span>
+                  <span>User: <?= h(configuredDisplayValue($server['remote_user'] ?: ($server['user'] ?? ''))) ?></span>
+                  <span>Last checked: <?= h(configuredDisplayValue($server['last_connection_test_at'] ?? '')) ?></span>
+                  <span>Response: <?= h(($server['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$server['response_time_ms'] . ' ms')) ?></span>
+                  <div class="project-actions">
+                    <form method="post" action="/?tab=servers#managed-servers" data-managed-server-test-form="1" data-server-id="<?= h($serverId) ?>" data-server-name="<?= h(configuredDisplayValue($server['name'] ?? '')) ?>">
+                      <input type="hidden" name="action" value="test_managed_server">
+                      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                      <input type="hidden" name="server_id" value="<?= h($serverId) ?>">
+                      <button type="submit">Test Connection</button>
+                    </form>
+                    <button type="button" class="secondary project-card-toggle" data-project-toggle aria-expanded="false">Show details</button>
+                    <button type="button" class="secondary" data-server-edit-toggle aria-expanded="false">Edit</button>
+                    <form method="post" action="/?tab=servers#managed-servers" onsubmit="return confirm('Remove this managed server from Dev Console? SSH keys and remote data will not be deleted.');">
+                      <input type="hidden" name="action" value="remove_managed_server">
+                      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                      <input type="hidden" name="server_id" value="<?= h($serverId) ?>">
+                      <button type="submit" class="secondary">Remove</button>
+                    </form>
+                  </div>
+                </div>
+                <div class="project-details" hidden>
+                  <table class="compact-table">
+                    <tbody>
+                      <tr><th>Server ID</th><td><?= h(configuredDisplayValue($server['id'] ?? '')) ?></td></tr>
+                      <tr><th>Display name</th><td><?= h(configuredDisplayValue($server['name'] ?? '')) ?></td></tr>
+                      <tr><th>Description</th><td><?= h(configuredDisplayValue($server['description'] ?? '')) ?></td></tr>
+                      <tr><th>Host</th><td><?= h(configuredDisplayValue($server['host'] ?? '')) ?></td></tr>
+                      <tr><th>SSH port</th><td><?= h((string)((int)($server['port'] ?? 22))) ?></td></tr>
+                      <tr><th>SSH username</th><td><?= h(configuredDisplayValue($server['user'] ?? '')) ?></td></tr>
+                      <tr><th>Authentication</th><td>SSH private key</td></tr>
+                      <tr><th>SSH private key path</th><td class="path-value"><?= h(configuredDisplayValue($server['key'] ?? '')) ?></td></tr>
+                      <tr><th>SSH key fingerprint</th><td><?= h(configuredDisplayValue($server['key_fingerprint'] ?? '')) ?></td></tr>
+                      <tr><th>Last connection test</th><td><?= h(configuredDisplayValue($server['last_connection_test_at'] ?? '')) ?></td></tr>
+                      <tr><th>Current status</th><td><span class="status-pill <?= h(managedServersStatusClass($server)) ?>"><?= h(managedServersStatusLabel($server)) ?></span><?= (string)($server['last_error'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$server['last_error']) . '</span>' : '' ?></td></tr>
+                      <tr><th>Response time</th><td><?= h(($server['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$server['response_time_ms'] . ' ms')) ?></td></tr>
+                      <tr><th>Hostname</th><td><?= h(configuredDisplayValue($server['remote_hostname'] ?? '')) ?></td></tr>
+                      <tr><th>Linux distribution</th><td><?= h(configuredDisplayValue($server['remote_os'] ?? '')) ?></td></tr>
+                      <tr><th>Kernel version</th><td><?= h(configuredDisplayValue($server['remote_kernel'] ?? '')) ?></td></tr>
+                      <tr><th>Remote user</th><td><?= h(configuredDisplayValue($server['remote_user'] ?? '')) ?></td></tr>
+                      <tr><th>Remote working directory</th><td><?= h(configuredDisplayValue($server['remote_working_directory'] ?? '')) ?></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="project-details" data-server-edit-panel hidden>
+                  <form method="post" class="project-form" action="/?tab=servers#managed-servers" data-managed-server-form="1">
+                      <input type="hidden" name="action" value="save_managed_server">
+                      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                      <input type="hidden" name="existing_server_id" value="<?= h($serverId) ?>">
+                      <fieldset>
+                        <legend>Server</legend>
+                        <label for="server_id_<?= h($serverId) ?>">Server ID</label>
+                        <input id="server_id_<?= h($serverId) ?>" name="server_id" type="text" required maxlength="80" value="<?= h($serverId) ?>">
+                        <label for="server_name_<?= h($serverId) ?>">Display name</label>
+                        <input id="server_name_<?= h($serverId) ?>" name="server_name" type="text" required maxlength="120" value="<?= h((string)$server['name']) ?>">
+                        <label for="server_host_<?= h($serverId) ?>">Hostname / IP</label>
+                        <input id="server_host_<?= h($serverId) ?>" name="server_host" type="text" required maxlength="253" value="<?= h((string)$server['host']) ?>">
+                        <label for="server_port_<?= h($serverId) ?>">SSH port</label>
+                        <input id="server_port_<?= h($serverId) ?>" name="server_port" type="text" required inputmode="numeric" value="<?= h((string)((int)$server['port'])) ?>">
+                        <label for="server_user_<?= h($serverId) ?>">SSH username</label>
+                        <input id="server_user_<?= h($serverId) ?>" name="server_user" type="text" required maxlength="64" value="<?= h((string)$server['user']) ?>">
+                        <label for="server_key_<?= h($serverId) ?>">SSH private key path</label>
+                        <div class="form-actions">
+                          <select data-ssh-key-select aria-label="Detected SSH keys">
+                            <option value="">Loading detected keys...</option>
+                          </select>
+                        </div>
+                        <input id="server_key_<?= h($serverId) ?>" name="server_key" type="text" required maxlength="255" value="<?= h((string)$server['key']) ?>" readonly data-server-key-path>
+                        <p class="field-help">Fingerprint: <span data-server-key-fingerprint><?= h(configuredDisplayValue($server['key_fingerprint'] ?? '')) ?></span></p>
+                        <label for="server_description_<?= h($serverId) ?>">Description</label>
+                        <input id="server_description_<?= h($serverId) ?>" name="server_description" type="text" maxlength="500" value="<?= h((string)$server['description']) ?>">
+                      </fieldset>
+                      <button type="submit">Save Server</button>
+                  </form>
+                </div>
+              </section>
+            <?php endforeach; ?>
+          </div>
+        <?php endif; ?>
+      </section>
+
+      <section class="panel" id="add-server">
+        <h2>Add Server</h2>
+        <details class="compact-details subsection">
+          <summary>How to connect a new server</summary>
+          <ol>
+            <li>Generate a dedicated key: <code>ssh-keygen -t ed25519 -f ~/.ssh/my_server_key</code></li>
+            <li>Display the public key: <code>cat ~/.ssh/my_server_key.pub</code></li>
+            <li>Copy the public key to the remote server's <code>~/.ssh/authorized_keys</code>.</li>
+            <li>Verify manually: <code>ssh -i ~/.ssh/my_server_key root@SERVER</code></li>
+            <li>Open the SSH private key dropdown and select <code>my_server_key</code>.</li>
+            <li>Press <strong>Test Connection</strong>.</li>
+          </ol>
+          <p class="field-help">Use a dedicated deployment key for each managed server. Reusing GitHub SSH keys makes access harder to audit and rotate later.</p>
+        </details>
+        <?php if (!empty($managedServerFormErrors)): ?>
+          <section class="result-block error">
+            <h2>Server not saved</h2>
+            <ul>
+              <?php foreach ($managedServerFormErrors as $serverError): ?>
+                <li><?= h((string)$serverError) ?></li>
+              <?php endforeach; ?>
+            </ul>
+          </section>
+        <?php endif; ?>
+        <form method="post" class="project-form" action="/?tab=servers#add-server" data-managed-server-form="1">
+          <input type="hidden" name="action" value="save_managed_server">
+          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+          <fieldset>
+            <legend>Server</legend>
+            <label for="server_id">Server ID</label>
+            <input id="server_id" name="server_id" type="text" required maxlength="80" placeholder="ak-ru" value="<?= h((string)$managedServerFormValues['id']) ?>">
+            <label for="server_name">Display name</label>
+            <input id="server_name" name="server_name" type="text" required maxlength="120" placeholder="AK Development Server" value="<?= h((string)$managedServerFormValues['name']) ?>">
+            <label for="server_host">Hostname / IP</label>
+            <input id="server_host" name="server_host" type="text" required maxlength="253" placeholder="100.x.x.x" value="<?= h((string)$managedServerFormValues['host']) ?>">
+            <label for="server_port">SSH port</label>
+            <input id="server_port" name="server_port" type="text" required inputmode="numeric" value="<?= h((string)($managedServerFormValues['port'] ?: 22)) ?>">
+            <label for="server_user">SSH username</label>
+            <input id="server_user" name="server_user" type="text" required maxlength="64" placeholder="root" value="<?= h((string)$managedServerFormValues['user']) ?>">
+            <label for="server_key">SSH private key path</label>
+            <div class="form-actions">
+              <select data-ssh-key-select aria-label="Detected SSH keys">
+                <option value="">Loading detected keys...</option>
+              </select>
+            </div>
+            <input id="server_key" name="server_key" type="text" required maxlength="255" placeholder="/home/iovon/.ssh/id_ed25519" value="<?= h((string)$managedServerFormValues['key']) ?>" readonly data-server-key-path>
+            <p class="field-help">Fingerprint: <span data-server-key-fingerprint><?= h(configuredDisplayValue($managedServerFormValues['key_fingerprint'] ?? '')) ?></span></p>
+            <p class="field-help">Dev Console stores only the key path. It does not copy private keys.</p>
+            <p class="field-help">Authentication method: SSH private key.</p>
+            <label for="server_description">Description</label>
+            <input id="server_description" name="server_description" type="text" maxlength="500" placeholder="Optional" value="<?= h((string)$managedServerFormValues['description']) ?>">
+          </fieldset>
+          <button type="submit">Add Server</button>
+        </form>
+      </section>
+    </div>
+  </section>
+
+  <section id="settingsTab" data-tab-panel="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
+    <div class="settings-layout">
       <div class="settings-service-row">
       <section class="panel" id="github">
         <h2>GitHub</h2>
@@ -2781,7 +3093,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
       const target = selectedTab();
       const targetInput = projectForm.querySelector('input[name="target_tab"]');
       if (targetInput) targetInput.value = target;
-      projectForm.action = target === 'settings' ? '/?tab=settings#projects' : '/?tab=dashboard';
+      projectForm.action = target === 'dashboard' ? '/?tab=dashboard' : '/?tab=projects#projects';
     });
   });
   document.querySelectorAll('[data-delete-project-form="1"]').forEach((deleteForm) => {
@@ -2925,6 +3237,182 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
       }
     });
   });
+
+  const managedServerPanel = document.getElementById('managedServerOperationPanel');
+  const managedServerMessage = document.getElementById('managedServerOperationMessage');
+  const managedServerName = document.getElementById('managedServerOperationServer');
+  const managedServerStatus = document.getElementById('managedServerOperationStatus');
+  const managedServerStage = document.getElementById('managedServerOperationStage');
+  const managedServerElapsed = document.getElementById('managedServerOperationElapsed');
+  const managedServerLog = document.getElementById('managedServerLiveLog');
+  const managedServerDetails = document.getElementById('managedServerConnectionDetails');
+  const managedServerResultHostname = document.getElementById('managedServerResultHostname');
+  const managedServerResultOs = document.getElementById('managedServerResultOs');
+  const managedServerResultKernel = document.getElementById('managedServerResultKernel');
+  const managedServerResultUser = document.getElementById('managedServerResultUser');
+  const managedServerResultWorkingDirectory = document.getElementById('managedServerResultWorkingDirectory');
+  const managedServerResultRtt = document.getElementById('managedServerResultRtt');
+  const managedServerForms = Array.from(document.querySelectorAll('[data-managed-server-test-form="1"]'));
+  const setManagedServerButtons = (serverId, disabled) => {
+    managedServerForms.forEach((form) => {
+      if (form.dataset.serverId !== serverId) return;
+      form.querySelectorAll('button').forEach((button) => { button.disabled = disabled; });
+    });
+  };
+  const showManagedServerOperation = (operation) => {
+    if (!managedServerPanel) return;
+    const result = operation.result || {};
+    managedServerPanel.hidden = false;
+    managedServerPanel.classList.toggle('failed', operation.status === 'failed');
+    if (managedServerName) managedServerName.textContent = operation.server_name || operation.server_id || '-';
+    if (managedServerStatus) managedServerStatus.textContent = String(operation.status || 'running').replace(/^\w/, (letter) => letter.toUpperCase());
+    if (managedServerStage) managedServerStage.textContent = operation.stage || 'Starting';
+    if (managedServerElapsed) managedServerElapsed.textContent = formatElapsed(operation.elapsed_seconds || 0);
+    if (managedServerMessage) managedServerMessage.textContent = operation.message || 'Testing SSH connection.';
+    if (managedServerLog) {
+      managedServerLog.textContent = operation.log && operation.log.trim() !== '' ? operation.log : 'Waiting for operation log...';
+      managedServerLog.scrollTop = managedServerLog.scrollHeight;
+    }
+    if (managedServerDetails) {
+      const hasDetails = Boolean(result.hostname || result.os || result.kernel || result.remote_user || result.working_directory || result.round_trip_ms);
+      managedServerDetails.hidden = !hasDetails;
+      if (managedServerResultHostname) managedServerResultHostname.textContent = result.hostname || '-';
+      if (managedServerResultOs) managedServerResultOs.textContent = result.os || '-';
+      if (managedServerResultKernel) managedServerResultKernel.textContent = result.kernel || '-';
+      if (managedServerResultUser) managedServerResultUser.textContent = result.remote_user || '-';
+      if (managedServerResultWorkingDirectory) managedServerResultWorkingDirectory.textContent = result.working_directory || '-';
+      if (managedServerResultRtt) managedServerResultRtt.textContent = result.round_trip_ms ? `${result.round_trip_ms} ms` : '-';
+    }
+  };
+  const pollManagedServerOperation = (operationId, serverId) => {
+    let poll = null;
+    const update = async () => {
+      const response = await fetch(`?action=managed-server-operation-status&id=${encodeURIComponent(operationId)}`, { cache: 'no-store' });
+      const payload = await response.json();
+      if (!payload.ok) throw new Error(payload.error || 'Unable to read managed server operation.');
+      showManagedServerOperation(payload.operation);
+      if (payload.operation.status === 'completed' || payload.operation.status === 'failed') {
+        clearInterval(poll);
+        setManagedServerButtons(serverId, false);
+        window.setTimeout(() => {
+          window.location.href = '/?tab=servers#managed-servers';
+        }, 1200);
+      }
+    };
+    update().catch((error) => {
+      clearInterval(poll);
+      setManagedServerButtons(serverId, false);
+      if (managedServerPanel) managedServerPanel.hidden = false;
+      if (managedServerPanel) managedServerPanel.classList.add('failed');
+      if (managedServerMessage) managedServerMessage.textContent = error.message;
+      if (managedServerStatus) managedServerStatus.textContent = 'Failed';
+    });
+    poll = window.setInterval(() => update().catch((error) => {
+      clearInterval(poll);
+      setManagedServerButtons(serverId, false);
+      if (managedServerMessage) managedServerMessage.textContent = error.message;
+      if (managedServerStatus) managedServerStatus.textContent = 'Failed';
+    }), 1000);
+  };
+  managedServerForms.forEach((form) => {
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const serverId = form.dataset.serverId || '';
+      setManagedServerButtons(serverId, true);
+      showManagedServerOperation({
+        server_id: serverId,
+        server_name: form.dataset.serverName || serverId,
+        status: 'running',
+        stage: 'Starting',
+        elapsed_seconds: 0,
+        message: 'Starting SSH connection test.',
+        log: '',
+      });
+      try {
+        const response = await fetch('/?tab=servers#managed-servers', { method: 'POST', body: new FormData(form) });
+        const payload = await response.json();
+        if (!payload.ok) throw new Error(payload.error || 'Unable to start SSH connection test.');
+        showManagedServerOperation(payload.operation);
+        pollManagedServerOperation(payload.operation.id, serverId);
+      } catch (error) {
+        setManagedServerButtons(serverId, false);
+        if (managedServerPanel) managedServerPanel.classList.add('failed');
+        if (managedServerMessage) managedServerMessage.textContent = error.message;
+        if (managedServerStatus) managedServerStatus.textContent = 'Failed';
+      }
+    });
+  });
+
+  const populateSshKeySelect = (form, keys) => {
+    const select = form.querySelector('[data-ssh-key-select]');
+    if (!select) return;
+    const currentPath = form.querySelector('[data-server-key-path]')?.value || '';
+    select.innerHTML = '<option value="">Select detected key</option>';
+    keys.forEach((key) => {
+      const option = document.createElement('option');
+      option.value = key.path || '';
+      option.textContent = `${key.name || key.path}${key.permissions_ok === false ? ' (permissions need attention)' : ''}`;
+      option.dataset.fingerprint = key.fingerprint || '';
+      option.dataset.permissionsOk = key.permissions_ok === false ? '0' : '1';
+      if (currentPath && currentPath === key.path) option.selected = true;
+      select.appendChild(option);
+    });
+    if (keys.length === 0) {
+      select.innerHTML = '<option value="">No private keys detected</option>';
+    }
+  };
+  const applySelectedSshKey = (form) => {
+    const select = form.querySelector('[data-ssh-key-select]');
+    const pathInput = form.querySelector('[data-server-key-path]');
+    const fingerprint = form.querySelector('[data-server-key-fingerprint]');
+    const selected = select?.selectedOptions?.[0];
+    if (!select || !pathInput || !selected || selected.value === '') return;
+    pathInput.value = selected.value;
+    if (fingerprint) {
+      fingerprint.textContent = selected.dataset.fingerprint || 'Not configured';
+    }
+  };
+  let detectedSshKeys = null;
+  let sshKeyDetectionRequest = null;
+  const managedServerConfigForms = Array.from(document.querySelectorAll('[data-managed-server-form="1"]'));
+  const loadDetectedSshKeys = async (force = false) => {
+    if (!force && Array.isArray(detectedSshKeys)) {
+      managedServerConfigForms.forEach((form) => populateSshKeySelect(form, detectedSshKeys));
+      return detectedSshKeys;
+    }
+    if (sshKeyDetectionRequest && !force) return sshKeyDetectionRequest;
+    sshKeyDetectionRequest = fetch('?action=detect-ssh-keys', { cache: 'no-store' })
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!payload.ok) throw new Error(payload.error || 'Unable to detect SSH keys.');
+        detectedSshKeys = payload.keys || [];
+        managedServerConfigForms.forEach((form) => populateSshKeySelect(form, detectedSshKeys));
+        return detectedSshKeys;
+      })
+      .catch((error) => {
+        managedServerConfigForms.forEach((form) => {
+          const fingerprint = form.querySelector('[data-server-key-fingerprint]');
+          if (fingerprint) fingerprint.textContent = error.message;
+        });
+        return [];
+      })
+      .finally(() => {
+        sshKeyDetectionRequest = null;
+      });
+    return sshKeyDetectionRequest;
+  };
+  managedServerConfigForms.forEach((form) => {
+    const select = form.querySelector('[data-ssh-key-select]');
+    select?.addEventListener('change', () => applySelectedSshKey(form));
+    select?.addEventListener('focus', () => {
+      loadDetectedSshKeys(true).then(() => applySelectedSshKey(form));
+    });
+  });
+  if (managedServerConfigForms.length > 0) {
+    loadDetectedSshKeys().then(() => {
+      managedServerConfigForms.forEach((form) => applySelectedSshKey(form));
+    });
+  }
 
   const projectNameInput = document.getElementById('project_name');
   const productionDomainInput = document.getElementById('production_domain');
@@ -3075,9 +3563,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
     window.history.replaceState(null, '', `${window.location.pathname}?tab=dashboard`);
   });
 
-  document.querySelectorAll('[data-project-card]').forEach((card) => {
+  document.querySelectorAll('[data-project-card], [data-server-card]').forEach((card) => {
     const toggle = card.querySelector('[data-project-toggle]');
-    const details = card.querySelector('.project-details');
+    const details = card.querySelector('.project-details:not([data-server-edit-panel])');
     const setExpanded = (expanded) => {
       card.dataset.expanded = expanded ? '1' : '0';
       if (details) details.hidden = !expanded;
@@ -3089,6 +3577,28 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'settings', 's
     setExpanded(card.dataset.expanded === '1');
     toggle?.addEventListener('click', () => {
       setExpanded(card.dataset.expanded !== '1');
+    });
+  });
+
+  document.querySelectorAll('[data-server-card]').forEach((card) => {
+    const toggle = card.querySelector('[data-server-edit-toggle]');
+    const panel = card.querySelector('[data-server-edit-panel]');
+    const setEditing = (editing) => {
+      if (panel) panel.hidden = !editing;
+      if (toggle) {
+        toggle.textContent = editing ? 'Hide edit' : 'Edit';
+        toggle.setAttribute('aria-expanded', editing ? 'true' : 'false');
+      }
+      if (editing) {
+        loadDetectedSshKeys().then(() => {
+          const form = panel?.querySelector('[data-managed-server-form="1"]');
+          if (form) applySelectedSshKey(form);
+        });
+      }
+    };
+    setEditing(false);
+    toggle?.addEventListener('click', () => {
+      setEditing(panel ? panel.hidden : false);
     });
   });
 

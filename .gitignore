@@ -1,6 +1,7 @@
 console/runs/*
 !console/runs/.gitignore
 console/runtime/*
+console/config/servers.json
 .env
 *.log
 config/projects.json
