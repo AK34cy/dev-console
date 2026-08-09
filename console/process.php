@@ -125,6 +125,8 @@ function processRunCommand(array $arguments, array $options = []): array
 
 function processResult(string $commandDisplay, string $stdout, string $stderr, int $exitCode, bool $timedOut, float $startedAt): array
 {
+    $rawStdout = $stdout;
+    $rawStderr = $stderr;
     $stdout = trim($stdout);
     $stderr = trim($stderr);
     $output = trim($stdout . ($stderr === '' ? '' : "\n" . $stderr));
@@ -135,6 +137,8 @@ function processResult(string $commandDisplay, string $stdout, string $stderr, i
         'command' => $commandDisplay,
         'stdout' => $stdout,
         'stderr' => $stderr,
+        'stdout_raw' => $rawStdout,
+        'stderr_raw' => $rawStderr,
         'exit_code' => $exitCode,
         'timed_out' => $timedOut,
         'duration_ms' => (int)round((microtime(true) - $startedAt) * 1000),

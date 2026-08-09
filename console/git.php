@@ -340,6 +340,66 @@ function gitDirectoryPath(string $repositoryPath): string
     return $gitPath;
 }
 
+function gitParsePorcelainV1Z(string $output): array
+{
+    $records = [];
+    $parts = explode("\0", $output);
+    $count = count($parts);
+
+    for ($index = 0; $index < $count; $index++) {
+        $entry = $parts[$index];
+        if ($entry === '') {
+            continue;
+        }
+        if (strlen($entry) < 4) {
+            continue;
+        }
+
+        $status = substr($entry, 0, 2);
+        $path = substr($entry, 3);
+        if ($path === '') {
+            continue;
+        }
+
+        $originalPath = '';
+        if ($status[0] === 'R' || $status[1] === 'R' || $status[0] === 'C' || $status[1] === 'C') {
+            $originalPath = (string)($parts[++$index] ?? '');
+        }
+
+        $records[] = [
+            'status' => $status,
+            'path' => $path,
+            'original_path' => $originalPath,
+        ];
+    }
+
+    return $records;
+}
+
+function gitPorcelainRecordIsUnderPath(array $record, string $prefix): bool
+{
+    $path = (string)($record['path'] ?? '');
+    $originalPath = (string)($record['original_path'] ?? '');
+
+    return str_starts_with($path, $prefix) || ($originalPath !== '' && str_starts_with($originalPath, $prefix));
+}
+
+function gitPorcelainRecordPaths(array $record): array
+{
+    $paths = [];
+    $path = (string)($record['path'] ?? '');
+    $originalPath = (string)($record['original_path'] ?? '');
+
+    if ($path !== '') {
+        $paths[] = $path;
+    }
+    if ($originalPath !== '') {
+        $paths[] = $originalPath;
+    }
+
+    return array_values(array_unique($paths));
+}
+
 function gitCurrentBranch(string $repositoryPath): string
 {
     $headPath = gitDirectoryPath($repositoryPath) . '/HEAD';
@@ -635,6 +695,7 @@ function gitTaskDocumentationContent(array $project): string
     return "# Task Workflow\n\n"
         . "Tasks in this repository are isolated to Project `{$projectId}`.\n\n"
         . "- `TASKS/TODO/` stores open task files.\n"
+        . "- `TASKS/IN PROGRESS/` stores the task currently being executed by Codex.\n"
         . "- `TASKS/DONE/` stores completed task files.\n"
         . "- `TASKS/ATTACHMENTS/<TASK-ID>/` stores files attached to a task.\n\n"
         . "Task numbers are project-specific and use the next available `TASK-001`, `TASK-002`, and so on.\n\n"
@@ -647,7 +708,7 @@ function gitTaskDocumentationContent(array $project): string
 function gitEnsureTaskDocumentation(array $project, string $path): ?string
 {
     $tasksPath = rtrim($path, '/') . '/TASKS';
-    foreach ([$tasksPath, $tasksPath . '/TODO', $tasksPath . '/DONE', $tasksPath . '/ATTACHMENTS'] as $directory) {
+    foreach ([$tasksPath, $tasksPath . '/TODO', $tasksPath . '/IN PROGRESS', $tasksPath . '/DONE', $tasksPath . '/ATTACHMENTS'] as $directory) {
         if (!is_dir($directory) && !@mkdir($directory, 0755, true) && !is_dir($directory)) {
             throw new RuntimeException('Unable to create TASKS directory.');
         }

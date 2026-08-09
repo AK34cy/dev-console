@@ -963,3 +963,72 @@ function projectCleanupOrphanedInfrastructure(array $configuration, string $proj
         return projectActionResult(false, $exception->getMessage(), $log);
     }
 }
+
+function projectMessageName(?array $project, string $fallback = ''): string
+{
+    $name = trim((string)($project['name'] ?? ''));
+    if ($name === '') {
+        $name = trim($fallback);
+    }
+
+    return $name === '' ? 'Project' : $name;
+}
+
+function projectLifecycleLabel(array $project, array $projectStatus): string
+{
+    $status = (string)($projectStatus['label'] ?? 'Not set up');
+    $managed = !empty($project['provisioning']['managed']);
+    if ($status === 'Ready') {
+        return $managed ? 'Ready' : 'Imported';
+    }
+    if ($status === 'Configuration drift' || $status === 'Incomplete') {
+        return $status;
+    }
+
+    return $managed ? 'Not set up' : 'New';
+}
+
+function operationSummarySteps(string $action, array $result): array
+{
+    if (!empty($result['summary_steps']) && is_array($result['summary_steps'])) {
+        return array_values(array_filter(array_map('strval', $result['summary_steps'])));
+    }
+    if (empty($result['success'])) {
+        return [];
+    }
+
+    if ($action === 'initialize_repository') {
+        return [
+            'Local repository prepared',
+            'GitHub repository verified',
+            'First push completed',
+            'Remote branch verified',
+        ];
+    }
+    if ($action === 'fetch_git_repository') {
+        return ['Remote changes fetched', 'Git status refreshed'];
+    }
+    if ($action === 'pull_git_repository') {
+        return ['Remote changes fetched', 'Fast-forward pull completed', 'Git status refreshed'];
+    }
+    if ($action === 'push_git_repository') {
+        return ['Local commits pushed', 'Remote branch verified', 'Git status refreshed'];
+    }
+    if ($action === 'provision_project') {
+        return ['Project directories prepared', 'Apache configuration ready', 'Routing verified'];
+    }
+    if ($action === 'verify_project_routing') {
+        return ['Apache ServerName checked', 'Websites checked'];
+    }
+    if ($action === 'delete_project') {
+        return ['Managed Apache configuration removed', 'Managed project directories removed', 'Git repository preserved'];
+    }
+    if ($action === 'cleanup_orphaned_project') {
+        return ['Orphaned Apache configuration removed', 'Orphaned project directories removed', 'Git repositories preserved'];
+    }
+    if ($action === 'remove_project') {
+        return ['Project registration removed', 'Server files preserved'];
+    }
+
+    return [];
+}
