@@ -1644,6 +1644,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                 $projectManagedServerId = (string)($project['managed_server_id'] ?? '');
                 $projectManagedServer = devConsoleFindManagedServerById($managedServers, $projectManagedServerId);
                 $projectManagedServerStatusClass = $projectManagedServer === null ? 'warning' : managedServersStatusClass($projectManagedServer);
+                $projectSetupMetadata = projectRemoteSetupMetadata($project);
                 $cardActionResult = $projectActionResult !== null
                     && (string)($projectActionResult['project_id'] ?? '') === $projectIdForCard
                     && !in_array((string)($projectActionResult['action'] ?? ''), ['remove_project', 'delete_project', 'cleanup_orphaned_project'], true)
@@ -1651,7 +1652,19 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                         : null;
                 $cardOpen = $cardActionResult !== null || $projectIdForCard === (string)($projectsForDisplay[0]['id'] ?? '');
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
-                $canSetUp = $statusLabel !== 'Ready' && $usesGeneratedPaths;
+                $setupUnavailableReason = '';
+                if (!$usesGeneratedPaths) {
+                    $setupUnavailableReason = 'This project cannot be set up automatically with its current environment paths.';
+                } elseif ($projectManagedServerId === '') {
+                    $setupUnavailableReason = 'Assign a Managed Server before setup.';
+                } elseif ($projectManagedServer === null) {
+                    $setupUnavailableReason = 'The assigned Managed Server does not exist.';
+                } elseif ((string)($projectManagedServer['status'] ?? '') !== 'reachable') {
+                    $setupUnavailableReason = 'The assigned Managed Server must be reachable before setup.';
+                } elseif ((string)($project['production']['domain'] ?? '') === '' || (string)($project['preview']['domain'] ?? '') === '') {
+                    $setupUnavailableReason = 'Production and Preview domains are required before setup.';
+                }
+                $canSetUp = $statusLabel !== 'Ready' && $setupUnavailableReason === '';
                 $gitStatus = $gitStatuses[(string)($project['id'] ?? '')] ?? gitStatus($project, $githubConfiguration);
                 $gitStatusClass = gitStatusClassName((string)$gitStatus['status']);
                 $gitCanInitialize = in_array($gitStatus['status'], ['NOT INITIALIZED', 'INITIALIZATION INCOMPLETE', 'REMOTE UNAVAILABLE'], true);
@@ -1710,7 +1723,12 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                     <tr><th>Last server check</th><td><?= h(configuredDisplayValue($projectManagedServer['last_connection_test_at'] ?? '')) ?></td></tr>
                     <tr><th>Repository</th><td><?= h(configuredDisplayValue($project['repository_path'] ?? '')) ?></td></tr>
                     <tr><th>Branch</th><td><?= h(configuredDisplayValue($project['branch'] ?? '')) ?></td></tr>
-                    <tr><th>Set up</th><td><?= h(configuredDisplayValue($project['provisioning']['provisioned_at'] ?? '')) ?></td></tr>
+                    <tr><th>Setup status</th><td><?= h(configuredDisplayValue($projectSetupMetadata['status'] ?? '')) ?></td></tr>
+                    <tr><th>Setup message</th><td><?= h(configuredDisplayValue($projectSetupMetadata['message'] ?? '')) ?></td></tr>
+                    <tr><th>Remote Apache</th><td><?= h(configuredDisplayValue($projectSetupMetadata['apache_version'] ?? '')) ?></td></tr>
+                    <tr><th>Preview site</th><td><?= h(configuredDisplayValue($projectSetupMetadata['preview_site'] ?? '')) ?></td></tr>
+                    <tr><th>Production site</th><td><?= h(configuredDisplayValue($projectSetupMetadata['production_site'] ?? '')) ?></td></tr>
+                    <tr><th>Last setup</th><td><?= h(configuredDisplayValue($projectSetupMetadata['timestamp'] ?? ($project['provisioning']['provisioned_at'] ?? ''))) ?></td></tr>
                   </tbody>
                 </table>
                 <div class="project-details" data-project-edit-panel hidden>
@@ -1834,15 +1852,15 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                   <?php endif; ?>
                 </section>
                 <div class="project-actions">
-                  <?php if ($statusLabel !== 'Ready'): ?>
+                  <?php if ($statusLabel !== 'Ready' || (string)($projectSetupMetadata['status'] ?? '') === 'Configured'): ?>
                     <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
                       <input type="hidden" name="action" value="provision_project">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                      <button type="submit"<?= $canSetUp ? '' : ' disabled title="This project cannot be set up automatically with its current environment paths."' ?>>Set up</button>
+                      <button type="submit"<?= $canSetUp || ($statusLabel === 'Ready' && $setupUnavailableReason === '') ? '' : ' disabled title="' . h($setupUnavailableReason) . '"' ?>><?= $statusLabel === 'Ready' ? 'Re-run Setup' : 'Set up' ?></button>
                     </form>
                   <?php else: ?>
-                    <p class="lifecycle-note">Configured: <?= h(configuredDisplayValue($project['provisioning']['provisioned_at'] ?? '')) ?></p>
+                    <p class="lifecycle-note">Configured: <?= h(configuredDisplayValue($projectSetupMetadata['timestamp'] ?? ($project['provisioning']['provisioned_at'] ?? ''))) ?></p>
                   <?php endif; ?>
                   <?php if ($statusLabel === 'Ready'): ?>
                     <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
@@ -2222,7 +2240,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       </section>
 
       <section class="panel" id="apache">
-        <h2>Apache</h2>
+        <h2>Dev Console host Apache</h2>
         <?php if ($projectActionResult !== null && (string)($projectActionResult['action'] ?? '') === 'cleanup_orphaned_project'): ?>
           <?php
             $projectAction = (string)($projectActionResult['action'] ?? '');
@@ -3016,7 +3034,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       const gitHealth = data.software.Git === 'Not installed' ? 'error' : 'healthy';
       const webHealth = previewHealth === 'error' && productionHealth === 'error' ? 'error' : (previewHealth === 'warning' && productionHealth === 'warning' ? 'warning' : 'healthy');
       environmentDashboard.innerHTML =
-        `<section class="dashboard-card"><div class="health-row">${healthItem('Preview', previewHealth)}${healthItem('Production', productionHealth)}${healthItem('Dev Console', consoleHealth)}${healthItem('Git', gitHealth)}${healthItem('Apache', webHealth)}${healthItem('Tailscale', consoleHealth)}</div></section>` +
+        `<section class="dashboard-card"><div class="health-row">${healthItem('Preview', previewHealth)}${healthItem('Production', productionHealth)}${healthItem('Dev Console', consoleHealth)}${healthItem('Git', gitHealth)}${healthItem('Project Apache', webHealth)}${healthItem('Tailscale', consoleHealth)}</div></section>` +
         `<div class="summary-grid">` +
         dashboardCard('Development', [['Branch', dashboardEscape(development.branch)], ['Commit', `<code>${dashboardEscape(development.commit)}</code>`], ['Current task', dashboardEscape(activeTask)], ['Server', dashboardEscape(activeManagedServerLabel)], ['Server status', dashboardEscape(activeManagedServerStatus)]]) +
         dashboardCard('Preview', [['Status', dashboardStatus(preview.status)], ['URL', dashboardLink(preview.url)]]) +

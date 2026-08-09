@@ -714,32 +714,16 @@ function taskRepositoryReadiness(?array $project, array $githubConfiguration): a
     if ($project === null) {
         return ['ready' => false, 'reason' => 'Select or create a Project before creating tasks.'];
     }
-    $path = gitProjectRepositoryPath($project);
-    if ($path === '' || gitValidateProjectRepositoryPath($project) !== null) {
-        return ['ready' => false, 'reason' => 'Repository path is not valid for this Project.'];
-    }
-    if (!is_dir($path) || is_link($path)) {
-        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Projects before creating tasks.'];
-    }
 
-    $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
-    if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') {
-        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Projects before creating tasks.'];
+    $readiness = gitRepositoryReadiness($project, $githubConfiguration);
+    if (empty($readiness['ready'])) {
+        return ['ready' => false, 'reason' => (string)($readiness['reason'] ?? 'Repository is not ready. Review Git status in Projects.')];
     }
-    if ((string)($project['git']['bootstrap_status'] ?? '') !== 'ready' || empty($project['git']['connected'])) {
-        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Projects before creating tasks.'];
-    }
-    if ($error = gitAssertConnectedRepository($project, $githubConfiguration)) {
-        return ['ready' => false, 'reason' => $error];
-    }
-    $status = gitStatus($project, $githubConfiguration);
-    if (in_array((string)$status['status'], ['INITIALIZATION INCOMPLETE', 'NOT INITIALIZED', 'INVALID REPOSITORY', 'REMOTE UNAVAILABLE'], true)) {
-        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Projects before creating tasks.'];
-    }
-    if (in_array((string)$status['status'], ['AHEAD', 'AHEAD / BEHIND', 'CHANGES PRESENT'], true)) {
+    $status = is_array($readiness['git_status'] ?? null) ? $readiness['git_status'] : [];
+    if (in_array((string)($status['status'] ?? ''), ['AHEAD', 'AHEAD / BEHIND', 'CHANGES PRESENT'], true)) {
         return ['ready' => false, 'reason' => 'Repository synchronization is pending. Use Push in Projects before creating another task.'];
     }
-    if ((string)$status['status'] !== 'CONNECTED') {
+    if ((string)($status['status'] ?? '') !== 'CONNECTED') {
         return ['ready' => false, 'reason' => 'Repository is not ready for task creation. Review Git status in Projects.'];
     }
 

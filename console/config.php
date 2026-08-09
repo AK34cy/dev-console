@@ -106,6 +106,15 @@ function devConsoleEmptyProject(): array
             'production_routing_verified' => null,
             'preview_routing_verified' => null,
         ],
+        'setup' => [
+            'status' => 'Not configured',
+            'server_id' => null,
+            'timestamp' => null,
+            'message' => null,
+            'preview_site' => null,
+            'production_site' => null,
+            'apache_version' => null,
+        ],
     ];
 }
 
@@ -194,6 +203,17 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         foreach (['production_routing_verified', 'preview_routing_verified'] as $field) {
             if (array_key_exists($field, $provisioningInput)) {
                 $project['provisioning'][$field] = $provisioningInput[$field] === null ? null : !empty($provisioningInput[$field]);
+            }
+        }
+
+        $setupInput = is_array($projectInput['setup'] ?? null) ? $projectInput['setup'] : [];
+        if (isset($setupInput['status']) && is_scalar($setupInput['status']) && in_array((string)$setupInput['status'], ['Not configured', 'Configured', 'Failed'], true)) {
+            $project['setup']['status'] = (string)$setupInput['status'];
+        }
+        foreach (['server_id', 'timestamp', 'message', 'preview_site', 'production_site', 'apache_version'] as $field) {
+            if (array_key_exists($field, $setupInput)) {
+                $value = $setupInput[$field];
+                $project['setup'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
             }
         }
 

@@ -456,8 +456,11 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
         return $status;
     }
 
+    $configuredBranch = (string)($project['branch'] ?? '');
+    $currentBranch = gitCurrentBranch($path);
+    $branch = $configuredBranch !== '' ? $configuredBranch : $currentBranch;
     $status['status'] = 'INITIALIZATION INCOMPLETE';
-    $status['branch'] = gitCurrentBranch($path);
+    $status['branch'] = $currentBranch !== '' ? $currentBranch : $branch;
     $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5);
     if ($remote['exit_code'] !== 0) {
         $status['diagnostic'] = 'Origin remote is not configured.';
@@ -483,9 +486,14 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
     $dirty = $porcelain['exit_code'] === 0 && trim((string)$porcelain['stdout']) !== '';
     $status['working_tree'] = $dirty ? 'Dirty' : 'Clean';
 
-    $originHead = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', 'origin/main'], 5);
+    if ($branch === '') {
+        $status['diagnostic'] = 'Configured branch is not available.';
+        return $status;
+    }
+    $originBranch = 'origin/' . $branch;
+    $originHead = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', $originBranch], 5);
     if ($originHead['exit_code'] !== 0) {
-        $status['diagnostic'] = 'Remote branch origin/main has not been verified.';
+        $status['diagnostic'] = 'Remote branch ' . $originBranch . ' has not been verified.';
         return $status;
     }
     $status['remote_commit'] = trim((string)$originHead['stdout']);
@@ -494,31 +502,58 @@ function gitStatus(array $project, ?array $githubConfiguration = null): array
         $status['pull_disabled_reason'] = 'Working tree must be clean before pulling.';
     }
 
-    $counts = gitRunFixedCommand(['git', '-C', $path, 'rev-list', '--left-right', '--count', 'HEAD...origin/main'], 5);
+    $counts = gitRunFixedCommand(['git', '-C', $path, 'rev-list', '--left-right', '--count', 'HEAD...' . $originBranch], 5);
     if ($counts['exit_code'] === 0 && preg_match('/^(\d+)\s+(\d+)$/', trim((string)$counts['stdout']), $matches) === 1) {
         $status['ahead'] = (int)$matches[1];
         $status['behind'] = (int)$matches[2];
     }
-    if (empty($project['git']['remote_verified']) && (string)($project['git']['last_error_at'] ?? '') !== '' && $bootstrapStatus === 'ready') {
-        $status['status'] = 'REMOTE UNAVAILABLE';
-        $status['diagnostic'] = 'Last authenticated remote access failed.';
-        return $status;
-    }
-    if ($bootstrapStatus === 'ready' && !empty($project['git']['remote_verified'])) {
-        if ($dirty) {
-            $status['status'] = 'CHANGES PRESENT';
-        } elseif (($status['ahead'] ?? 0) > 0 && ($status['behind'] ?? 0) > 0) {
-            $status['status'] = 'AHEAD / BEHIND';
-        } elseif (($status['ahead'] ?? 0) > 0) {
-            $status['status'] = 'AHEAD';
-        } elseif (($status['behind'] ?? 0) > 0) {
-            $status['status'] = 'BEHIND';
-        } elseif ($status['branch'] === 'main' && $status['local_commit'] === $status['remote_commit']) {
-            $status['status'] = 'CONNECTED';
-        }
+    if ($dirty) {
+        $status['status'] = 'CHANGES PRESENT';
+    } elseif (($status['ahead'] ?? 0) > 0 && ($status['behind'] ?? 0) > 0) {
+        $status['status'] = 'AHEAD / BEHIND';
+    } elseif (($status['ahead'] ?? 0) > 0) {
+        $status['status'] = 'AHEAD';
+    } elseif (($status['behind'] ?? 0) > 0) {
+        $status['status'] = 'BEHIND';
+    } elseif ($status['local_commit'] !== '' && $status['local_commit'] === $status['remote_commit']) {
+        $status['status'] = 'CONNECTED';
     }
 
     return $status;
+}
+
+function gitRepositoryReadiness(array $project, ?array $githubConfiguration = null): array
+{
+    $status = gitStatus($project, $githubConfiguration);
+    $state = (string)($status['status'] ?? '');
+    $readyStates = ['CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND'];
+    if (in_array($state, $readyStates, true)) {
+        return [
+            'ready' => true,
+            'reason' => '',
+            'status' => $state,
+            'git_status' => $status,
+        ];
+    }
+
+    $reason = (string)($status['diagnostic'] ?? '');
+    if ($reason === '') {
+        $reason = match ($state) {
+            'GitHub not configured' => 'GitHub is not configured.',
+            'NOT INITIALIZED' => 'Repository is not initialized. Initialize Repository in Projects before creating tasks.',
+            'INITIALIZATION INCOMPLETE' => 'Repository initialization is incomplete. Review Git status in Projects.',
+            'INVALID REPOSITORY' => 'Repository path is not a valid Project Git repository.',
+            'REMOTE UNAVAILABLE' => 'Repository remote is unavailable. Use Fetch or Push in Projects to refresh status.',
+            default => 'Repository is not ready. Review Git status in Projects.',
+        };
+    }
+
+    return [
+        'ready' => false,
+        'reason' => $reason,
+        'status' => $state,
+        'git_status' => $status,
+    ];
 }
 
 function gitSetMetadata(array $project, array $metadata): array
@@ -1222,7 +1257,8 @@ function gitAssertConnectedRepository(array $project, array $githubConfiguration
     $expectedClone = gitExpectedCloneUrl($project, $githubConfiguration);
     $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
     if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') return 'Repository is not a valid Git working tree.';
-    if (gitCurrentBranch($path) !== 'main') return 'Current branch does not match project branch.';
+    $branch = (string)($project['branch'] ?? '');
+    if ($branch === '' || gitCurrentBranch($path) !== $branch) return 'Current branch does not match project branch.';
     $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5, [], false);
     if ($remote['exit_code'] !== 0 || !gitRemoteUrlMatchesExpected(trim((string)$remote['stdout']), $project, $githubConfiguration)) return 'Repository origin no longer matches the GitHub repository.';
     if ($expectedRemote === '' || $expectedClone === '') return 'Repository metadata does not match the configured GitHub account.';

@@ -234,6 +234,357 @@ function projectGenerateVhost(array $project, string $environment, string $docum
         "</VirtualHost>\n";
 }
 
+function projectRemoteEnvironmentVhostName(array $project, string $environment): string
+{
+    $projectId = (string)($project['id'] ?? '');
+    if (!projectSafeId($projectId) || !in_array($environment, ['production', 'preview'], true)) {
+        throw new RuntimeException('Invalid project identifier.');
+    }
+
+    return $projectId . '-' . $environment . '.conf';
+}
+
+function projectRemoteVhostPath(array $project, string $environment, string $availableDir = '/etc/apache2/sites-available'): string
+{
+    return rtrim($availableDir, '/') . '/' . projectRemoteEnvironmentVhostName($project, $environment);
+}
+
+function projectGenerateRemoteVhost(array $project, string $environment, string $documentRoot): string
+{
+    $domain = devConsoleNormalizeDomain((string)($project[$environment]['domain'] ?? ''));
+    $logName = projectSafeLogName($project, $environment);
+
+    return DEV_CONSOLE_MANAGED_MARKER . "\n" .
+        '# Project ID: ' . (string)$project['id'] . "\n" .
+        '# Environment: ' . $environment . "\n" .
+        "<VirtualHost *:80>\n" .
+        '    ServerName ' . $domain . "\n\n" .
+        '    DocumentRoot ' . $documentRoot . "\n\n" .
+        '    <Directory ' . $documentRoot . ">\n" .
+        "        Options FollowSymLinks\n" .
+        "        AllowOverride All\n" .
+        "        Require all granted\n" .
+        "    </Directory>\n\n" .
+        '    ErrorLog ${APACHE_LOG_DIR}/' . $logName . "-error.log\n" .
+        '    CustomLog ${APACHE_LOG_DIR}/' . $logName . "-access.log combined\n" .
+        "</VirtualHost>\n";
+}
+
+function projectRemoteSshTarget(array $server): string
+{
+    return (string)$server['user'] . '@' . (string)$server['host'];
+}
+
+function projectRemoteSshBaseArguments(array $server): array
+{
+    $ssh = function_exists('managedServersSshExecutable') ? managedServersSshExecutable() : serverToolsFindExecutable('ssh', serverToolsDefaultPath());
+    if ($ssh === '') {
+        throw new RuntimeException('SSH executable missing.');
+    }
+
+    return [
+        $ssh,
+        '-i', (string)$server['key'],
+        '-p', (string)((int)$server['port']),
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=8',
+        '-o', 'StrictHostKeyChecking=accept-new',
+    ];
+}
+
+function projectRemoteSshArguments(array $server, string $command): array
+{
+    return array_merge(projectRemoteSshBaseArguments($server), [projectRemoteSshTarget($server), $command]);
+}
+
+function projectRemoteScpArguments(array $server, string $localPath, string $remotePath): array
+{
+    $scp = serverToolsFindExecutable('scp', serverToolsDefaultPath());
+    if ($scp === '') {
+        throw new RuntimeException('SCP executable missing.');
+    }
+
+    return [
+        $scp,
+        '-i', (string)$server['key'],
+        '-P', (string)((int)$server['port']),
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=8',
+        '-o', 'StrictHostKeyChecking=accept-new',
+        $localPath,
+        projectRemoteSshTarget($server) . ':' . $remotePath,
+    ];
+}
+
+function projectRemoteCommandDisplay(array $server, string $command): string
+{
+    return 'ssh [managed-server-options] ' . projectRemoteSshTarget($server) . ' ' . escapeshellarg($command);
+}
+
+function projectRemoteRun(array $server, string $command, array &$log, int $timeout = 30): array
+{
+    $log[] = '$ ' . projectRemoteCommandDisplay($server, $command);
+    $result = processRunCommand(projectRemoteSshArguments($server, $command), [
+        'timeout' => $timeout,
+        'env' => ['PATH' => serverToolsDefaultPath()],
+        'inherit_env' => false,
+    ]);
+    $log[] = 'Exit code: ' . (string)$result['exit_code'];
+    if (trim((string)$result['output']) !== '') {
+        $log[] = trim((string)$result['output']);
+    }
+
+    return $result;
+}
+
+function projectRemoteScp(array $server, string $localPath, string $remotePath, array &$log): array
+{
+    $log[] = '$ scp [managed-server-options] ' . basename($localPath) . ' ' . projectRemoteSshTarget($server) . ':' . $remotePath;
+    $result = processRunCommand(projectRemoteScpArguments($server, $localPath, $remotePath), [
+        'timeout' => 30,
+        'env' => ['PATH' => serverToolsDefaultPath()],
+        'inherit_env' => false,
+    ]);
+    $log[] = 'Exit code: ' . (string)$result['exit_code'];
+    if (trim((string)$result['output']) !== '') {
+        $log[] = trim((string)$result['output']);
+    }
+
+    return $result;
+}
+
+function projectRemoteShellPath(string $path): string
+{
+    return escapeshellarg(projectNormalizePath($path));
+}
+
+function projectRemoteShellValue(string $value): string
+{
+    return escapeshellarg($value);
+}
+
+function projectRemoteValidateServer(array $server): void
+{
+    if ((string)($server['status'] ?? '') !== 'reachable') {
+        throw new RuntimeException('Managed Server is not reachable.');
+    }
+    if (!is_file((string)($server['key'] ?? '')) || !is_readable((string)($server['key'] ?? ''))) {
+        throw new RuntimeException('SSH key exists check failed.');
+    }
+}
+
+function projectRemoteSetupMetadata(array $project): array
+{
+    $setup = is_array($project['setup'] ?? null) ? $project['setup'] : [];
+    return [
+        'status' => (string)($setup['status'] ?? 'Not configured'),
+        'server_id' => (string)($setup['server_id'] ?? ''),
+        'timestamp' => (string)($setup['timestamp'] ?? ''),
+        'message' => (string)($setup['message'] ?? ''),
+        'preview_site' => (string)($setup['preview_site'] ?? ''),
+        'production_site' => (string)($setup['production_site'] ?? ''),
+        'apache_version' => (string)($setup['apache_version'] ?? ''),
+    ];
+}
+
+function projectRemoteApacheConfigIsManagedCommand(string $path, array $project, string $environment): string
+{
+    return 'test ! -e ' . projectRemoteShellPath($path)
+        . ' || (grep -F ' . projectRemoteShellValue(DEV_CONSOLE_MANAGED_MARKER) . ' ' . projectRemoteShellPath($path) . ' >/dev/null'
+        . ' && grep -F ' . projectRemoteShellValue('# Project ID: ' . (string)$project['id']) . ' ' . projectRemoteShellPath($path) . ' >/dev/null'
+        . ' && grep -F ' . projectRemoteShellValue('# Environment: ' . $environment) . ' ' . projectRemoteShellPath($path) . ' >/dev/null)';
+}
+
+function projectRemoteInstallSite(array $server, array $project, string $environment, string $content, string $availableDir, array &$log, array &$installedSites): void
+{
+    $siteName = projectRemoteEnvironmentVhostName($project, $environment);
+    $remotePath = rtrim($availableDir, '/') . '/' . $siteName;
+    $check = projectRemoteRun($server, projectRemoteApacheConfigIsManagedCommand($remotePath, $project, $environment), $log);
+    if ($check['exit_code'] !== 0) {
+        throw new RuntimeException('Conflicting Apache site already exists: ' . $siteName);
+    }
+
+    $exists = projectRemoteRun($server, 'test -e ' . projectRemoteShellPath($remotePath), $log);
+    $hadExisting = $exists['exit_code'] === 0;
+    $tmpRemote = '/tmp/iovon-dev-console-' . (string)$project['id'] . '-' . $environment . '-' . bin2hex(random_bytes(6)) . '.conf';
+    $backupRemote = '/tmp/iovon-dev-console-' . (string)$project['id'] . '-' . $environment . '-' . bin2hex(random_bytes(6)) . '.bak';
+    $localTmp = tempnam(sys_get_temp_dir(), 'dev-console-vhost-');
+    if ($localTmp === false || file_put_contents($localTmp, $content, LOCK_EX) === false) {
+        throw new RuntimeException(ucfirst($environment) . ' VirtualHost could not be installed.');
+    }
+    @chmod($localTmp, 0600);
+
+    try {
+        $copy = projectRemoteScp($server, $localTmp, $tmpRemote, $log);
+        if ($copy['exit_code'] !== 0) {
+            throw new RuntimeException(ucfirst($environment) . ' VirtualHost could not be installed.');
+        }
+        $installCommand = ($hadExisting ? 'cp -- ' . projectRemoteShellPath($remotePath) . ' ' . projectRemoteShellPath($backupRemote) . ' && ' : '')
+            . 'install -m 0644 -- ' . projectRemoteShellPath($tmpRemote) . ' ' . projectRemoteShellPath($remotePath)
+            . ' && rm -f -- ' . projectRemoteShellPath($tmpRemote);
+        $install = projectRemoteRun($server, $installCommand, $log);
+        if ($install['exit_code'] !== 0) {
+            throw new RuntimeException(ucfirst($environment) . ' VirtualHost could not be installed.');
+        }
+        $installedSites[] = [
+            'path' => $remotePath,
+            'backup' => $hadExisting ? $backupRemote : '',
+            'created' => !$hadExisting,
+        ];
+        $log[] = ucfirst($environment) . ' site installed: ' . $siteName;
+    } finally {
+        if ($localTmp !== false && is_file($localTmp)) {
+            @unlink($localTmp);
+        }
+    }
+}
+
+function projectRemoteRollbackInstalledSites(array $server, array $installedSites, array &$log): void
+{
+    foreach (array_reverse($installedSites) as $site) {
+        $path = (string)($site['path'] ?? '');
+        $backup = (string)($site['backup'] ?? '');
+        if ($path === '') {
+            continue;
+        }
+        if ($backup !== '') {
+            projectRemoteRun($server, 'if [ -e ' . projectRemoteShellPath($backup) . ' ]; then mv -- ' . projectRemoteShellPath($backup) . ' ' . projectRemoteShellPath($path) . '; fi', $log);
+            $log[] = 'Restored previous remote Apache config: ' . basename($path);
+        } elseif (!empty($site['created'])) {
+            projectRemoteRun($server, 'rm -f -- ' . projectRemoteShellPath($path), $log);
+            $log[] = 'Removed newly created remote Apache config: ' . basename($path);
+        }
+    }
+}
+
+function projectRemoteSetup(array $configuration, string $projectId, array $options = []): array
+{
+    $project = devConsoleFindProjectById($configuration, $projectId);
+    if ($project === null) {
+        return projectActionResult(false, 'Project not found.');
+    }
+
+    $log = [];
+    $installedSites = [];
+    $server = null;
+    $availableDir = '/etc/apache2/sites-available';
+    $enabledDir = '/etc/apache2/sites-enabled';
+    $apacheVersion = '';
+
+    try {
+        $serverId = (string)($project['managed_server_id'] ?? '');
+        if ($serverId === '') {
+            throw new RuntimeException('Project does not have a Managed Server.');
+        }
+        $servers = is_array($options['managed_servers'] ?? null)
+            ? $options['managed_servers']
+            : (function_exists('managedServersLoad') ? managedServersLoad() : []);
+        $server = function_exists('managedServersFind') ? managedServersFind($servers, $serverId) : null;
+        if ($server === null) {
+            throw new RuntimeException('Managed Server not found.');
+        }
+        projectRemoteValidateServer($server);
+        if (!devConsoleProjectUsesGeneratedEnvironmentPaths($project)) {
+            throw new RuntimeException('This project uses custom environment paths and cannot be set up automatically.');
+        }
+        projectValidateStoredConfiguration($configuration, $project);
+        $paths = projectAssertManagedPathPolicy($project);
+
+        $diagnosticCommand = 'command -v apache2 && command -v apache2ctl && command -v a2ensite && command -v systemctl && apache2 -v && test -d /etc/apache2/sites-available && test -d /etc/apache2/sites-enabled && id -u';
+        $diagnostics = projectRemoteRun($server, $diagnosticCommand, $log);
+        if ($diagnostics['exit_code'] !== 0) {
+            throw new RuntimeException('Apache is not installed or the server uses an unsupported Apache layout.');
+        }
+        $diagnosticLines = array_values(array_filter(array_map('trim', preg_split('/\R/', (string)$diagnostics['stdout']) ?: []), static fn(string $line): bool => $line !== ''));
+        $apacheVersion = implode(' ', array_values(array_filter($diagnosticLines, static fn(string $line): bool => str_starts_with($line, 'Server version:'))));
+        $remoteUid = (string)end($diagnosticLines);
+        if ($remoteUid !== '0') {
+            throw new RuntimeException('Remote deployment user needs root or appropriate non-interactive privileges for Apache setup.');
+        }
+
+        foreach (['preview', 'production'] as $environment) {
+            $path = $paths[$environment];
+            $prepare = 'mkdir -p -- ' . projectRemoteShellPath($path)
+                . ' && chmod 755 -- ' . projectRemoteShellPath($path)
+                . ' && test -d ' . projectRemoteShellPath($path)
+                . ' && test -r ' . projectRemoteShellPath($path)
+                . ' && test -w ' . projectRemoteShellPath($path);
+            $result = projectRemoteRun($server, $prepare, $log);
+            if ($result['exit_code'] !== 0) {
+                throw new RuntimeException('Project directory cannot be created: ' . $path);
+            }
+            $log[] = ucfirst($environment) . ' directory ready: ' . $path;
+        }
+
+        foreach (['preview', 'production'] as $environment) {
+            projectRemoteInstallSite($server, $project, $environment, projectGenerateRemoteVhost($project, $environment, $paths[$environment]), $availableDir, $log, $installedSites);
+        }
+
+        foreach (['preview', 'production'] as $environment) {
+            $siteName = projectRemoteEnvironmentVhostName($project, $environment);
+            $enable = projectRemoteRun($server, 'a2ensite ' . escapeshellarg($siteName), $log);
+            if ($enable['exit_code'] !== 0) {
+                throw new RuntimeException('Unable to enable ' . $environment . ' site.');
+            }
+        }
+
+        $configtest = projectRemoteRun($server, 'apache2ctl configtest', $log);
+        if ($configtest['exit_code'] !== 0) {
+            projectRemoteRollbackInstalledSites($server, $installedSites, $log);
+            throw new RuntimeException('Apache configtest failed.');
+        }
+        $reload = projectRemoteRun($server, 'systemctl reload apache2', $log);
+        if ($reload['exit_code'] !== 0) {
+            throw new RuntimeException('Apache reload failed.');
+        }
+
+        $project['provisioning'] = [
+            'managed' => true,
+            'provisioned_at' => date('c'),
+            'production_vhost' => projectRemoteEnvironmentVhostName($project, 'production'),
+            'preview_vhost' => projectRemoteEnvironmentVhostName($project, 'preview'),
+            'routing_verified_at' => null,
+            'production_routing_verified' => null,
+            'preview_routing_verified' => null,
+        ];
+        $project['setup'] = [
+            'status' => 'Configured',
+            'server_id' => $serverId,
+            'timestamp' => $project['provisioning']['provisioned_at'],
+            'message' => 'Remote Apache setup completed.',
+            'preview_site' => projectRemoteEnvironmentVhostName($project, 'preview'),
+            'production_site' => projectRemoteEnvironmentVhostName($project, 'production'),
+            'apache_version' => $apacheVersion,
+        ];
+        if (empty($options['skip_save'])) {
+            $updatedConfiguration = devConsoleTouchProject(devConsoleReplaceProject($configuration, $project), (string)$project['id']);
+            if (!devConsoleSaveProjectConfiguration($updatedConfiguration)) {
+                throw new RuntimeException('Unable to save setup metadata.');
+            }
+        }
+
+        return projectActionResult(true, 'Remote Project setup completed.', $log);
+    } catch (Throwable $exception) {
+        if (is_array($server)) {
+            projectRemoteRollbackInstalledSites($server, $installedSites, $log);
+        }
+        $project['setup'] = [
+            'status' => 'Failed',
+            'server_id' => (string)($project['managed_server_id'] ?? ''),
+            'timestamp' => date('c'),
+            'message' => $exception->getMessage(),
+            'preview_site' => projectSafeId((string)($project['id'] ?? '')) ? projectRemoteEnvironmentVhostName($project, 'preview') : '',
+            'production_site' => projectSafeId((string)($project['id'] ?? '')) ? projectRemoteEnvironmentVhostName($project, 'production') : '',
+            'apache_version' => $apacheVersion,
+        ];
+        if (empty($options['skip_save'])) {
+            @devConsoleSaveProjectConfiguration(devConsoleTouchProject(devConsoleReplaceProject($configuration, $project), (string)($project['id'] ?? '')));
+        }
+
+        return projectActionResult(false, $exception->getMessage(), $log);
+    }
+}
+
 function projectVhostMatches(string $path, array $project, string $environment, string $documentRoot): bool
 {
     if (!projectVhostMarkersMatch($path, $project, $environment)) {
@@ -469,6 +820,33 @@ function projectEnvironmentStatus(array $project, string $environment, string $a
 
 function projectStatus(array $project, string $availableDir = '/etc/apache2/sites-available', string $enabledDir = '/etc/apache2/sites-enabled'): array
 {
+    if ((string)($project['managed_server_id'] ?? '') !== '') {
+        $setup = projectRemoteSetupMetadata($project);
+        $configured = $setup['status'] === 'Configured';
+        $failed = $setup['status'] === 'Failed';
+        $environmentStatus = static function (string $environment) use ($project, $setup, $configured): array {
+            $siteField = $environment === 'production' ? 'production_site' : 'preview_site';
+            return [
+                'directory_exists' => $configured,
+                'vhost_exists' => $configured,
+                'site_enabled' => $configured,
+                'server_name_matches' => $configured,
+                'document_root_matches' => $configured,
+                'vhost_name' => (string)$setup[$siteField],
+                'routing_status' => $configured ? 'Prepared' : 'Not verified',
+                'routing_verified_at' => (string)$setup['timestamp'],
+                'remote_path' => (string)($project[$environment]['path'] ?? ''),
+                'remote_domain' => (string)($project[$environment]['domain'] ?? ''),
+            ];
+        };
+
+        return [
+            'label' => $configured ? 'Ready' : ($failed ? 'Incomplete' : 'Not set up'),
+            'production' => $environmentStatus('production'),
+            'preview' => $environmentStatus('preview'),
+        ];
+    }
+
     $production = projectEnvironmentStatus($project, 'production', $availableDir, $enabledDir);
     $preview = projectEnvironmentStatus($project, 'preview', $availableDir, $enabledDir);
     $all = [$production, $preview];
@@ -540,6 +918,9 @@ function projectProvision(array $configuration, string $projectId, array $option
     $project = devConsoleFindProjectById($configuration, $projectId);
     if ($project === null) {
         return projectActionResult(false, 'Project not found.');
+    }
+    if ((string)($project['managed_server_id'] ?? '') !== '') {
+        return projectRemoteSetup($configuration, $projectId, $options);
     }
 
     $availableDir = $options['available_dir'] ?? '/etc/apache2/sites-available';
@@ -1015,7 +1396,7 @@ function operationSummarySteps(string $action, array $result): array
         return ['Local commits pushed', 'Remote branch verified', 'Git status refreshed'];
     }
     if ($action === 'provision_project') {
-        return ['Project directories prepared', 'Apache configuration ready', 'Routing verified'];
+        return ['Project directories prepared', 'Apache configuration ready', 'Apache validated and reloaded'];
     }
     if ($action === 'verify_project_routing') {
         return ['Apache ServerName checked', 'Websites checked'];
