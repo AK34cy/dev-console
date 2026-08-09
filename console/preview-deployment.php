@@ -201,7 +201,8 @@ function previewDeploymentPersist(array $configuration, string $projectId, array
     if ($project === null) {
         return false;
     }
-    $project['preview_deployment'] = array_merge(devConsoleEmptyProject()['preview_deployment'], $metadata);
+    $existing = is_array($project['preview_deployment'] ?? null) ? $project['preview_deployment'] : devConsoleEmptyProject()['preview_deployment'];
+    $project['preview_deployment'] = array_merge(devConsoleEmptyProject()['preview_deployment'], $existing, $metadata);
     $updated = devConsoleUpdateProjectInConfiguration($configuration, $project);
 
     return devConsoleSaveProjectConfiguration($updated);

@@ -118,6 +118,32 @@ function devConsoleEmptyProject(): array
     ];
 }
 
+function devConsoleArrayIsList(array $values): bool
+{
+    return $values === [] || array_keys($values) === range(0, count($values) - 1);
+}
+
+function devConsoleMergeProjectArrays(array $base, array $changes): array
+{
+    $merged = $base;
+    foreach ($changes as $key => $value) {
+        if (
+            is_array($value)
+            && isset($merged[$key])
+            && is_array($merged[$key])
+            && !devConsoleArrayIsList($value)
+            && !devConsoleArrayIsList($merged[$key])
+        ) {
+            $merged[$key] = devConsoleMergeProjectArrays($merged[$key], $value);
+            continue;
+        }
+
+        $merged[$key] = $value;
+    }
+
+    return $merged;
+}
+
 function devConsoleNormalizeProjectConfiguration(array $configuration): array
 {
     $projectsInput = $configuration['projects'] ?? null;
@@ -216,6 +242,8 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
                 $project['setup'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
             }
         }
+
+        $project = devConsoleMergeProjectArrays($projectInput, $project);
 
         if ($project['id'] !== '') {
             $projects[] = $project;
@@ -613,7 +641,8 @@ function devConsoleReplaceProject(array $configuration, array $updatedProject): 
     $configuration = devConsoleNormalizeProjectConfiguration($configuration);
     foreach ($configuration['projects'] as $index => $project) {
         if (($project['id'] ?? '') === ($updatedProject['id'] ?? null)) {
-            $configuration['projects'][$index] = devConsoleNormalizeProjectConfiguration(['projects' => [$updatedProject]])['projects'][0];
+            $mergedProject = devConsoleMergeProjectArrays($project, $updatedProject);
+            $configuration['projects'][$index] = devConsoleNormalizeProjectConfiguration(['projects' => [$mergedProject]])['projects'][0];
             return $configuration;
         }
     }
@@ -882,7 +911,7 @@ function devConsoleUpdateProjectInConfiguration(array $configuration, array $pro
     $configuration = devConsoleNormalizeProjectConfiguration($configuration);
     foreach ($configuration['projects'] as $index => $existing) {
         if ((string)($existing['id'] ?? '') === (string)($project['id'] ?? '')) {
-            $configuration['projects'][$index] = $project;
+            $configuration['projects'][$index] = devConsoleMergeProjectArrays($existing, $project);
             break;
         }
     }
