@@ -4,10 +4,12 @@ require __DIR__ . '/process.php';
 require __DIR__ . '/server-tools.php';
 require __DIR__ . '/servers.php';
 require __DIR__ . '/preview-deployment.php';
+require __DIR__ . '/production-deployment.php';
 require __DIR__ . '/deployment.php';
 require __DIR__ . '/apache.php';
 require __DIR__ . '/projects.php';
 require __DIR__ . '/git.php';
+require __DIR__ . '/tasks.php';
 
 const DEV_CONSOLE_VERSION = '0.1';
 
@@ -138,719 +140,11 @@ function configuredDisplayValue($value): string
     return trim($text) === '' ? 'Not configured' : $text;
 }
 
-function projectMessageName(?array $project, string $fallback = ''): string
-{
-    $name = trim((string)($project['name'] ?? ''));
-    if ($name === '') {
-        $name = trim($fallback);
-    }
-
-    return $name === '' ? 'Project' : $name;
-}
-
-function relativePath(string $repoRoot, string $path): string
-{
-    return ltrim(str_replace($repoRoot, '', $path), '/');
-}
-
-function taskNumber(int $number): string
-{
-    return sprintf('TASK-%03d', $number);
-}
-
-function shortSha(string $sha): string
-{
-    return preg_match('/^[0-9a-f]{7,40}$/i', $sha) ? substr($sha, 0, 7) : $sha;
-}
-
-function taskMarkdownMetadata(string $body): array
-{
-    $metadata = ['title' => '', 'milestone' => '', 'tag' => '', 'notes' => '', 'commit' => ''];
-    if (preg_match('/^##\s+Title\s*$\R+\s*(.+)$/mi', $body, $matches)) {
-        $metadata['title'] = trim($matches[1]);
-    } elseif (preg_match('/^#\s+(?:TASK-\d{3}\s*[-:]\s*)?(.+)$/mi', $body, $matches)) {
-        $metadata['title'] = trim($matches[1]);
-    }
-
-    $metadataBlock = preg_split('/^\s*---\s*$/m', $body, 2)[0] ?? '';
-    foreach (['milestone', 'tag', 'notes', 'commit'] as $field) {
-        if (preg_match('/^' . preg_quote(ucfirst($field), '/') . ':\s*(.+)$/mi', $metadataBlock, $matches)) {
-            $metadata[$field] = trim($matches[1]);
-        }
-    }
-
-    return $metadata;
-}
-
-function taskSystemMetadata(string $body): array
-{
-    if (preg_match('/\A---\s*\R(.*?)\R---\s*(?:\R|$)/s', $body, $matches) !== 1) {
-        return [];
-    }
-
-    $metadata = [];
-    foreach (preg_split('/\R/', $matches[1]) ?: [] as $line) {
-        if (preg_match('/^([a-z0-9_]+):\s*(.*?)\s*$/i', $line, $lineMatches) === 1) {
-            $metadata[strtolower($lineMatches[1])] = trim($lineMatches[2], " \t\"'");
-        }
-    }
-
-    return $metadata;
-}
-
-function taskProjectId(string $body): string
-{
-    $metadata = taskSystemMetadata($body);
-    if (isset($metadata['project_id']) && projectSafeId((string)$metadata['project_id'])) {
-        return (string)$metadata['project_id'];
-    }
-
-    return '';
-}
-
-function taskBodyWithProjectMetadata(string $body, string $projectId): string
-{
-    return taskMetadataBlock($projectId) . "\n\n" . rtrim(taskEditableBody($body));
-}
-
-function taskMetadataBlock(string $projectId): string
-{
-    return "---\nproject_id: " . $projectId . "\n---";
-}
-
-function taskEditableBody(string $body): string
-{
-    return preg_replace('/\A---\s*\R.*?\R---\s*(?:\R|$)/s', '', $body, 1) ?? $body;
-}
-
-function taskDefaultTemplate(string $taskId): string
-{
-    return "# {$taskId}\n\n## Title\n\n...\n";
-}
-
-function taskBelongsToProject(string $body, string $projectId, bool $allowImplicitOwnership): bool
-{
-    $metadataProjectId = taskProjectId($body);
-    if ($metadataProjectId !== '') {
-        return $metadataProjectId === $projectId;
-    }
-
-    return $allowImplicitOwnership;
-}
-
-function taskStorageContexts(array $configuration, ?array $project): array
-{
-    if ($project === null) {
-        return [];
-    }
-
-    $projectId = (string)($project['id'] ?? '');
-    $projectRoot = devConsoleProjectTaskRoot($configuration, $project);
-    $contexts = [[
-        'source' => 'project',
-        'root' => $projectRoot,
-        'todo' => $projectRoot . '/TASKS/TODO',
-        'done' => $projectRoot . '/TASKS/DONE',
-        'attachments' => $projectRoot . '/TASKS/ATTACHMENTS',
-        'allow_implicit_ownership' => true,
-    ]];
-
-    // Legacy compatibility: before Project-specific repositories, the first/default
-    // Project used /var/www/TASKS. Those legacy files are associated only with that
-    // first Project and are never copied or shown for other Projects.
-    if ($projectId !== '' && $projectId === devConsoleFirstProjectId($configuration)) {
-        $legacyRoot = dirname(devConsoleRepositoryRoot());
-        if ($legacyRoot !== $projectRoot) {
-            $contexts[] = [
-                'source' => 'legacy',
-                'root' => $legacyRoot,
-                'todo' => $legacyRoot . '/TASKS/TODO',
-                'done' => $legacyRoot . '/TASKS/DONE',
-                'attachments' => $legacyRoot . '/TASKS/ATTACHMENTS',
-                'allow_implicit_ownership' => true,
-            ];
-        }
-    }
-
-    return $contexts;
-}
-
-function taskContextForSource(array $contexts, string $source): ?array
-{
-    foreach ($contexts as $context) {
-        if ((string)$context['source'] === $source) {
-            return $context;
-        }
-    }
-
-    return null;
-}
-
-function taskGitMetadata(string $repoRoot): array
-{
-    $cachePath = DEPLOY_STATE_DIR . '/task-git-metadata-' . substr(hash('sha256', $repoRoot), 0, 16) . '.json';
-    if (is_file($cachePath) && time() - (filemtime($cachePath) ?: 0) < 60) {
-        $cached = json_decode((string)file_get_contents($cachePath), true);
-        if (is_array($cached)) return $cached;
-    }
-
-    $metadata = ['commits' => [], 'tags' => []];
-    $history = deploymentCommand(['git', '-C', $repoRoot, 'log', '--format=@@%H%x09%s', '--name-only', '--', 'TASKS/TODO', 'TASKS/DONE']);
-    if ($history['exit_code'] === 0) {
-        $currentCommit = '';
-        foreach (preg_split('/\R/', $history['stdout']) ?: [] as $line) {
-            if (str_starts_with($line, '@@')) {
-                [$currentCommit] = explode("\t", substr($line, 2), 2);
-            } elseif ($currentCommit !== '' && preg_match('#^TASKS/(?:TODO|DONE)/(TASK-\d{3})\.md$#', $line, $matches)) {
-                $metadata['commits'][$matches[1]] ??= $currentCommit;
-            }
-        }
-    }
-
-    $tags = deploymentCommand(['git', '-C', $repoRoot, 'for-each-ref', '--format=%(refname:short)%09%(objectname)', 'refs/tags']);
-    if ($tags['exit_code'] === 0) {
-        foreach (preg_split('/\R/', trim($tags['stdout'])) ?: [] as $line) {
-            if ($line === '') continue;
-            [$tag, $commit] = array_pad(explode("\t", $line, 2), 2, '');
-            $tagHistory = deploymentCommand(['git', '-C', $repoRoot, 'log', '-30', '--format=%s', $commit]);
-            if ($tagHistory['exit_code'] !== 0) continue;
-            foreach (preg_split('/\R/', $tagHistory['stdout']) ?: [] as $subject) {
-                if (preg_match('/\bComplete TASK-(\d{3})\b/i', $subject, $matches)) {
-                    $metadata['tags']['TASK-' . $matches[1]][] = $tag;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (!is_dir(DEPLOY_STATE_DIR)) @mkdir(DEPLOY_STATE_DIR, 0750, true);
-    @file_put_contents($cachePath, json_encode($metadata, JSON_UNESCAPED_SLASHES), LOCK_EX);
-    return $metadata;
-}
-
-function taskFileEntriesForContext(array $context, string $projectId): array
-{
-    $entries = [];
-    $gitMetadata = taskGitMetadata((string)$context['root']);
-
-    foreach (['TODO' => (string)$context['todo'], 'DONE' => (string)$context['done']] as $status => $directory) {
-        if (!is_dir($directory)) {
-            continue;
-        }
-
-        foreach (scandir($directory) ?: [] as $entry) {
-            if (!preg_match('/^TASK-(\d{3})\.md$/', $entry, $matches)) {
-                continue;
-            }
-
-            $path = $directory . '/' . $entry;
-            $body = (string)file_get_contents($path);
-            if (!taskBelongsToProject($body, $projectId, !empty($context['allow_implicit_ownership']))) {
-                continue;
-            }
-            $relativePath = relativePath((string)$context['root'], $path);
-            $markdownMetadata = taskMarkdownMetadata($body);
-            $taskId = 'TASK-' . $matches[1];
-            $commit = preg_match('/^[0-9a-f]{7,40}$/i', $markdownMetadata['commit'])
-                ? $markdownMetadata['commit']
-                : (string)($gitMetadata['commits'][$taskId] ?? '');
-            $tag = $markdownMetadata['tag'] !== '' ? $markdownMetadata['tag'] : (string)($gitMetadata['tags'][$taskId][0] ?? '');
-            $entries[] = [
-                'number' => (int)$matches[1],
-                'filename' => $entry,
-                'task_id' => $taskId,
-                'status' => $status,
-                'path' => $path,
-                'relative_path' => $relativePath,
-                'source' => (string)$context['source'],
-                'root' => (string)$context['root'],
-                'project_id' => $projectId,
-                'modified' => filemtime($path) ?: 0,
-                'title' => $markdownMetadata['title'],
-                'milestone' => $markdownMetadata['milestone'],
-                'tag' => $tag,
-                'notes' => $markdownMetadata['notes'],
-                'commit' => $commit,
-            ];
-        }
-    }
-
-    usort($entries, function (array $left, array $right): int {
-        return $right['number'] <=> $left['number'] ?: $right['modified'] <=> $left['modified'];
-    });
-
-    return $entries;
-}
-
-function taskFileEntries(array $contexts, string $projectId): array
-{
-    $entries = [];
-    $seen = [];
-    foreach ($contexts as $context) {
-        foreach (taskFileEntriesForContext($context, $projectId) as $entry) {
-            $key = (string)$entry['task_id'];
-            if (isset($seen[$key])) {
-                continue;
-            }
-            $seen[$key] = true;
-            $entries[] = $entry;
-        }
-    }
-
-    usort($entries, function (array $left, array $right): int {
-        return $right['number'] <=> $left['number'] ?: $right['modified'] <=> $left['modified'];
-    });
-
-    return $entries;
-}
-
-function legacyTasksDetected(array $tasks): bool
-{
-    foreach ($tasks as $task) {
-        if ((string)($task['source'] ?? '') === 'legacy') {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-function groupedTaskEntries(array $tasks, string $runsDir): array
-{
-    $groups = [
-        'TODO' => [],
-        'IN PROGRESS' => [],
-        'DONE' => [],
-    ];
-
-    foreach ($tasks as $task) {
-        $status = (string)($task['status'] ?? '');
-        if ($status === 'DONE') {
-            $groups['DONE'][] = $task;
-            continue;
-        }
-
-        $runStatus = codexRunStatus($runsDir, (string)$task['task_id'], (string)($task['source'] ?? 'project'));
-        if (in_array($runStatus, ['queued', 'running'], true)) {
-            $groups['IN PROGRESS'][] = $task;
-        } else {
-            $groups['TODO'][] = $task;
-        }
-    }
-
-    foreach ($groups as &$groupTasks) {
-        usort($groupTasks, static function (array $left, array $right): int {
-            return ((int)$left['number']) <=> ((int)$right['number']);
-        });
-    }
-    unset($groupTasks);
-
-    return $groups;
-}
-
-function existingTaskNumbers(array $contexts, string $projectId): array
-{
-    $numbers = [];
-
-    foreach (taskFileEntries($contexts, $projectId) as $entry) {
-        if (isset($entry['number'])) {
-            $numbers[] = (int)$entry['number'];
-        }
-    }
-
-    return $numbers;
-}
-
-function taskExists(int $number, array $contexts, string $projectId): bool
-{
-    $taskId = taskNumber($number);
-    foreach (taskFileEntries($contexts, $projectId) as $entry) {
-        if ((string)$entry['task_id'] === $taskId) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-function nextTaskNumber(array $contexts, string $projectId): int
-{
-    $numbers = existingTaskNumbers($contexts, $projectId);
-    $next = empty($numbers) ? 1 : max($numbers) + 1;
-
-    while (taskExists($next, $contexts, $projectId)) {
-        $next++;
-    }
-
-    return $next;
-}
-
-function findTaskForView(array $contexts, string $projectId, string $filename, string $source = ''): ?array
-{
-    if (!preg_match('/^TASK-\d{3}\.md$/', $filename)) {
-        return null;
-    }
-
-    $contextsToInspect = $source === '' ? $contexts : array_values(array_filter([$context = taskContextForSource($contexts, $source)]));
-    $matches = [];
-    foreach ($contextsToInspect as $context) {
-        foreach (['TODO' => (string)$context['todo'], 'DONE' => (string)$context['done']] as $status => $directory) {
-            $path = $directory . '/' . $filename;
-            if (!is_file($path)) {
-                continue;
-            }
-            $body = (string)file_get_contents($path);
-            if (!taskBelongsToProject($body, $projectId, !empty($context['allow_implicit_ownership']))) {
-                continue;
-            }
-            $matches[] = [
-                'filename' => $filename,
-                'task_id' => pathinfo($filename, PATHINFO_FILENAME),
-                'status' => $status,
-                'path' => $path,
-                'relative_path' => relativePath((string)$context['root'], $path),
-                'source' => (string)$context['source'],
-                'root' => (string)$context['root'],
-                'project_id' => $projectId,
-                'body' => $body,
-            ];
-        }
-    }
-
-    return count($matches) === 1 ? $matches[0] : null;
-}
-
-function sanitizeUploadName(string $name): string
-{
-    $name = basename(str_replace('\\', '/', $name));
-    $name = preg_replace('/[\x00-\x1F\x7F]+/', '', $name) ?: '';
-    $name = trim($name);
-
-    return $name === '' || $name === '.' || $name === '..' ? 'attachment' : $name;
-}
-
-function uniqueUploadPath(string $directory, string $filename): string
-{
-    $path = $directory . '/' . $filename;
-
-    if (!file_exists($path)) {
-        return $path;
-    }
-
-    $extension = pathinfo($filename, PATHINFO_EXTENSION);
-    $base = $extension === '' ? $filename : substr($filename, 0, -strlen($extension) - 1);
-
-    for ($index = 2; $index < 1000; $index++) {
-        $candidate = $directory . '/' . $base . '-' . $index . ($extension === '' ? '' : '.' . $extension);
-        if (!file_exists($candidate)) {
-            return $candidate;
-        }
-    }
-
-    throw new RuntimeException('Unable to create a unique attachment filename.');
-}
-
-function attachmentFilesForTask(array $contexts, string $projectId, string $taskId, string $source): array
-{
-    if (!isTaskId($taskId)) {
-        return [];
-    }
-    $context = taskContextForSource($contexts, $source);
-    if ($context === null) {
-        return [];
-    }
-    if (findTaskForView($contexts, $projectId, $taskId . '.md', $source) === null) {
-        return [];
-    }
-
-    $directory = (string)$context['attachments'] . '/' . $taskId;
-
-    if (!is_dir($directory)) {
-        return [];
-    }
-
-    $files = array_values(array_filter(scandir($directory) ?: [], function (string $entry) use ($directory): bool {
-        return $entry !== '.' && $entry !== '..' && is_file($directory . '/' . $entry);
-    }));
-    sort($files, SORT_NATURAL | SORT_FLAG_CASE);
-
-    return $files;
-}
-
-function uploadedAttachments(): array
-{
-    $fileGroup = $_FILES['attachments'] ?? $_FILES['attachment'] ?? null;
-    if (!is_array($fileGroup) || !isset($fileGroup['error'])) {
-        return [];
-    }
-
-    $names = is_array($fileGroup['name']) ? $fileGroup['name'] : [$fileGroup['name']];
-    $tmpNames = is_array($fileGroup['tmp_name']) ? $fileGroup['tmp_name'] : [$fileGroup['tmp_name']];
-    $errors = is_array($fileGroup['error']) ? $fileGroup['error'] : [$fileGroup['error']];
-    $sizes = is_array($fileGroup['size']) ? $fileGroup['size'] : [$fileGroup['size']];
-    $uploads = [];
-
-    foreach ($errors as $index => $error) {
-        if ($error === UPLOAD_ERR_NO_FILE) {
-            continue;
-        }
-
-        $uploads[] = [
-            'name' => (string)($names[$index] ?? ''),
-            'tmp_name' => (string)($tmpNames[$index] ?? ''),
-            'error' => (int)$error,
-            'size' => (int)($sizes[$index] ?? 0),
-        ];
-    }
-
-    return $uploads;
-}
-
-function attachmentPromptText(array $contexts, string $projectId, string $taskId, string $source): string
-{
-    $files = attachmentFilesForTask($contexts, $projectId, $taskId, $source);
-    if (empty($files)) {
-        return '';
-    }
-
-    return "The following attachments are available in TASKS/ATTACHMENTS/{$taskId}/:\n\n- " . implode("\n- ", $files) . "\n\nUse them where appropriate.";
-}
-
-
-function isTaskId(string $taskId): bool
-{
-    return preg_match('/^TASK-\d{3}$/', $taskId) === 1;
-}
-
-function taskFileForId(array $contexts, string $projectId, string $taskId, string $source = ''): ?string
-{
-    if (!isTaskId($taskId)) {
-        return null;
-    }
-
-    $task = findTaskForView($contexts, $projectId, $taskId . '.md', $source);
-    return $task === null ? null : (string)$task['path'];
-}
-
-function todoTaskForId(array $contexts, string $projectId, string $taskId, string $source = ''): ?array
-{
-    if (!isTaskId($taskId)) {
-        return null;
-    }
-
-    $task = findTaskForView($contexts, $projectId, $taskId . '.md', $source);
-    return $task !== null && (string)$task['status'] === 'TODO' ? $task : null;
-}
-
-function todoTaskFileForId(array $contexts, string $projectId, string $taskId, string $source = ''): ?string
-{
-    $task = todoTaskForId($contexts, $projectId, $taskId, $source);
-    return $task === null ? null : (string)$task['path'];
-}
-
-function taskHasAttachment(array $contexts, string $projectId, string $taskId, string $source): bool
-{
-    return !empty(attachmentFilesForTask($contexts, $projectId, $taskId, $source));
-}
-
-function codexPromptForTask(array $contexts, string $projectId, string $taskId, string $source): string
-{
-    $task = todoTaskForId($contexts, $projectId, $taskId, $source);
-    if ($task === null) {
-        throw new RuntimeException('Task file is not in TODO.');
-    }
-
-    $prompt = "Execute TASKS/TODO/{$taskId}.md.
-
-Follow AGENTS.md.
-
-Work in repository:
-" . (string)$task['root'];
-
-    $attachmentPrompt = attachmentPromptText($contexts, $projectId, $taskId, $source);
-    if ($attachmentPrompt !== '') {
-        $prompt .= "\n\n" . $attachmentPrompt;
-    }
-
-    return $prompt;
-}
-
-function runFile(string $runsDir, string $taskId, string $extension, string $source = 'project'): string
-{
-    if (!isTaskId($taskId)) {
-        throw new RuntimeException('Invalid task id.');
-    }
-    if (!in_array($source, ['project', 'legacy'], true)) {
-        throw new RuntimeException('Invalid task source.');
-    }
-
-    $prefix = $source === 'project' ? '' : $source . '-';
-    return $runsDir . '/' . $prefix . $taskId . '.' . $extension;
-}
-
-function currentTaskSessionKey(string $projectId): string
-{
-    return 'current_task_' . $projectId;
-}
-
-function currentTaskSourceSessionKey(string $projectId): string
-{
-    return 'current_task_source_' . $projectId;
-}
-
-function saveCurrentTaskSelection(string $projectId, string $taskId, string $source): void
-{
-    if ($projectId === '' || !isTaskId($taskId) || !in_array($source, ['project', 'legacy'], true)) {
-        return;
-    }
-
-    $_SESSION[currentTaskSessionKey($projectId)] = $taskId;
-    $_SESSION[currentTaskSourceSessionKey($projectId)] = $source;
-}
-
-function clearCurrentTaskSelection(string $projectId): void
-{
-    unset($_SESSION[currentTaskSessionKey($projectId)], $_SESSION[currentTaskSourceSessionKey($projectId)]);
-}
-
-function ensureRunsDir(string $runsDir): void
-{
-    if (!is_dir($runsDir) && !mkdir($runsDir, 0755, true)) {
-        throw new RuntimeException('Unable to create runs directory.');
-    }
-}
-
-function statusLabel(string $status): string
-{
-    return match ($status) {
-        'queued' => 'Queued',
-        'running' => 'Running',
-        'completed' => 'Completed',
-        'failed' => 'Failed',
-        default => 'Not started',
-    };
-}
-
-function codexRunStatus(string $runsDir, string $taskId, string $source = 'project'): string
-{
-    $statusPath = runFile($runsDir, $taskId, 'status', $source);
-
-    if (!is_file($statusPath)) {
-        return 'not_started';
-    }
-
-    $status = trim((string)file_get_contents($statusPath));
-
-    return in_array($status, ['queued', 'running', 'completed', 'failed'], true) ? $status : 'failed';
-}
-
-function startCodexRun(array $contexts, string $projectId, string $runsDir, string $taskId, string $source): void
-{
-    if (!isTaskId($taskId)) {
-        throw new RuntimeException('Invalid task id.');
-    }
-
-    if (todoTaskForId($contexts, $projectId, $taskId, $source) === null) {
-        throw new RuntimeException('Task file is not in TODO.');
-    }
-
-    $status = codexRunStatus($runsDir, $taskId, $source);
-    if ($status === 'running' || $status === 'queued') {
-        return;
-    }
-
-    ensureRunsDir($runsDir);
-    $promptPath = runFile($runsDir, $taskId, 'prompt', $source);
-    $statusPath = runFile($runsDir, $taskId, 'status', $source);
-    $logPath = runFile($runsDir, $taskId, 'log', $source);
-    file_put_contents($promptPath, codexPromptForTask($contexts, $projectId, $taskId, $source));
-    file_put_contents($statusPath, 'queued');
-    file_put_contents($logPath, '[' . date('c') . "] Queued Codex run for {$taskId}.\n");
-
-    $worker = __DIR__ . '/run-codex.php';
-    $command = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($taskId) . ' ' . escapeshellarg((string)($GLOBALS['activeProjectId'] ?? '')) . ' ' . escapeshellarg($source) . ' >/dev/null 2>&1 &';
-    exec($command);
-}
-
 function sendJson(array $payload): void
 {
     header('Content-Type: application/json');
     echo json_encode($payload, JSON_UNESCAPED_SLASHES);
 }
-
-function taskGitCommand(array $arguments, string $repoRoot, int $timeoutSeconds = 120): array
-{
-    return processRunCommand(array_merge(['git', '-C', $repoRoot], $arguments), [
-        'cwd' => $repoRoot,
-        'env' => [
-            'GIT_TERMINAL_PROMPT' => '0',
-            'GIT_AUTHOR_NAME' => 'IOVON Dev Console',
-            'GIT_AUTHOR_EMAIL' => 'iovon@iovon.com',
-            'GIT_COMMITTER_NAME' => 'IOVON Dev Console',
-            'GIT_COMMITTER_EMAIL' => 'iovon@iovon.com',
-        ],
-        'inherit_env' => false,
-        'timeout' => $timeoutSeconds,
-    ]);
-}
-
-function taskGitAuthenticatedCommand(array $arguments, string $repoRoot, array $githubConfiguration, int $timeoutSeconds = 120): array
-{
-    return gitRunAuthenticatedCommand(array_merge(['git', '-C', $repoRoot], $arguments), $githubConfiguration, $timeoutSeconds);
-}
-
-function taskRepositoryReadiness(?array $project, array $githubConfiguration): array
-{
-    if ($project === null) {
-        return ['ready' => false, 'reason' => 'Select or create a Project before creating tasks.'];
-    }
-    $path = gitProjectRepositoryPath($project);
-    if ($path === '' || gitValidateProjectRepositoryPath($project) !== null) {
-        return ['ready' => false, 'reason' => 'Repository path is not valid for this Project.'];
-    }
-    if (!is_dir($path) || is_link($path)) {
-        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Projects before creating tasks.'];
-    }
-
-    $inside = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', '--is-inside-work-tree'], 5, [], false);
-    if ($inside['exit_code'] !== 0 || trim((string)$inside['stdout']) !== 'true') {
-        return ['ready' => false, 'reason' => 'Repository is not initialized. Initialize Repository in Projects before creating tasks.'];
-    }
-    if ((string)($project['git']['bootstrap_status'] ?? '') !== 'ready' || empty($project['git']['connected'])) {
-        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Projects before creating tasks.'];
-    }
-    if ($error = gitAssertConnectedRepository($project, $githubConfiguration)) {
-        return ['ready' => false, 'reason' => $error];
-    }
-    $status = gitStatus($project, $githubConfiguration);
-    if (in_array((string)$status['status'], ['INITIALIZATION INCOMPLETE', 'NOT INITIALIZED', 'INVALID REPOSITORY', 'REMOTE UNAVAILABLE'], true)) {
-        return ['ready' => false, 'reason' => 'Repository initialization is incomplete. Use Retry Initialization in Projects before creating tasks.'];
-    }
-    if (in_array((string)$status['status'], ['AHEAD', 'AHEAD / BEHIND', 'CHANGES PRESENT'], true)) {
-        return ['ready' => false, 'reason' => 'Repository synchronization is pending. Use Push in Projects before creating another task.'];
-    }
-    if ((string)$status['status'] !== 'CONNECTED') {
-        return ['ready' => false, 'reason' => 'Repository is not ready for task creation. Review Git status in Projects.'];
-    }
-
-    return ['ready' => true, 'reason' => ''];
-}
-
-function codexCliInstalled(): bool
-{
-    $diagnostics = serverToolsDiagnostics(false);
-    return !empty($diagnostics['tools']['codex']['available_to_service_user']);
-}
-
-function extractCommitHash(string $output): string
-{
-    if (preg_match('/\[[^\s]+\s+([0-9a-f]{7,40})\]/', $output, $matches)) {
-        return $matches[1];
-    }
-
-    return '';
-}
-
 function renderCommandResult(array $result): void
 {
     echo '<section class="result-block">';
@@ -926,65 +220,6 @@ function renderOperationResult(array $result, string $operationLogId, string $do
     <?php
 }
 
-function projectLifecycleLabel(array $project, array $projectStatus): string
-{
-    $status = (string)($projectStatus['label'] ?? 'Not set up');
-    $managed = !empty($project['provisioning']['managed']);
-    if ($status === 'Ready') {
-        return $managed ? 'Ready' : 'Imported';
-    }
-    if ($status === 'Configuration drift' || $status === 'Incomplete') {
-        return $status;
-    }
-
-    return $managed ? 'Not set up' : 'New';
-}
-
-function operationSummarySteps(string $action, array $result): array
-{
-    if (!empty($result['summary_steps']) && is_array($result['summary_steps'])) {
-        return array_values(array_filter(array_map('strval', $result['summary_steps'])));
-    }
-    if (empty($result['success'])) {
-        return [];
-    }
-
-    if ($action === 'initialize_repository') {
-        return [
-            'Local repository prepared',
-            'GitHub repository verified',
-            'First push completed',
-            'Remote branch verified',
-        ];
-    }
-    if ($action === 'fetch_git_repository') {
-        return ['Remote changes fetched', 'Git status refreshed'];
-    }
-    if ($action === 'pull_git_repository') {
-        return ['Remote changes fetched', 'Fast-forward pull completed', 'Git status refreshed'];
-    }
-    if ($action === 'push_git_repository') {
-        return ['Local commits pushed', 'Remote branch verified', 'Git status refreshed'];
-    }
-    if ($action === 'provision_project') {
-        return ['Project directories prepared', 'Apache configuration ready', 'Routing verified'];
-    }
-    if ($action === 'verify_project_routing') {
-        return ['Apache ServerName checked', 'Websites checked'];
-    }
-    if ($action === 'delete_project') {
-        return ['Managed Apache configuration removed', 'Managed project directories removed', 'Git repository preserved'];
-    }
-    if ($action === 'cleanup_orphaned_project') {
-        return ['Orphaned Apache configuration removed', 'Orphaned project directories removed', 'Git repositories preserved'];
-    }
-    if ($action === 'remove_project') {
-        return ['Project registration removed', 'Server files preserved'];
-    }
-
-    return [];
-}
-
 $taskContexts = taskStorageContexts($projectConfiguration, $activeProject);
 $nextNumber = $activeProjectId === '' ? 1 : nextTaskNumber($taskContexts, $activeProjectId);
 $latestTasks = $activeProjectId === '' ? [] : taskFileEntries($taskContexts, $activeProjectId);
@@ -1029,6 +264,7 @@ $taskRepositoryReadiness = taskRepositoryReadiness($activeProject, $githubConfig
 $taskCreationReady = !empty($taskRepositoryReadiness['ready']);
 $taskCreationUnavailableReason = (string)($taskRepositoryReadiness['reason'] ?? '');
 $codexCliReady = codexCliInstalled();
+$codexAuthReady = $codexCliReady && codexCliAuthenticated();
 $requestMethod = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $action = (string)($_GET['action'] ?? $_POST['action'] ?? '');
 
@@ -1039,11 +275,11 @@ if ($action === 'codex-status') {
         if (!isTaskId($taskId)) {
             throw new RuntimeException('Invalid task id.');
         }
-        if ($activeProjectId === '' || todoTaskForId($taskContexts, $activeProjectId, $taskId, $taskSource) === null) {
+        if ($activeProjectId === '' || findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', $taskSource) === null) {
             throw new RuntimeException('Task does not belong to the active Project.');
         }
         $status = codexRunStatus($runsDir, $taskId, $taskSource);
-        sendJson(['ok' => true, 'task' => $taskId, 'status' => $status, 'label' => statusLabel($status)]);
+        sendJson(['ok' => true, 'task' => $taskId, 'status' => $status, 'label' => statusLabel($status), 'result' => codexRunResult($runsDir, $taskId, $taskSource)]);
     } catch (Throwable $exception) {
         http_response_code(400);
         sendJson(['ok' => false, 'error' => $exception->getMessage()]);
@@ -1054,7 +290,7 @@ if ($action === 'codex-status') {
 if ($action === 'codex-log') {
     $taskId = (string)($_GET['task'] ?? '');
     $taskSource = (string)($_GET['task_source'] ?? 'project');
-    if (!isTaskId($taskId) || $activeProjectId === '' || todoTaskForId($taskContexts, $activeProjectId, $taskId, $taskSource) === null) {
+    if (!isTaskId($taskId) || $activeProjectId === '' || findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', $taskSource) === null) {
         http_response_code(400);
         header('Content-Type: text/plain; charset=UTF-8');
         echo 'Task does not belong to the active Project.';
@@ -1131,6 +367,20 @@ if ($action === 'preview-deployment-status') {
     exit;
 }
 
+if ($action === 'production-deployment-status') {
+    $operationId = is_scalar($_GET['id'] ?? null) ? (string)$_GET['id'] : '';
+    try {
+        if (!productionDeploymentValidateOperationId($operationId)) {
+            throw new RuntimeException('Invalid Production deployment operation ID.');
+        }
+        sendJson(['ok' => true, 'operation' => productionDeploymentStatus($operationId)]);
+    } catch (Throwable $exception) {
+        http_response_code(400);
+        sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+    }
+    exit;
+}
+
 if ($action === 'environment-status') {
     sendJson(['ok' => true, 'dashboard' => operationalDashboard()]);
     exit;
@@ -1169,6 +419,28 @@ if ($action === 'deploy_preview_managed') {
     exit;
 }
 
+if ($action === 'deploy_production_managed') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        http_response_code(403);
+        sendJson(['ok' => false, 'error' => 'Invalid Production deployment request.']);
+    } else {
+        try {
+            if ($activeProject === null) {
+                throw new RuntimeException('Select a Project before deploying Production.');
+            }
+            if ((string)($_POST['confirm'] ?? '') !== '1') {
+                throw new RuntimeException('Production deployment confirmation is required.');
+            }
+            $operation = productionDeploymentStart(devConsoleLoadProjectConfiguration(), $activeProjectId);
+            sendJson(['ok' => true, 'operation' => $operation]);
+        } catch (Throwable $exception) {
+            http_response_code(400);
+            sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+        }
+    }
+    exit;
+}
+
 if ($action === 'managed-server-operation-status') {
     $operationId = is_scalar($_GET['id'] ?? null) ? (string)$_GET['id'] : '';
     try {
@@ -1197,8 +469,14 @@ if ($action === 'run-codex' && $requestMethod === 'POST') {
     $taskId = (string)($_POST['task'] ?? '');
     $taskSource = (string)($_POST['task_source'] ?? 'project');
     try {
+        if (!hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+            throw new RuntimeException('Invalid Codex request.');
+        }
         if (!$codexCliReady) {
             throw new RuntimeException('Codex CLI is not installed on this server.');
+        }
+        if (!$codexAuthReady) {
+            throw new RuntimeException('Codex CLI is not authenticated for the Dev Console service user.');
         }
         startCodexRun($taskContexts, $activeProjectId, $runsDir, $taskId, $taskSource);
         $status = codexRunStatus($runsDir, $taskId, $taskSource);
@@ -1462,8 +740,11 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     exit;
 }
 
-if ($requestMethod === 'POST' && !in_array($action, array_merge(apacheAllowedActions(), ['refresh_server_diagnostics', 'server_tool_action', 'create_project', 'update_project', 'select_active_project', 'provision_project', 'remove_project', 'delete_project', 'verify_project_routing', 'initialize_repository', 'fetch_git_repository', 'pull_git_repository', 'push_git_repository', 'cleanup_orphaned_project', 'save_github_configuration', 'test_github_connection', 'remove_github_configuration', 'install_github_cli', 'save_managed_server', 'remove_managed_server', 'test_managed_server', 'deploy_preview_managed']), true)) {
+if ($requestMethod === 'POST' && $action === 'create_task') {
     try {
+        if (!hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+            throw new RuntimeException('Invalid task request: CSRF token is missing or invalid.');
+        }
         $body = trim((string)($_POST['task_body'] ?? ''));
 
         if ($body === '') {
@@ -1626,6 +907,13 @@ if ($createdTaskId !== '' && $error === '') {
     $activeTaskPath = $viewTask['relative_path'];
 }
 $activeRunStatus = $activeTaskId === '' ? 'not_started' : codexRunStatus($runsDir, $activeTaskId, $activeTaskSource === '' ? 'project' : $activeTaskSource);
+$activeCodexResult = $activeTaskId === '' ? [] : codexRunResult($runsDir, $activeTaskId, $activeTaskSource === '' ? 'project' : $activeTaskSource);
+$projectCodexRunActive = codexProjectHasActiveRun($runsDir);
+$activeTaskRunnable = in_array($activeTaskStatus, ['TODO', 'IN PROGRESS'], true) && !in_array($activeRunStatus, ['queued', 'running', 'completed'], true);
+$codexRetryWithPreservedChanges = $activeTaskStatus === 'IN PROGRESS'
+    && $activeRunStatus === 'failed'
+    && str_contains($taskCreationUnavailableReason, 'Repository synchronization is pending');
+$codexRepositoryReady = $taskCreationReady || $codexRetryWithPreservedChanges;
 $taskGitCompleted = $activeTaskId !== '';
 $taskGitPushed = $activeTaskId !== '' && $taskPushWarning === '';
 $editorTaskId = $viewTask ? pathinfo($viewTask['filename'], PATHINFO_FILENAME) : '';
@@ -1681,6 +969,8 @@ $managedServers = managedServersLoad();
 $activeManagedServer = $activeProject === null ? null : devConsoleFindManagedServerById($managedServers, (string)($activeProject['managed_server_id'] ?? ''));
 $managedPreviewDeploymentOverview = $activeProject === null ? null : previewDeploymentOverview($activeProject, $activeManagedServer);
 $managedPreviewDeploymentReadiness = previewDeploymentReadiness($activeProject, $managedServers);
+$managedProductionDeploymentOverview = $activeProject === null ? null : productionDeploymentOverview($activeProject, $activeManagedServer);
+$managedProductionDeploymentReadiness = productionDeploymentReadiness($activeProject, $managedServers);
 $projectStatuses = [];
 $gitStatuses = [];
 foreach ($projects as $project) {
@@ -2030,6 +1320,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     <?php endif; ?>
     <p id="nextTaskNumber"><strong>Next task number:</strong> <?= h(taskNumber($nextNumber)) ?></p>
     <form method="post" enctype="multipart/form-data" id="taskForm" data-created="<?= h($createdTaskPath !== '' && $error === '' ? '1' : '0') ?>">
+      <input type="hidden" name="action" value="create_task">
+      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
       <label for="task_metadata">Task metadata</label>
       <textarea id="task_metadata" class="metadata-preview" readonly rows="3" aria-readonly="true" tabindex="-1"><?= h($taskMetadataPreview) ?></textarea>
       <label for="task_body">Task markdown body</label>
@@ -2068,14 +1360,31 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
             <li><span class="step-state <?= h(in_array($activeRunStatus, ['completed', 'failed'], true) ? 'done' : 'pending') ?>"><?= h(statusLabel($activeRunStatus)) ?></span><span>Codex run status</span></li>
           </ul>
           <div class="prompt-actions">
-            <?php if ($activeTaskStatus === 'TODO' && $codexCliReady): ?>
+            <?php if ($activeTaskRunnable && $codexRepositoryReady && $codexCliReady && $codexAuthReady && !$projectCodexRunActive): ?>
               <button type="button" id="runCodex" data-task="<?= h($activeTaskId) ?>" data-task-source="<?= h($activeTaskSource) ?>">Run Codex</button>
             <?php else: ?>
-              <button type="button" disabled title="<?= h($activeTaskStatus === 'TODO' ? 'Codex CLI is not installed on this server.' : 'Only TODO tasks can be run with Codex.') ?>">Run Codex</button>
+              <?php
+                if (!$codexCliReady) {
+                    $runCodexDisabledReason = 'Codex CLI is not installed on this server.';
+                } elseif (!$codexAuthReady) {
+                    $runCodexDisabledReason = 'Codex CLI is not authenticated for the Dev Console service user.';
+                } elseif ($projectCodexRunActive) {
+                    $runCodexDisabledReason = 'Codex is already running for this Project.';
+                } elseif (!$codexRepositoryReady) {
+                    $runCodexDisabledReason = $taskCreationUnavailableReason === '' ? 'Project repository is not ready for Codex.' : $taskCreationUnavailableReason;
+                } else {
+                    $runCodexDisabledReason = 'Only TODO or failed IN PROGRESS tasks can be run with Codex.';
+                }
+              ?>
+              <button type="button" disabled title="<?= h($runCodexDisabledReason) ?>">Run Codex</button>
             <?php endif; ?>
             <a class="button-link" href="?tab=dashboard&task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>" target="_blank" rel="noopener">Open TASK</a>
-            <?php if ($activeTaskStatus === 'TODO' && !$codexCliReady): ?>
+            <?php if ($activeTaskRunnable && !$codexCliReady): ?>
               <span class="hint">Codex CLI is not installed on this server.</span>
+            <?php elseif ($activeTaskRunnable && !$codexAuthReady): ?>
+              <span class="hint">Codex CLI is not authenticated for the Dev Console service user.</span>
+            <?php elseif ($projectCodexRunActive && !in_array($activeRunStatus, ['queued', 'running'], true)): ?>
+              <span class="hint">Codex is already running for this Project.</span>
             <?php endif; ?>
           </div>
           <?php if (!empty($attachmentPaths)): ?>
@@ -2102,12 +1411,26 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
             <li><?= $taskGitPushed ? 'Done' : 'Pending' ?>: GitHub synchronized</li>
             <li><?= h($activeRunStatus === 'not_started' ? 'Ready: Codex not started' : statusLabel($activeRunStatus) . ': Codex run') ?></li>
           </ul>
+          <?php if (!empty($activeCodexResult)): ?>
+            <dl class="deployment-details" id="codexResultSummary">
+              <div><dt>Task</dt><dd><?= h((string)($activeCodexResult['task_id'] ?? $activeTaskId)) ?></dd></div>
+              <div><dt>Status</dt><dd><?= h((string)($activeCodexResult['status'] ?? statusLabel($activeRunStatus))) ?></dd></div>
+              <div><dt>Commit</dt><dd><code title="<?= h((string)($activeCodexResult['commit'] ?? '')) ?>"><?= h((string)($activeCodexResult['commit'] ?? '') === '' ? 'Not configured' : shortSha((string)$activeCodexResult['commit'])) ?></code></dd></div>
+              <div><dt>Files changed</dt><dd><?= h((string)($activeCodexResult['files_changed'] ?? 'Not configured')) ?></dd></div>
+              <div><dt>Validation</dt><dd><?= h((string)($activeCodexResult['validation'] ?? 'Not configured')) ?></dd></div>
+              <div><dt>Duration</dt><dd><?= h(isset($activeCodexResult['duration_seconds']) ? formatDuration((int)$activeCodexResult['duration_seconds']) : 'Not configured') ?></dd></div>
+            </dl>
+            <?php if ((string)($activeCodexResult['summary'] ?? '') !== ''): ?>
+              <p><?= h((string)$activeCodexResult['summary']) ?></p>
+            <?php endif; ?>
+          <?php endif; ?>
           <div class="codex-run-panel" id="codexRunPanel" data-task="<?= h($activeTaskId) ?>" data-task-source="<?= h($activeTaskSource) ?>">
             <p><strong>Run status:</strong> <span class="codex-status" id="codexStatus"><?= h(statusLabel($activeRunStatus)) ?></span></p>
             <pre class="codex-console" id="codexConsole">Loading activity...</pre>
             <div class="prompt-actions">
               <button type="button" class="secondary" id="refreshCodexLog">Refresh</button>
               <button type="button" class="secondary" id="copyCodexLog">Copy to Clipboard</button>
+              <button type="button" class="secondary" id="downloadCodexLog">Download Log</button>
               <span class="hint" id="copyCodexMessage" aria-live="polite"></span>
             </div>
           </div>
@@ -2215,16 +1538,49 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 
     <section class="panel deployment-panel production" id="productionDeployment">
       <h2>Production Deployment</h2>
+      <?php
+        $productionServer = is_array($managedProductionDeploymentOverview['managed_server'] ?? null) ? $managedProductionDeploymentOverview['managed_server'] : null;
+        $productionStatus = (string)($managedProductionDeploymentOverview['status'] ?? 'never_deployed');
+        $productionStatusLabel = productionDeploymentStatusLabel($productionStatus);
+        $productionStatusClass = $productionStatus === 'deployed' ? 'success' : ($productionStatus === 'failed' ? 'failed' : ($productionStatus === 'running' ? 'running' : 'pending'));
+        $productionCommit = (string)($managedProductionDeploymentOverview['commit'] ?? '');
+        $productionPreviewCommit = (string)($managedProductionDeploymentOverview['preview_commit'] ?? '');
+        $productionDuration = $managedProductionDeploymentOverview['duration_ms'] ?? null;
+        $productionReady = !empty($managedProductionDeploymentReadiness['ready']);
+        $productionReasons = $managedProductionDeploymentReadiness['reasons'] ?? [];
+        $productionOperationId = $productionStatus === 'running' ? (string)($managedProductionDeploymentOverview['operation_id'] ?? '') : '';
+      ?>
       <dl class="deployment-details">
-        <div><dt>Production target</dt><dd><code><?= h($productionDeploymentOverview['target']) ?></code></dd></div>
-        <div><dt>Production URL</dt><dd><a href="<?= h($productionDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h($productionDeploymentOverview['url']) ?></a></dd></div>
-        <div><dt>Production version</dt><dd><code id="productionCommit" title="<?= h($productionDeploymentOverview['deployed_commit']) ?>"><?= h($productionDeploymentOverview['deployed_commit'] === '' ? 'Not detected' : shortSha($productionDeploymentOverview['deployed_commit'])) ?></code></dd></div>
-        <div><dt>Last Production deployment</dt><dd id="productionLastDeploymentTime"><?= h((string)($productionDeploymentOverview['latest']['finish_time'] ?? $productionDeploymentOverview['latest']['start_time'] ?? 'Never')) ?></dd></div>
-        <div><dt>Production status</dt><dd><span id="productionDeploymentStatus" class="deployment-status <?= h((string)($productionDeploymentOverview['latest']['status'] ?? 'pending')) ?>"><?= h(isset($productionDeploymentOverview['latest']['status']) ? ucfirst((string)$productionDeploymentOverview['latest']['status']) : 'Not started') ?></span></dd></div>
+        <div><dt>Managed Server</dt><dd id="productionDeploymentServer"><?= h(devConsoleManagedServerLabel($productionServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></dd></div>
+        <div><dt>Production path</dt><dd><code id="productionDeploymentPath"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['production_path'] ?? '')) ?></code></dd></div>
+        <div><dt>Production URL</dt><dd id="productionDeploymentUrl"><?php if ((string)($managedProductionDeploymentOverview['production_url'] ?? '') !== ''): ?><a href="<?= h((string)$managedProductionDeploymentOverview['production_url']) ?>" target="_blank" rel="noopener noreferrer"><?= h((string)$managedProductionDeploymentOverview['production_url']) ?></a><?php else: ?>Not configured<?php endif; ?></dd></div>
+        <div><dt>Preview version</dt><dd><code id="productionPreviewCommit" title="<?= h($productionPreviewCommit) ?>"><?= h($productionPreviewCommit === '' ? 'Not deployed' : shortSha($productionPreviewCommit)) ?></code></dd></div>
+        <div><dt>Preview deployed</dt><dd id="productionPreviewDeployedAt"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['preview_deployed_at'] ?? '')) ?></dd></div>
+        <div><dt>Preview path</dt><dd><code id="productionPreviewPath"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['preview_path'] ?? '')) ?></code></dd></div>
+        <div><dt>Status</dt><dd><span id="productionDeploymentStatus" class="deployment-status <?= h($productionStatusClass) ?>"><?= h($productionStatusLabel) ?></span></dd></div>
+        <div><dt>Production version</dt><dd><code id="productionCommit" title="<?= h($productionCommit) ?>"><?= h($productionCommit === '' ? 'Not deployed' : shortSha($productionCommit)) ?></code></dd></div>
+        <div><dt>Last deployed</dt><dd id="productionLastDeploymentTime"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['deployed_at'] ?? '')) ?></dd></div>
+        <div><dt>Duration</dt><dd id="productionDeploymentDuration"><?= h($productionDuration === null ? 'Not configured' : ((string)round(((int)$productionDuration) / 1000, 1) . 's')) ?></dd></div>
+        <div><dt>Version state</dt><dd id="productionVersionState"><?= h((string)($managedProductionDeploymentOverview['version_state'] ?? 'Preview has not been deployed')) ?></dd></div>
+        <?php if ((string)($managedProductionDeploymentOverview['last_attempt_status'] ?? '') === 'failed'): ?>
+          <div><dt>Latest attempt</dt><dd><?= h(configuredDisplayValue($managedProductionDeploymentOverview['last_attempt_at'] ?? '')) ?>: <?= h(configuredDisplayValue($managedProductionDeploymentOverview['last_attempt_message'] ?? 'Failed')) ?></dd></div>
+        <?php endif; ?>
       </dl>
-      <button type="button" class="deploy-production" id="deployProduction">Deploy to Production</button>
+      <?php if (!$productionReady): ?>
+        <p class="field-help"><?= h(implode(' ', array_map('strval', $productionReasons))) ?></p>
+      <?php endif; ?>
+      <button type="button" class="deploy-production" id="deployProduction" data-operation-id="<?= h($productionOperationId) ?>" data-preview-commit="<?= h($productionPreviewCommit) ?>" data-server="<?= h(devConsoleManagedServerLabel($productionServer, (string)($activeProject['managed_server_id'] ?? ''))) ?>" data-production-path="<?= h((string)($managedProductionDeploymentOverview['production_path'] ?? '')) ?>"<?= $productionReady ? '' : ' disabled title="' . h(implode(' ', array_map('strval', $productionReasons))) . '"' ?>>Deploy to Production</button>
+      <dl class="tool-operation-grid" id="productionDeploymentProgress"<?= $productionOperationId !== '' ? '' : ' hidden' ?>>
+        <div><dt>Stage</dt><dd id="productionDeploymentStage">Preparing</dd></div>
+        <div><dt>Elapsed</dt><dd id="productionDeploymentElapsed">0s</dd></div>
+      </dl>
       <p class="deployment-error" id="productionDeploymentError" aria-live="assertive"></p>
-      <pre class="codex-console" id="productionDeploymentLog"><?= h(isset($productionDeploymentOverview['latest']['log_path']) && is_file($productionDeploymentOverview['latest']['log_path']) ? (string)file_get_contents($productionDeploymentOverview['latest']['log_path']) : 'No deployment log yet.') ?></pre>
+      <div class="operation-actions">
+        <button type="button" class="secondary" data-copy-log="productionDeploymentLog">Copy Log</button>
+        <button type="button" class="secondary" data-download-log="productionDeploymentLog" data-download-name="production-deployment.log">Download Log</button>
+        <span class="meta" data-log-message="productionDeploymentLog"></span>
+      </div>
+      <pre class="codex-console" id="productionDeploymentLog">No deployment log yet.</pre>
     </section>
   </div>
   </div>
@@ -2253,15 +1609,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     <div class="modal-content">
       <h2>Confirm Production Deployment</h2>
       <div id="deploymentPreview"></div>
-      <div id="deploymentFinalStep" hidden>
-        <label for="deploymentConfirmation">Type <code>DEPLOY</code> exactly to continue</label>
-        <input id="deploymentConfirmation" type="text" autocomplete="off" spellcheck="false">
-      </div>
       <p class="deployment-error" id="modalDeploymentError" aria-live="assertive"></p>
       <div class="modal-actions">
         <button type="button" class="secondary" id="cancelDeployment">Cancel</button>
-        <button type="button" id="continueDeployment">Continue</button>
-        <button type="button" class="deploy-production" id="confirmDeployment" disabled hidden>Confirm Deployment</button>
+        <button type="button" class="deploy-production" id="confirmDeployment">Deploy to Production</button>
       </div>
     </div>
   </dialog>
@@ -3176,6 +2527,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const codexConsole = document.getElementById('codexConsole');
   const refreshCodexLog = document.getElementById('refreshCodexLog');
   const copyCodexLog = document.getElementById('copyCodexLog');
+  const downloadCodexLog = document.getElementById('downloadCodexLog');
   const copyCodexMessage = document.getElementById('copyCodexMessage');
   const csrfToken = <?= json_encode($csrfToken, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const activeProjectId = <?= json_encode($activeProjectId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -3907,6 +3259,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     codexStatus.textContent = 'Queued';
     const formData = new FormData();
     formData.set('action', 'run-codex');
+    formData.set('csrf_token', csrfToken);
     formData.set('task', runCodex.dataset.task || '');
     formData.set('task_source', runCodex.dataset.taskSource || 'project');
 
@@ -3944,6 +3297,17 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       if (copyCodexMessage) copyCodexMessage.textContent = 'Unable to copy activity.';
     }
   });
+  downloadCodexLog?.addEventListener('click', () => {
+    if (!codexConsole) return;
+    const blob = new Blob([codexConsole.textContent || ''], { type: 'text/plain;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `${taskForCodexPanel() || 'codex-run'}.log`;
+    document.body.appendChild(link);
+    link.click();
+    URL.revokeObjectURL(link.href);
+    link.remove();
+  });
 
   const deployButton = document.getElementById('deployProduction');
   const previewDeployButton = document.getElementById('deployPreview');
@@ -3954,15 +3318,17 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const previewModalError = document.getElementById('previewModalDeploymentError');
   const deployDialog = document.getElementById('deploymentDialog');
   const previewBox = document.getElementById('deploymentPreview');
-  const finalStep = document.getElementById('deploymentFinalStep');
-  const confirmationInput = document.getElementById('deploymentConfirmation');
-  const continueButton = document.getElementById('continueDeployment');
   const confirmButton = document.getElementById('confirmDeployment');
   const cancelButton = document.getElementById('cancelDeployment');
   const deploymentError = document.getElementById('productionDeploymentError');
   const modalError = document.getElementById('modalDeploymentError');
   const deploymentLog = document.getElementById('productionDeploymentLog');
   const deploymentStatus = document.getElementById('productionDeploymentStatus');
+  const productionDeploymentStage = document.getElementById('productionDeploymentStage');
+  const productionDeploymentElapsed = document.getElementById('productionDeploymentElapsed');
+  const productionDeploymentProgress = document.getElementById('productionDeploymentProgress');
+  const productionDeploymentDuration = document.getElementById('productionDeploymentDuration');
+  const productionVersionState = document.getElementById('productionVersionState');
   const previewDeploymentError = document.getElementById('previewDeploymentError');
   const previewDeploymentLog = document.getElementById('previewDeploymentLog');
   const previewDeploymentStatus = document.getElementById('previewDeploymentStatus');
@@ -3973,9 +3339,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const previewDeploymentSourceCommit = document.getElementById('previewDeploymentSourceCommit');
   const previewDeploymentBranch = document.getElementById('previewDeploymentBranch');
   const previewDeploymentDuration = document.getElementById('previewDeploymentDuration');
-  let confirmedSummary = null;
   let previewConfirmedSummary = null;
-  let deploymentStep = 1;
   const deploymentPolls = { preview: null, production: null };
   const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[character]));
 
@@ -3993,36 +3357,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     element.textContent = status.charAt(0).toUpperCase() + status.slice(1);
     element.className = `deployment-status ${status}`;
   };
-  const pollDeployment = (environment, id) => {
-    clearInterval(deploymentPolls[environment]);
-    const isPreview = environment === 'preview';
-    const button = isPreview ? previewDeployButton : deployButton;
-    const log = isPreview ? previewDeploymentLog : deploymentLog;
-    const errorBox = isPreview ? previewDeploymentError : deploymentError;
-    const update = async () => {
-      const response = await fetch(`?action=deployment-status&environment=${encodeURIComponent(environment)}&id=${encodeURIComponent(id)}`, { cache: 'no-store' });
-      const payload = await response.json();
-      if (!payload.deployment) return;
-      setDeploymentStatus(environment, payload.deployment.status);
-      log.textContent = payload.log || 'Waiting for deployment log...';
-      log.scrollTop = log.scrollHeight;
-      if (['success', 'failed'].includes(payload.deployment.status)) {
-        clearInterval(deploymentPolls[environment]); button.disabled = false;
-        document.getElementById(`${environment}LastDeploymentTime`).textContent = payload.deployment.finish_time || payload.deployment.start_time;
-        if (!isPreview && payload.deployment.status === 'success') {
-          const productionCommit = document.getElementById('productionCommit');
-          productionCommit.textContent = payload.deployment.source_commit.slice(0, 7);
-          productionCommit.title = payload.deployment.source_commit;
-        }
-        if (payload.deployment.error) errorBox.textContent = payload.deployment.error;
-      }
-    };
-    update().catch(() => {}); deploymentPolls[environment] = setInterval(() => update().catch(() => {}), 2000);
-  };
-  const deploymentSummaryHtml = (payload) => {
-    const items = payload.summary.files.length ? payload.summary.files.map((file) => `<li>${escapeHtml(file)}</li>`).join('') : '<li>No file changes.</li>';
-    return `<dl class="deployment-details"><div><dt>Source</dt><dd><code>${escapeHtml(payload.overview.source)}</code></dd></div><div><dt>Target</dt><dd><code>${escapeHtml(payload.overview.target)}</code></dd></div><div><dt>Branch</dt><dd>${escapeHtml(payload.overview.branch)}</dd></div><div><dt>Commit</dt><dd><code>${escapeHtml(payload.overview.commit)}</code></dd></div><div><dt>Message</dt><dd>${escapeHtml(payload.overview.message)}</dd></div><div><dt>Changes</dt><dd>${Number(payload.summary.added)} added · ${Number(payload.summary.updated)} updated · ${Number(payload.summary.deleted)} deleted</dd></div></dl><ul class="change-list">${items}</ul>`;
-  };
+  const productionConfirmationHtml = () => `<p>Deploy current Preview to Production?</p><dl class="deployment-details"><div><dt>Preview version</dt><dd><code>${escapeHtml(deployButton?.dataset.previewCommit || 'Not deployed')}</code></dd></div><div><dt>Server</dt><dd>${escapeHtml(deployButton?.dataset.server || 'Not configured')}</dd></div><div><dt>Production path</dt><dd><code>${escapeHtml(deployButton?.dataset.productionPath || 'Not configured')}</code></dd></div></dl><p class="field-help">This will replace the current Production contents with Preview.</p>`;
   const setPreviewManagedStatus = (operation) => {
     if (!operation) return;
     const result = operation.result || {};
@@ -4095,27 +3430,84 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   if (previewDeployButton?.dataset.operationId) {
     pollPreviewManagedDeployment(previewDeployButton.dataset.operationId);
   }
+  const setProductionManagedStatus = (operation) => {
+    if (!operation) return;
+    const result = operation.result || {};
+    if (productionDeploymentProgress) productionDeploymentProgress.hidden = false;
+    if (productionDeploymentStage) productionDeploymentStage.textContent = operation.stage || 'Preparing';
+    if (productionDeploymentElapsed) productionDeploymentElapsed.textContent = formatElapsed(operation.elapsed_seconds || 0);
+    if (deploymentLog) {
+      deploymentLog.textContent = operation.log && operation.log.trim() !== '' ? operation.log : 'Waiting for deployment log...';
+      deploymentLog.scrollTop = deploymentLog.scrollHeight;
+    }
+    const status = operation.status === 'completed' ? 'deployed' : (operation.status === 'failed' ? 'failed' : 'running');
+    if (deploymentStatus) {
+      deploymentStatus.textContent = status === 'deployed' ? 'Deployed' : (status === 'failed' ? 'Failed' : 'Running');
+      deploymentStatus.className = `deployment-status ${status === 'deployed' ? 'success' : status}`;
+    }
+    if (deploymentError) deploymentError.textContent = operation.status === 'failed' ? (operation.message || 'Production deployment failed.') : '';
+    if (result.commit) {
+      const productionCommit = document.getElementById('productionCommit');
+      if (productionCommit && operation.status === 'completed') {
+        productionCommit.textContent = result.commit.slice(0, 7);
+        productionCommit.title = result.commit;
+      }
+    }
+    if (result.duration_ms && productionDeploymentDuration) productionDeploymentDuration.textContent = `${(Number(result.duration_ms) / 1000).toFixed(1)}s`;
+    const lastDeployment = document.getElementById('productionLastDeploymentTime');
+    if (lastDeployment && operation.status === 'completed' && operation.finished_at) lastDeployment.textContent = operation.finished_at;
+    if (productionVersionState && operation.status === 'completed') productionVersionState.textContent = 'In sync with Preview';
+  };
+  const pollProductionManagedDeployment = (operationId) => {
+    if (!operationId) return;
+    clearInterval(deploymentPolls.production);
+    const update = async () => {
+      const response = await fetch(`?action=production-deployment-status&id=${encodeURIComponent(operationId)}`, { cache: 'no-store' });
+      const payload = await response.json();
+      if (!payload.ok) throw new Error(payload.error || 'Unable to read Production deployment.');
+      setProductionManagedStatus(payload.operation);
+      if (['completed', 'failed'].includes(payload.operation.status)) {
+        clearInterval(deploymentPolls.production);
+        if (deployButton) deployButton.disabled = false;
+      }
+    };
+    update().catch((error) => {
+      clearInterval(deploymentPolls.production);
+      if (deploymentError) deploymentError.textContent = error.message;
+      if (deployButton) deployButton.disabled = false;
+    });
+    deploymentPolls.production = setInterval(() => update().catch((error) => {
+      clearInterval(deploymentPolls.production);
+      if (deploymentError) deploymentError.textContent = error.message;
+      if (deployButton) deployButton.disabled = false;
+    }), 2000);
+  };
   deployButton?.addEventListener('click', async () => {
-    deploymentError.textContent = ''; modalError.textContent = ''; deployButton.disabled = true;
-    try {
-      const payload = await postDeployment('deployment-preview', { environment: 'production' });
-      confirmedSummary = payload.summary;
-      previewBox.innerHTML = deploymentSummaryHtml(payload);
-      deploymentStep = 1; finalStep.hidden = true; continueButton.hidden = false; confirmButton.hidden = true; confirmationInput.value = '';
-      deployDialog.showModal();
-    } catch (error) { deploymentError.textContent = error.message; deployButton.disabled = false; setDeploymentStatus('production', 'failed'); }
+    if (deploymentError) deploymentError.textContent = '';
+    if (modalError) modalError.textContent = '';
+    if (previewBox) previewBox.innerHTML = productionConfirmationHtml();
+    deployDialog?.showModal();
   });
-  cancelButton?.addEventListener('click', () => { deploymentStep = 1; deployDialog.close(); deployButton.disabled = false; });
-  continueButton?.addEventListener('click', () => { deploymentStep = 2; finalStep.hidden = false; continueButton.hidden = true; confirmButton.hidden = false; confirmationInput.focus(); });
-  confirmationInput?.addEventListener('input', () => { confirmButton.disabled = confirmationInput.value !== 'DEPLOY'; });
+  cancelButton?.addEventListener('click', () => { deployDialog.close(); });
   confirmButton?.addEventListener('click', async () => {
-    if (deploymentStep !== 2 || confirmationInput.value !== 'DEPLOY') return;
-    confirmButton.disabled = true; modalError.textContent = '';
+    confirmButton.disabled = true;
+    if (modalError) modalError.textContent = '';
+    if (deployButton) deployButton.disabled = true;
     try {
-      const payload = await postDeployment('deployment-start', { environment: 'production', confirmation: confirmationInput.value, summary: JSON.stringify(confirmedSummary) });
-      deployDialog.close(); setDeploymentStatus('production', 'pending'); pollDeployment('production', payload.deployment.id);
-    } catch (error) { modalError.textContent = error.message; confirmButton.disabled = confirmationInput.value !== 'DEPLOY'; }
+      const payload = await postDeployment('deploy_production_managed', { confirm: '1' });
+      deployDialog.close();
+      setProductionManagedStatus(payload.operation);
+      pollProductionManagedDeployment(payload.operation.id);
+    } catch (error) {
+      if (modalError) modalError.textContent = error.message;
+      if (deployButton) deployButton.disabled = false;
+    } finally {
+      confirmButton.disabled = false;
+    }
   });
+  if (deployButton?.dataset.operationId) {
+    pollProductionManagedDeployment(deployButton.dataset.operationId);
+  }
 
   if (codexRunPanel) {
     updateCodexStatus().then((status) => {

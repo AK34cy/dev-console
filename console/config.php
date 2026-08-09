@@ -62,6 +62,21 @@ function devConsoleEmptyProject(): array
             'operation_id' => null,
             'message' => null,
         ],
+        'production_deployment' => [
+            'status' => 'never_deployed',
+            'commit' => null,
+            'branch' => null,
+            'deployed_at' => null,
+            'managed_server_id' => null,
+            'duration_ms' => null,
+            'operation_id' => null,
+            'message' => null,
+            'source' => null,
+            'last_attempt_status' => null,
+            'last_attempt_at' => null,
+            'last_attempt_commit' => null,
+            'last_attempt_message' => null,
+        ],
         'git' => [
             'provider' => null,
             'repository_owner' => null,
@@ -152,6 +167,20 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         }
         if (array_key_exists('duration_ms', $previewDeploymentInput)) {
             $project['preview_deployment']['duration_ms'] = is_numeric($previewDeploymentInput['duration_ms']) ? (int)$previewDeploymentInput['duration_ms'] : null;
+        }
+
+        $productionDeploymentInput = is_array($projectInput['production_deployment'] ?? null) ? $projectInput['production_deployment'] : [];
+        if (isset($productionDeploymentInput['status']) && is_scalar($productionDeploymentInput['status']) && in_array((string)$productionDeploymentInput['status'], ['never_deployed', 'running', 'deployed', 'failed'], true)) {
+            $project['production_deployment']['status'] = (string)$productionDeploymentInput['status'];
+        }
+        foreach (['commit', 'branch', 'deployed_at', 'managed_server_id', 'operation_id', 'message', 'source', 'last_attempt_status', 'last_attempt_at', 'last_attempt_commit', 'last_attempt_message'] as $field) {
+            if (array_key_exists($field, $productionDeploymentInput)) {
+                $value = $productionDeploymentInput[$field];
+                $project['production_deployment'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
+            }
+        }
+        if (array_key_exists('duration_ms', $productionDeploymentInput)) {
+            $project['production_deployment']['duration_ms'] = is_numeric($productionDeploymentInput['duration_ms']) ? (int)$productionDeploymentInput['duration_ms'] : null;
         }
 
         $provisioningInput = is_array($projectInput['provisioning'] ?? null) ? $projectInput['provisioning'] : [];
