@@ -140,6 +140,92 @@ function configuredDisplayValue($value): string
     return trim($text) === '' ? 'Not configured' : $text;
 }
 
+function workflowStateClass(string $state): string
+{
+    $normalized = strtolower($state);
+    if (str_contains($normalized, 'failed') || str_contains($normalized, 'outdated') || str_contains($normalized, 'promotion')) {
+        return 'warning';
+    }
+    if (str_contains($normalized, 'completed') || str_contains($normalized, 'deployed') || str_contains($normalized, 'sync') || str_contains($normalized, 'done')) {
+        return 'healthy';
+    }
+    if (str_contains($normalized, 'running') || str_contains($normalized, 'progress')) {
+        return 'running';
+    }
+
+    return 'pending';
+}
+
+function workflowSummary(array $context): array
+{
+    $taskId = (string)($context['task_id'] ?? '');
+    $taskStatus = $taskId === '' ? 'No active task' : (string)($context['task_status'] ?? 'TODO');
+    $codexRunStatus = (string)($context['codex_run_status'] ?? 'not_started');
+    $codexResult = is_array($context['codex_result'] ?? null) ? $context['codex_result'] : [];
+    $gitCommit = (string)($context['git_commit'] ?? '');
+    $preview = is_array($context['preview'] ?? null) ? $context['preview'] : [];
+    $production = is_array($context['production'] ?? null) ? $context['production'] : [];
+
+    $codexState = match ($codexRunStatus) {
+        'queued', 'running' => 'Running',
+        'completed' => 'Completed',
+        'failed' => 'Failed',
+        default => 'Not started',
+    };
+    $implementationCommit = (string)($codexResult['commit'] ?? '');
+    if ($implementationCommit === '') {
+        $implementationCommit = $gitCommit;
+    }
+
+    $previewCommit = (string)($preview['commit'] ?? '');
+    $previewStatus = (string)($preview['status'] ?? 'never_deployed');
+    $previewState = match ($previewStatus) {
+        'running' => 'Running',
+        'failed' => 'Failed',
+        'deployed' => $implementationCommit !== '' && $previewCommit !== '' && $previewCommit !== $implementationCommit ? 'Outdated' : 'Deployed',
+        default => 'Not deployed',
+    };
+
+    $productionCommit = (string)($production['commit'] ?? '');
+    $productionStatus = (string)($production['status'] ?? 'never_deployed');
+    $productionState = match ($productionStatus) {
+        'running' => 'Running',
+        'failed' => 'Failed',
+        'deployed' => $previewCommit !== '' && $productionCommit === $previewCommit ? 'In sync with Preview' : ($previewCommit !== '' ? 'Preview ready for promotion' : 'Never deployed'),
+        default => 'Never deployed',
+    };
+
+    return [
+        [
+            'name' => 'Task',
+            'state' => $taskStatus,
+            'primary' => $taskId === '' ? 'No active task' : $taskId,
+            'detail' => $taskId !== '' && (string)($context['task_commit'] ?? '') !== '' ? 'Commit ' . shortSha((string)$context['task_commit']) : '',
+        ],
+        [
+            'name' => 'Codex',
+            'state' => $codexState,
+            'primary' => $implementationCommit !== '' && $codexState === 'Completed' ? 'Commit ' . shortSha($implementationCommit) : $codexState,
+            'detail' => implode(' · ', array_filter([
+                (string)($codexResult['validation'] ?? ''),
+                isset($codexResult['duration_seconds']) ? formatDuration((int)$codexResult['duration_seconds']) : '',
+            ])),
+        ],
+        [
+            'name' => 'Preview',
+            'state' => $previewState,
+            'primary' => $previewCommit === '' ? $previewState : shortSha($previewCommit),
+            'detail' => (string)($preview['url'] ?? ''),
+        ],
+        [
+            'name' => 'Production',
+            'state' => $productionState,
+            'primary' => $productionCommit === '' ? $productionState : shortSha($productionCommit),
+            'detail' => (string)($production['production_url'] ?? ''),
+        ],
+    ];
+}
+
 function sendJson(array $payload): void
 {
     header('Content-Type: application/json');
@@ -986,6 +1072,16 @@ foreach ($projects as $project) {
     $gitStatuses[(string)($project['id'] ?? '')] = gitStatus($project, $githubConfiguration);
 }
 $activeGitStatus = $activeProjectId === '' ? [] : ($gitStatuses[$activeProjectId] ?? []);
+$workflowStages = workflowSummary([
+    'task_id' => $activeTaskId,
+    'task_status' => $activeTaskStatus,
+    'task_commit' => $viewTask['commit'] ?? '',
+    'codex_run_status' => $activeRunStatus,
+    'codex_result' => $activeCodexResult,
+    'git_commit' => (string)($activeGitStatus['local_commit'] ?? ''),
+    'preview' => is_array($managedPreviewDeploymentOverview) ? $managedPreviewDeploymentOverview : [],
+    'production' => is_array($managedProductionDeploymentOverview) ? $managedProductionDeploymentOverview : [],
+]);
 $projectsForDisplay = devConsoleProjectsForDisplay($projectConfiguration);
 $serverAddress = (string)($_SERVER['SERVER_ADDR'] ?? '');
 if ($serverAddress === '' || in_array($serverAddress, ['127.0.0.1', '::1'], true)) {
@@ -1085,6 +1181,14 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .step-state { background: #edf4f7; border-radius: 999px; color: var(--muted); flex: 0 0 auto; font-size: 11px; font-weight: 700; padding: 4px 8px; text-transform: uppercase; }
     .step-state.done { background: #e9f7ef; color: var(--green); }
     .step-state.pending { background: #f4f1e8; color: #76622d; }
+    .workflow-summary { margin-bottom: 18px; }
+    .workflow-stage-grid { align-items: stretch; display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .workflow-stage { background: #fff; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 12px; position: relative; }
+    .workflow-stage:not(:last-child)::after { color: var(--muted); content: "→"; font-weight: 700; position: absolute; right: -10px; top: 50%; transform: translateY(-50%); }
+    .workflow-stage h3 { color: var(--muted); font-size: 11px; letter-spacing: 0; margin: 0 0 8px; text-transform: uppercase; }
+    .workflow-stage strong { color: var(--ink); display: block; font-size: 15px; overflow-wrap: anywhere; }
+    .workflow-stage .meta { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+    .workflow-stage .status-pill { margin-bottom: 8px; }
     .git-output summary { color: var(--blue); cursor: pointer; font-weight: 700; }
     .command-output { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
     .command-output:first-of-type { border-top: 0; }
@@ -1134,6 +1238,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .dashboard-list dd { font-size: 12px; margin: 0; overflow-wrap: anywhere; }
     .dashboard-list code { padding: 1px 3px; }
     .status-pill { background: #edf0f2; border-radius: 999px; color: #56636a; display: inline-block; font-size: 11px; font-weight: 700; padding: 3px 8px; text-transform: uppercase; }
+    .status-pill.pending { background: #edf0f2; color: #56636a; }
+    .status-pill.running { background: #fff2b8; color: #705900; }
     .status-pill.healthy { background: #e4f6ea; color: var(--green); }
     .status-pill.warning { background: #fff2b8; color: #705900; }
     .status-pill.error { background: #fde8e8; color: #8a1f1f; }
@@ -1213,6 +1319,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .process-table td:last-child { overflow-wrap: anywhere; }
     @media (max-width: 900px) {
       .dashboard-columns { display: block; }
+      .workflow-stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .workflow-stage:nth-child(2)::after { content: ""; }
       .settings-layout, .settings-service-row { grid-template-columns: 1fr; }
       .apache-summary { grid-template-columns: 1fr; }
       .page-header { display: block; }
@@ -1303,6 +1411,25 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   </section>
 
   <?php if ($activeProject !== null): ?>
+  <section class="panel workflow-summary" aria-label="Project workflow summary">
+    <div class="dashboard-header">
+      <h2>Workflow</h2>
+      <span class="meta">Task → Codex → Preview → Production</span>
+    </div>
+    <div class="workflow-stage-grid">
+      <?php foreach ($workflowStages as $stage): ?>
+        <?php $stageState = (string)($stage['state'] ?? ''); ?>
+        <section class="workflow-stage">
+          <h3><?= h((string)($stage['name'] ?? '')) ?></h3>
+          <span class="status-pill <?= h(workflowStateClass($stageState)) ?>"><?= h($stageState) ?></span>
+          <strong><?= h((string)($stage['primary'] ?? '')) ?></strong>
+          <?php if ((string)($stage['detail'] ?? '') !== ''): ?>
+            <span class="meta"><?= h((string)$stage['detail']) ?></span>
+          <?php endif; ?>
+        </section>
+      <?php endforeach; ?>
+    </div>
+  </section>
   <div class="dashboard-columns">
   <div class="dashboard-column dashboard-column-left">
   <section class="panel" id="create-task">
@@ -1353,12 +1480,15 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
             <div><dt>Current branch</dt><dd><?= h(configuredDisplayValue($activeGitStatus['branch'] ?? '')) ?></dd></div>
             <div><dt>Task location</dt><dd><code><?= h($activeTaskPath) ?></code></dd></div>
           </dl>
-          <ul class="workflow-steps">
-            <li><span class="step-state done">Done</span><span>Task file created<?php if ($activeTaskPath !== ''): ?>: <code><?= h($activeTaskPath) ?></code><?php endif; ?></span></li>
-            <li><span class="step-state <?= h($taskGitCompleted ? 'done' : 'pending') ?>"><?= h($taskGitCompleted ? 'Done' : 'Ready') ?></span><span>Task committed locally<?php if ($commitHash !== ''): ?>: <code title="<?= h($commitHash) ?>"><?= h(shortSha($commitHash)) ?></code><?php endif; ?></span></li>
-            <li><span class="step-state <?= h($taskGitPushed ? 'done' : 'pending') ?>"><?= h($taskGitPushed ? 'Done' : 'Pending') ?></span><span><?= h($taskGitPushed ? 'Task synchronized with GitHub' : 'GitHub synchronization needs retry from Projects') ?></span></li>
-            <li><span class="step-state <?= h(in_array($activeRunStatus, ['completed', 'failed'], true) ? 'done' : 'pending') ?>"><?= h(statusLabel($activeRunStatus)) ?></span><span>Codex run status</span></li>
-          </ul>
+          <details class="compact-details">
+            <summary>Show workflow details</summary>
+            <ul class="workflow-steps">
+              <li><span class="step-state done">Done</span><span>Task file created<?php if ($activeTaskPath !== ''): ?>: <code><?= h($activeTaskPath) ?></code><?php endif; ?></span></li>
+              <li><span class="step-state <?= h($taskGitCompleted ? 'done' : 'pending') ?>"><?= h($taskGitCompleted ? 'Done' : 'Ready') ?></span><span>Task committed locally<?php if ($commitHash !== ''): ?>: <code title="<?= h($commitHash) ?>"><?= h(shortSha($commitHash)) ?></code><?php endif; ?></span></li>
+              <li><span class="step-state <?= h($taskGitPushed ? 'done' : 'pending') ?>"><?= h($taskGitPushed ? 'Done' : 'Pending') ?></span><span><?= h($taskGitPushed ? 'Task synchronized with GitHub' : 'GitHub synchronization needs retry from Projects') ?></span></li>
+              <li><span class="step-state <?= h(in_array($activeRunStatus, ['completed', 'failed'], true) ? 'done' : 'pending') ?>"><?= h(statusLabel($activeRunStatus)) ?></span><span>Codex run status</span></li>
+            </ul>
+          </details>
           <div class="prompt-actions">
             <?php if ($activeTaskRunnable && $codexRepositoryReady && $codexCliReady && $codexAuthReady && !$projectCodexRunActive): ?>
               <button type="button" id="runCodex" data-task="<?= h($activeTaskId) ?>" data-task-source="<?= h($activeTaskSource) ?>">Run Codex</button>
