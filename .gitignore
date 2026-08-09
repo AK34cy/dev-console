@@ -6,5 +6,6 @@ console/config/servers.json
 *.log
 config/projects.json
 config/github.json
+config/*.backup*
 
 .local/
