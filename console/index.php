@@ -541,16 +541,6 @@ if ($action === 'managed-server-operation-status') {
     exit;
 }
 
-if ($action === 'detect-ssh-keys') {
-    try {
-        sendJson(['ok' => true, 'keys' => managedServersDetectSshKeys()]);
-    } catch (Throwable $exception) {
-        http_response_code(400);
-        sendJson(['ok' => false, 'error' => 'Unable to detect SSH keys.']);
-    }
-    exit;
-}
-
 if ($action === 'run-codex' && $requestMethod === 'POST') {
     $taskId = (string)($_POST['task'] ?? '');
     $taskSource = (string)($_POST['task_source'] ?? 'project');
@@ -626,6 +616,21 @@ if ($action === 'test_managed_server') {
     exit;
 }
 
+if ($action === 'generate_managed_server_key') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $_SESSION['managed_server_result'] = ['success' => false, 'message' => 'Invalid Server SSH Key request.'];
+    } else {
+        $result = managedServersGenerateSharedKey();
+        $_SESSION['managed_server_result'] = [
+            'success' => !empty($result['success']),
+            'message' => (string)($result['message'] ?? ''),
+            'output' => (string)($result['output'] ?? ''),
+        ];
+    }
+    header('Location: /?tab=servers#server-ssh-key');
+    exit;
+}
+
 if (in_array($action, apacheAllowedActions(), true)) {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $apacheActionResult = [
@@ -676,14 +681,13 @@ if (in_array($action, ['save_github_configuration', 'test_github_connection', 'r
 }
 
 if ($action === 'save_managed_server') {
-    foreach (['server_id', 'server_name', 'server_host', 'server_port', 'server_user', 'server_key', 'server_description'] as $field) {
+    foreach (['server_id', 'server_name', 'server_host', 'server_port', 'server_user'] as $field) {
         $target = match ($field) {
             'server_id' => 'id',
             'server_name' => 'name',
             'server_host' => 'host',
             'server_port' => 'port',
             'server_user' => 'user',
-            'server_key' => 'key',
             default => 'description',
         };
         $managedServerFormValues[$target] = devConsoleScalarInput($_POST, $field);
@@ -1052,6 +1056,7 @@ $serverDiagnostics = is_array($serverDiagnosticsResult['diagnostics'] ?? null) ?
 $serverContext = is_array($serverDiagnostics['context'] ?? null) ? $serverDiagnostics['context'] : [];
 $serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostics['tools'] : [];
 $managedServers = managedServersLoad();
+$managedServerSharedKey = managedServersSharedKeyInfo();
 $activeManagedServer = $activeProject === null ? null : devConsoleFindManagedServerById($managedServers, (string)($activeProject['managed_server_id'] ?? ''));
 $managedPreviewDeploymentOverview = $activeProject === null ? null : previewDeploymentOverview($activeProject, $activeManagedServer);
 $managedPreviewDeploymentReadiness = previewDeploymentReadiness($activeProject, $managedServers);
@@ -1261,8 +1266,22 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .compact-table th, .compact-table td { border-top: 1px solid var(--line); padding: 4px 2px; text-align: left; }
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
     .compact-table th { color: var(--muted); width: 45%; }
-    .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr); }
-    .server-layout { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+	    .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr); }
+	    .server-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 2fr) minmax(300px, .95fr); }
+	    .server-sidebar { display: grid; gap: 14px; min-width: 0; }
+	    .server-compact-summary { align-items: center; display: grid; gap: 8px 12px; grid-template-columns: minmax(150px, 1.2fr) auto repeat(3, minmax(105px, .8fr)) auto; }
+	    .server-compact-summary > span { min-width: 0; overflow-wrap: anywhere; }
+	    .server-detail-grid { display: grid; gap: 7px 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 10px; }
+	    .server-detail-grid div { border-top: 1px solid var(--line); display: grid; gap: 3px; grid-template-columns: minmax(100px, .75fr) minmax(0, 1.25fr); padding-top: 7px; }
+	    .server-detail-grid dt { color: var(--muted); font-size: 11px; font-weight: 700; }
+	    .server-detail-grid dd { margin: 0; overflow-wrap: anywhere; }
+	    .server-key-compact .tool-operation-log { max-height: 90px; min-height: 0; }
+	    .server-form-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+	    .copy-field { display: grid; gap: 6px; margin-top: 10px; }
+	    .copy-field label { color: var(--ink); font-size: 13px; font-weight: 700; margin: 0; }
+	    .copy-row { align-items: start; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; }
+	    .copy-row pre { margin: 0; }
+	    .server-sidebar .field-help { line-height: 1.45; }
     .settings-service-row { align-items: start; display: grid; gap: 14px; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .settings-service-row > .panel { margin-top: 0; }
     .settings-table { border-collapse: collapse; font-size: 12px; width: 100%; }
@@ -1321,14 +1340,16 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       .dashboard-columns { display: block; }
       .workflow-stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .workflow-stage:nth-child(2)::after { content: ""; }
-      .settings-layout, .settings-service-row { grid-template-columns: 1fr; }
+	      .settings-layout, .settings-service-row, .server-layout { grid-template-columns: 1fr; }
+	      .server-compact-summary { grid-template-columns: minmax(0, 1fr); }
+	      .server-detail-grid { grid-template-columns: 1fr; }
       .apache-summary { grid-template-columns: 1fr; }
       .page-header { display: block; }
       .page-context { margin-top: 12px; text-align: left; }
       main { margin-top: 18px; }
     }
     @media (max-width: 520px) {
-      .summary-grid, .resource-grid, .environment-grid, .apache-summary-grid { grid-template-columns: 1fr; }
+	      .summary-grid, .resource-grid, .environment-grid, .apache-summary-grid, .server-detail-grid { grid-template-columns: 1fr; }
       .generated-preview div, .apache-summary-grid div { grid-template-columns: 1fr; }
     }
   </style>
@@ -2097,6 +2118,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <section class="result-block <?= !empty($managedServerActionResult['success']) ? '' : 'error' ?>">
             <h2><?= !empty($managedServerActionResult['success']) ? 'Server configuration saved' : 'Server configuration failed' ?></h2>
             <p><?= h((string)($managedServerActionResult['message'] ?? '')) ?></p>
+            <?php if (trim((string)($managedServerActionResult['output'] ?? '')) !== ''): ?>
+              <pre class="tool-operation-log"><?= h(trim((string)$managedServerActionResult['output'])) ?></pre>
+            <?php endif; ?>
           </section>
         <?php endif; ?>
         <section class="result-block tool-operation-panel" id="managedServerOperationPanel" hidden>
@@ -2129,29 +2153,41 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         <?php else: ?>
           <div class="project-list">
             <?php foreach ($managedServers as $server): ?>
-              <?php $serverId = (string)($server['id'] ?? ''); ?>
-              <section class="project-item" data-server-card>
-                <div class="project-summary">
-                  <span>
-                    <strong><?= h(configuredDisplayValue($server['name'] ?? '')) ?></strong>
-                    <span class="meta"><?= h(configuredDisplayValue($server['id'] ?? '')) ?></span>
-                  </span>
-                  <span class="status-pill <?= h(managedServersStatusClass($server)) ?>"><?= h(managedServersStatusLabel($server)) ?></span>
-                  <span>Host: <?= h(configuredDisplayValue($server['host'] ?? '')) ?></span>
-                  <span>Hostname: <?= h(configuredDisplayValue($server['remote_hostname'] ?? '')) ?></span>
-                  <span>OS: <?= h(configuredDisplayValue($server['remote_os'] ?? '')) ?></span>
-                  <span>User: <?= h(configuredDisplayValue($server['remote_user'] ?: ($server['user'] ?? ''))) ?></span>
-                  <span>Last checked: <?= h(configuredDisplayValue($server['last_connection_test_at'] ?? '')) ?></span>
-                  <span>Response: <?= h(($server['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$server['response_time_ms'] . ' ms')) ?></span>
+              <?php
+	                $serverId = (string)($server['id'] ?? '');
+	                $serverUsesSharedKey = (string)($server['key'] ?? '') === (string)($managedServerSharedKey['path'] ?? '');
+	                $serverKeyLabel = $serverUsesSharedKey ? 'Dev Console Server Key' : 'Custom SSH Key';
+	                $serverTestDisabledReason = $serverUsesSharedKey && empty($managedServerSharedKey['generated']) ? 'Generate the Dev Console Server SSH Key before testing this server.' : '';
+	                $serverHost = configuredDisplayValue($server['host'] ?? '');
+	                $serverRemoteHostname = (string)($server['remote_hostname'] ?? '');
+	                $serverHostDetail = $serverRemoteHostname !== '' && strcasecmp($serverRemoteHostname, (string)($server['host'] ?? '')) !== 0
+	                    ? configuredDisplayValue($server['host'] ?? '') . ' / ' . $serverRemoteHostname
+	                    : configuredDisplayValue($server['host'] ?? '');
+	                $serverUser = configuredDisplayValue($server['user'] ?? '');
+	                $serverRemoteUser = (string)($server['remote_user'] ?? '');
+	                $serverUserDetailLabel = $serverRemoteUser !== '' && $serverRemoteUser !== (string)($server['user'] ?? '') ? 'SSH User / Remote user' : 'SSH User';
+	                $serverUserDetail = $serverRemoteUser !== '' && $serverRemoteUser !== (string)($server['user'] ?? '')
+	                    ? configuredDisplayValue($server['user'] ?? '') . ' / ' . $serverRemoteUser
+	                    : configuredDisplayValue($server['user'] ?? '');
+	              ?>
+	              <section class="project-item" data-server-card data-server-id="<?= h($serverId) ?>" data-server-host="<?= h((string)($server['host'] ?? '')) ?>" data-server-user="<?= h((string)($server['user'] ?? '')) ?>">
+	                <div class="project-summary server-compact-summary">
+	                  <span>
+	                    <strong><?= h(configuredDisplayValue($server['name'] ?? '')) ?></strong>
+	                  </span>
+		                  <span class="status-pill <?= h(managedServersStatusClass($server)) ?>" data-server-card-status><?= h(managedServersStatusLabel($server)) ?></span>
+		                  <span>Host: <span data-server-card-host><?= h($serverHost) ?></span></span>
+		                  <span>Last checked: <span data-server-card-last-checked><?= h(configuredDisplayValue($server['last_connection_test_at'] ?? '')) ?></span></span>
+		                  <span>Response: <span data-server-card-response><?= h(($server['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$server['response_time_ms'] . ' ms')) ?></span></span>
                   <div class="project-actions">
                     <form method="post" action="/?tab=servers#managed-servers" data-managed-server-test-form="1" data-server-id="<?= h($serverId) ?>" data-server-name="<?= h(configuredDisplayValue($server['name'] ?? '')) ?>">
                       <input type="hidden" name="action" value="test_managed_server">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                       <input type="hidden" name="server_id" value="<?= h($serverId) ?>">
-                      <button type="submit">Test Connection</button>
+                      <button type="submit"<?= $serverTestDisabledReason === '' ? '' : ' disabled title="' . h($serverTestDisabledReason) . '"' ?>>Test Connection</button>
                     </form>
                     <button type="button" class="secondary project-card-toggle" data-project-toggle aria-expanded="false">Show details</button>
-                    <button type="button" class="secondary" data-server-edit-toggle aria-expanded="false">Edit</button>
+	                    <button type="button" class="secondary" data-server-edit-toggle data-server-id="<?= h($serverId) ?>" aria-expanded="false">Edit</button>
                     <form method="post" action="/?tab=servers#managed-servers" onsubmit="return confirm('Remove this managed server from Dev Console? SSH keys and remote data will not be deleted.');">
                       <input type="hidden" name="action" value="remove_managed_server">
                       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
@@ -2160,81 +2196,70 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                     </form>
                   </div>
                 </div>
-                <div class="project-details" hidden>
-                  <table class="compact-table">
-                    <tbody>
-                      <tr><th>Server ID</th><td><?= h(configuredDisplayValue($server['id'] ?? '')) ?></td></tr>
-                      <tr><th>Display name</th><td><?= h(configuredDisplayValue($server['name'] ?? '')) ?></td></tr>
-                      <tr><th>Description</th><td><?= h(configuredDisplayValue($server['description'] ?? '')) ?></td></tr>
-                      <tr><th>Host</th><td><?= h(configuredDisplayValue($server['host'] ?? '')) ?></td></tr>
-                      <tr><th>SSH port</th><td><?= h((string)((int)($server['port'] ?? 22))) ?></td></tr>
-                      <tr><th>SSH username</th><td><?= h(configuredDisplayValue($server['user'] ?? '')) ?></td></tr>
-                      <tr><th>Authentication</th><td>SSH private key</td></tr>
-                      <tr><th>SSH private key path</th><td class="path-value"><?= h(configuredDisplayValue($server['key'] ?? '')) ?></td></tr>
-                      <tr><th>SSH key fingerprint</th><td><?= h(configuredDisplayValue($server['key_fingerprint'] ?? '')) ?></td></tr>
-                      <tr><th>Last connection test</th><td><?= h(configuredDisplayValue($server['last_connection_test_at'] ?? '')) ?></td></tr>
-                      <tr><th>Current status</th><td><span class="status-pill <?= h(managedServersStatusClass($server)) ?>"><?= h(managedServersStatusLabel($server)) ?></span><?= (string)($server['last_error'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$server['last_error']) . '</span>' : '' ?></td></tr>
-                      <tr><th>Response time</th><td><?= h(($server['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$server['response_time_ms'] . ' ms')) ?></td></tr>
-                      <tr><th>Hostname</th><td><?= h(configuredDisplayValue($server['remote_hostname'] ?? '')) ?></td></tr>
-                      <tr><th>Linux distribution</th><td><?= h(configuredDisplayValue($server['remote_os'] ?? '')) ?></td></tr>
-                      <tr><th>Kernel version</th><td><?= h(configuredDisplayValue($server['remote_kernel'] ?? '')) ?></td></tr>
-                      <tr><th>Remote user</th><td><?= h(configuredDisplayValue($server['remote_user'] ?? '')) ?></td></tr>
-                      <tr><th>Remote working directory</th><td><?= h(configuredDisplayValue($server['remote_working_directory'] ?? '')) ?></td></tr>
-                    </tbody>
-                  </table>
-                </div>
-                <div class="project-details" data-server-edit-panel hidden>
-                  <form method="post" class="project-form" action="/?tab=servers#managed-servers" data-managed-server-form="1">
-                      <input type="hidden" name="action" value="save_managed_server">
-                      <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                      <input type="hidden" name="existing_server_id" value="<?= h($serverId) ?>">
-                      <fieldset>
-                        <legend>Server</legend>
-                        <label for="server_id_<?= h($serverId) ?>">Server ID</label>
-                        <input id="server_id_<?= h($serverId) ?>" name="server_id" type="text" required maxlength="80" value="<?= h($serverId) ?>">
-                        <label for="server_name_<?= h($serverId) ?>">Display name</label>
-                        <input id="server_name_<?= h($serverId) ?>" name="server_name" type="text" required maxlength="120" value="<?= h((string)$server['name']) ?>">
-                        <label for="server_host_<?= h($serverId) ?>">Hostname / IP</label>
-                        <input id="server_host_<?= h($serverId) ?>" name="server_host" type="text" required maxlength="253" value="<?= h((string)$server['host']) ?>">
-                        <label for="server_port_<?= h($serverId) ?>">SSH port</label>
-                        <input id="server_port_<?= h($serverId) ?>" name="server_port" type="text" required inputmode="numeric" value="<?= h((string)((int)$server['port'])) ?>">
-                        <label for="server_user_<?= h($serverId) ?>">SSH username</label>
-                        <input id="server_user_<?= h($serverId) ?>" name="server_user" type="text" required maxlength="64" value="<?= h((string)$server['user']) ?>">
-                        <label for="server_key_<?= h($serverId) ?>">SSH private key path</label>
-                        <div class="form-actions">
-                          <select data-ssh-key-select aria-label="Detected SSH keys">
-                            <option value="">Loading detected keys...</option>
-                          </select>
-                        </div>
-                        <input id="server_key_<?= h($serverId) ?>" name="server_key" type="text" required maxlength="255" value="<?= h((string)$server['key']) ?>" readonly data-server-key-path>
-                        <p class="field-help">Fingerprint: <span data-server-key-fingerprint><?= h(configuredDisplayValue($server['key_fingerprint'] ?? '')) ?></span></p>
-                        <label for="server_description_<?= h($serverId) ?>">Description</label>
-                        <input id="server_description_<?= h($serverId) ?>" name="server_description" type="text" maxlength="500" value="<?= h((string)$server['description']) ?>">
-                      </fieldset>
-                      <button type="submit">Save Server</button>
-                  </form>
-                </div>
+	                <div class="project-details" hidden>
+	                  <dl class="server-detail-grid">
+	                    <div><dt>Server ID</dt><dd><?= h(configuredDisplayValue($server['id'] ?? '')) ?></dd></div>
+	                    <div><dt>Display name</dt><dd><?= h(configuredDisplayValue($server['name'] ?? '')) ?></dd></div>
+		                    <div><dt>Host / hostname</dt><dd data-server-detail-host><?= h($serverHostDetail) ?></dd></div>
+		                    <div><dt data-server-detail-user-label><?= h($serverUserDetailLabel) ?></dt><dd data-server-detail-user><?= h($serverUserDetail) ?></dd></div>
+		                    <div><dt>SSH Port</dt><dd><?= h((string)((int)($server['port'] ?? 22))) ?></dd></div>
+		                    <div><dt>SSH Key</dt><dd><?= h($serverKeyLabel) ?></dd></div>
+		                    <div><dt>Status</dt><dd><span class="status-pill <?= h(managedServersStatusClass($server)) ?>" data-server-detail-status><?= h(managedServersStatusLabel($server)) ?></span><?= (string)($server['last_error'] ?? '') !== '' ? '<br><span class="meta" data-server-detail-error>' . h((string)$server['last_error']) . '</span>' : '<br><span class="meta" data-server-detail-error></span>' ?></dd></div>
+		                    <div><dt>Last checked</dt><dd data-server-detail-last-checked><?= h(configuredDisplayValue($server['last_connection_test_at'] ?? '')) ?></dd></div>
+		                    <div><dt>Response time</dt><dd data-server-detail-response><?= h(($server['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$server['response_time_ms'] . ' ms')) ?></dd></div>
+		                    <div><dt>Working directory</dt><dd data-server-detail-working-directory><?= h(configuredDisplayValue($server['remote_working_directory'] ?? '')) ?></dd></div>
+	                  </dl>
+	                </div>
               </section>
             <?php endforeach; ?>
           </div>
         <?php endif; ?>
       </section>
 
-      <section class="panel" id="add-server">
-        <h2>Add Server</h2>
-        <details class="compact-details subsection">
-          <summary>How to connect a new server</summary>
-          <ol>
-            <li>Generate a dedicated key: <code>ssh-keygen -t ed25519 -f ~/.ssh/my_server_key</code></li>
-            <li>Display the public key: <code>cat ~/.ssh/my_server_key.pub</code></li>
-            <li>Copy the public key to the remote server's <code>~/.ssh/authorized_keys</code>.</li>
-            <li>Verify manually: <code>ssh -i ~/.ssh/my_server_key root@SERVER</code></li>
-            <li>Open the SSH private key dropdown and select <code>my_server_key</code>.</li>
-            <li>Press <strong>Test Connection</strong>.</li>
-          </ol>
-          <p class="field-help">Use a dedicated deployment key for each managed server. Reusing GitHub SSH keys makes access harder to audit and rotate later.</p>
-        </details>
-        <?php if (!empty($managedServerFormErrors)): ?>
+	      <aside class="server-sidebar" id="server-sidebar">
+	        <section class="dashboard-card server-key-compact" id="server-ssh-key">
+	          <div class="dashboard-header">
+	            <h3>Configure SSH access to your server</h3>
+	          </div>
+	          <?php if (empty($managedServerSharedKey['generated'])): ?>
+	            <p class="field-help">Dev Console needs one SSH key to connect to Managed Servers.</p>
+	            <form method="post" action="/?tab=servers#server-ssh-key">
+	              <input type="hidden" name="action" value="generate_managed_server_key">
+	              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+	              <button type="submit">Generate SSH Key</button>
+	            </form>
+	          <?php else: ?>
+	            <ol class="field-help">
+	              <li>Copy the setup command below.</li>
+	              <li>Run it on the new server as root.</li>
+	              <li>Enter the server details.</li>
+	              <li>Test the connection.</li>
+	            </ol>
+	            <div class="copy-field">
+	              <label for="serverSetupCommand">Setup command</label>
+	              <div class="copy-row">
+	                <pre id="serverSetupCommand" class="tool-operation-log"><?= h((string)$managedServerSharedKey['setup_command']) ?></pre>
+	                <button type="button" class="secondary" data-copy-log="serverSetupCommand">Copy</button>
+	              </div>
+	              <span class="hint" data-log-message="serverSetupCommand" aria-live="polite"></span>
+	            </div>
+	            <details class="compact-details subsection">
+	              <summary>Advanced</summary>
+	              <div class="copy-field">
+	                <label for="serverPublicKey">Public key</label>
+	                <div class="copy-row">
+	                  <pre id="serverPublicKey" class="tool-operation-log"><?= h((string)$managedServerSharedKey['public_key']) ?></pre>
+	                  <button type="button" class="secondary" data-copy-log="serverPublicKey">Copy</button>
+	                </div>
+	              </div>
+	              <p class="field-help">Fingerprint: <?= h(configuredDisplayValue($managedServerSharedKey['fingerprint'] ?? '')) ?></p>
+	            </details>
+	          <?php endif; ?>
+	        </section>
+
+	      <section class="panel" id="add-server" data-server-add-panel>
+	        <h2>Add Server</h2>
+	        <?php if (!empty($managedServerFormErrors)): ?>
           <section class="result-block error">
             <h2>Server not saved</h2>
             <ul>
@@ -2250,33 +2275,74 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <fieldset>
             <legend>Server</legend>
             <label for="server_id">Server ID</label>
-            <input id="server_id" name="server_id" type="text" required maxlength="80" placeholder="ak-ru" value="<?= h((string)$managedServerFormValues['id']) ?>">
-            <label for="server_name">Display name</label>
-            <input id="server_name" name="server_name" type="text" required maxlength="120" placeholder="AK Development Server" value="<?= h((string)$managedServerFormValues['name']) ?>">
-            <label for="server_host">Hostname / IP</label>
-            <input id="server_host" name="server_host" type="text" required maxlength="253" placeholder="100.x.x.x" value="<?= h((string)$managedServerFormValues['host']) ?>">
+	            <input id="server_id" name="server_id" type="text" required maxlength="80" placeholder="my-server" value="<?= h((string)$managedServerFormValues['id']) ?>">
+	            <label for="server_name">Display name</label>
+	            <input id="server_name" name="server_name" type="text" required maxlength="120" placeholder="My Server" value="<?= h((string)$managedServerFormValues['name']) ?>">
+	            <label for="server_host">Hostname / IP</label>
+	            <input id="server_host" name="server_host" type="text" required maxlength="253" placeholder="203.0.113.10" value="<?= h((string)$managedServerFormValues['host']) ?>">
             <label for="server_port">SSH port</label>
             <input id="server_port" name="server_port" type="text" required inputmode="numeric" value="<?= h((string)($managedServerFormValues['port'] ?: 22)) ?>">
             <label for="server_user">SSH username</label>
-            <input id="server_user" name="server_user" type="text" required maxlength="64" placeholder="root" value="<?= h((string)$managedServerFormValues['user']) ?>">
-            <label for="server_key">SSH private key path</label>
-            <div class="form-actions">
-              <select data-ssh-key-select aria-label="Detected SSH keys">
-                <option value="">Loading detected keys...</option>
-              </select>
-            </div>
-            <input id="server_key" name="server_key" type="text" required maxlength="255" placeholder="/home/iovon/.ssh/id_ed25519" value="<?= h((string)$managedServerFormValues['key']) ?>" readonly data-server-key-path>
-            <p class="field-help">Fingerprint: <span data-server-key-fingerprint><?= h(configuredDisplayValue($managedServerFormValues['key_fingerprint'] ?? '')) ?></span></p>
-            <p class="field-help">Dev Console stores only the key path. It does not copy private keys.</p>
-            <p class="field-help">Authentication method: SSH private key.</p>
-            <label for="server_description">Description</label>
-            <input id="server_description" name="server_description" type="text" maxlength="500" placeholder="Optional" value="<?= h((string)$managedServerFormValues['description']) ?>">
-          </fieldset>
-          <button type="submit">Add Server</button>
-        </form>
-      </section>
-    </div>
-  </section>
+	            <input id="server_user" name="server_user" type="text" required maxlength="64" value="<?= h((string)($managedServerFormValues['user'] !== '' ? $managedServerFormValues['user'] : 'root')) ?>">
+	            <label>SSH Key</label>
+	            <p><strong>Dev Console Server Key</strong></p>
+	          </fieldset>
+          <button type="submit"<?= !empty($managedServerSharedKey['generated']) ? '' : ' disabled title="Generate the Dev Console Server SSH Key before adding new servers."' ?>>Add Server</button>
+	        </form>
+	      </section>
+	        <?php foreach ($managedServers as $server): ?>
+	          <?php
+	            $serverId = (string)($server['id'] ?? '');
+	            $serverUsesSharedKey = (string)($server['key'] ?? '') === (string)($managedServerSharedKey['path'] ?? '');
+	            $serverKeyLabel = $serverUsesSharedKey ? 'Dev Console Server Key' : 'Custom SSH Key';
+	          ?>
+	          <section class="panel" data-server-edit-panel data-server-edit-id="<?= h($serverId) ?>" hidden>
+	            <div class="dashboard-header">
+	              <h2>Edit Server</h2>
+	              <button type="button" class="secondary" data-server-edit-cancel>Cancel</button>
+	            </div>
+	            <form method="post" class="project-form" action="/?tab=servers#managed-servers" data-managed-server-form="1">
+	              <input type="hidden" name="action" value="save_managed_server">
+	              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+	              <input type="hidden" name="existing_server_id" value="<?= h($serverId) ?>">
+	              <fieldset>
+	                <legend>Server</legend>
+	                <label for="server_id_<?= h($serverId) ?>">Server ID</label>
+	                <input id="server_id_<?= h($serverId) ?>" name="server_id" type="text" required maxlength="80" value="<?= h($serverId) ?>">
+	                <label for="server_name_<?= h($serverId) ?>">Display name</label>
+	                <input id="server_name_<?= h($serverId) ?>" name="server_name" type="text" required maxlength="120" value="<?= h((string)$server['name']) ?>">
+	                <label for="server_host_<?= h($serverId) ?>">Hostname / IP</label>
+	                <input id="server_host_<?= h($serverId) ?>" name="server_host" type="text" required maxlength="253" value="<?= h((string)$server['host']) ?>">
+	                <label for="server_port_<?= h($serverId) ?>">SSH port</label>
+	                <input id="server_port_<?= h($serverId) ?>" name="server_port" type="text" required inputmode="numeric" value="<?= h((string)((int)$server['port'])) ?>">
+	                <label for="server_user_<?= h($serverId) ?>">SSH username</label>
+	                <input id="server_user_<?= h($serverId) ?>" name="server_user" type="text" required maxlength="64" value="<?= h((string)$server['user']) ?>">
+	                <label>SSH Key</label>
+	                <p><strong><?= h($serverKeyLabel) ?></strong></p>
+	                <?php if ($serverUsesSharedKey): ?>
+	                  <details class="compact-details">
+	                    <summary>Advanced</summary>
+	                    <p class="field-help">Fingerprint: <?= h(configuredDisplayValue($managedServerSharedKey['fingerprint'] ?? '')) ?></p>
+	                  </details>
+	                <?php else: ?>
+	                  <details class="compact-details">
+	                    <summary>Advanced</summary>
+	                    <p class="field-help">Fingerprint: <?= h(configuredDisplayValue($server['key_fingerprint'] ?? '')) ?></p>
+	                    <p class="field-help"><code><?= h(configuredDisplayValue($server['key'] ?? '')) ?></code></p>
+	                  </details>
+	                  <button type="submit" name="use_shared_server_key" value="1" class="secondary"<?= !empty($managedServerSharedKey['generated']) ? '' : ' disabled title="Generate the Dev Console Server SSH Key first."' ?>>Use Dev Console Server Key</button>
+	                <?php endif; ?>
+	              </fieldset>
+	              <div class="server-form-actions">
+	                <button type="submit">Save</button>
+	                <button type="button" class="secondary" data-server-edit-cancel>Cancel</button>
+	              </div>
+	            </form>
+	          </section>
+	        <?php endforeach; ?>
+	      </aside>
+	    </div>
+	  </section>
 
   <section id="settingsTab" data-tab-panel="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
     <div class="settings-layout">
@@ -2902,13 +2968,53 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const managedServerResultWorkingDirectory = document.getElementById('managedServerResultWorkingDirectory');
   const managedServerResultRtt = document.getElementById('managedServerResultRtt');
   const managedServerForms = Array.from(document.querySelectorAll('[data-managed-server-test-form="1"]'));
-  const setManagedServerButtons = (serverId, disabled) => {
-    managedServerForms.forEach((form) => {
-      if (form.dataset.serverId !== serverId) return;
-      form.querySelectorAll('button').forEach((button) => { button.disabled = disabled; });
-    });
-  };
-  const showManagedServerOperation = (operation) => {
+	  const setManagedServerButtons = (serverId, disabled) => {
+	    managedServerForms.forEach((form) => {
+	      if (form.dataset.serverId !== serverId) return;
+	      form.querySelectorAll('button').forEach((button) => { button.disabled = disabled; });
+	    });
+	  };
+	  const setServerStatusPill = (element, reachable) => {
+	    if (!element) return;
+	    element.textContent = reachable ? 'Reachable' : 'Unreachable';
+	    element.classList.remove('healthy', 'warning', 'error');
+	    element.classList.add(reachable ? 'healthy' : 'error');
+	  };
+	  const updateManagedServerCard = (operation) => {
+	    const serverId = operation.server_id || '';
+	    const card = Array.from(document.querySelectorAll('[data-server-card]')).find((candidate) => candidate.dataset.serverId === serverId);
+	    if (!card) return;
+	    const result = operation.result || {};
+	    const reachable = operation.status === 'completed' && result.success !== false;
+	    const checkedAt = operation.finished_at || new Date().toISOString();
+	    const response = result.round_trip_ms ? `${result.round_trip_ms} ms` : 'Not configured';
+	    const configuredHost = card.dataset.serverHost || '';
+	    const configuredUser = card.dataset.serverUser || '';
+	    const remoteHostname = result.hostname || '';
+	    const remoteUser = result.remote_user || '';
+	    const hostDetail = remoteHostname && remoteHostname.toLowerCase() !== configuredHost.toLowerCase()
+	      ? `${configuredHost} / ${remoteHostname}`
+	      : configuredHost;
+	    const userDiffers = remoteUser && remoteUser !== configuredUser;
+	    const userDetail = userDiffers ? `${configuredUser} / ${remoteUser}` : (remoteUser || configuredUser);
+	    setServerStatusPill(card.querySelector('[data-server-card-status]'), reachable);
+	    setServerStatusPill(card.querySelector('[data-server-detail-status]'), reachable);
+	    const lastCheckedNodes = card.querySelectorAll('[data-server-card-last-checked], [data-server-detail-last-checked]');
+	    lastCheckedNodes.forEach((node) => { node.textContent = checkedAt; });
+	    const responseNodes = card.querySelectorAll('[data-server-card-response], [data-server-detail-response]');
+	    responseNodes.forEach((node) => { node.textContent = response; });
+	    const hostNode = card.querySelector('[data-server-detail-host]');
+	    if (hostNode) hostNode.textContent = hostDetail || 'Not configured';
+	    const userLabelNode = card.querySelector('[data-server-detail-user-label]');
+	    if (userLabelNode) userLabelNode.textContent = userDiffers ? 'SSH User / Remote user' : 'SSH User';
+	    const userNode = card.querySelector('[data-server-detail-user]');
+	    if (userNode) userNode.textContent = userDetail || 'Not configured';
+	    const workingDirectoryNode = card.querySelector('[data-server-detail-working-directory]');
+	    if (workingDirectoryNode) workingDirectoryNode.textContent = result.working_directory || 'Not configured';
+	    const errorNode = card.querySelector('[data-server-detail-error]');
+	    if (errorNode) errorNode.textContent = reachable ? '' : (result.message || 'SSH connection failed');
+	  };
+	  const showManagedServerOperation = (operation) => {
     if (!managedServerPanel) return;
     const result = operation.result || {};
     managedServerPanel.hidden = false;
@@ -2940,13 +3046,11 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       const payload = await response.json();
       if (!payload.ok) throw new Error(payload.error || 'Unable to read managed server operation.');
       showManagedServerOperation(payload.operation);
-      if (payload.operation.status === 'completed' || payload.operation.status === 'failed') {
-        clearInterval(poll);
-        setManagedServerButtons(serverId, false);
-        window.setTimeout(() => {
-          window.location.href = '/?tab=servers#managed-servers';
-        }, 1200);
-      }
+	      if (payload.operation.status === 'completed' || payload.operation.status === 'failed') {
+	        clearInterval(poll);
+	        setManagedServerButtons(serverId, false);
+	        updateManagedServerCard(payload.operation);
+	      }
     };
     update().catch((error) => {
       clearInterval(poll);
@@ -2991,77 +3095,6 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       }
     });
   });
-
-  const populateSshKeySelect = (form, keys) => {
-    const select = form.querySelector('[data-ssh-key-select]');
-    if (!select) return;
-    const currentPath = form.querySelector('[data-server-key-path]')?.value || '';
-    select.innerHTML = '<option value="">Select detected key</option>';
-    keys.forEach((key) => {
-      const option = document.createElement('option');
-      option.value = key.path || '';
-      option.textContent = `${key.name || key.path}${key.permissions_ok === false ? ' (permissions need attention)' : ''}`;
-      option.dataset.fingerprint = key.fingerprint || '';
-      option.dataset.permissionsOk = key.permissions_ok === false ? '0' : '1';
-      if (currentPath && currentPath === key.path) option.selected = true;
-      select.appendChild(option);
-    });
-    if (keys.length === 0) {
-      select.innerHTML = '<option value="">No private keys detected</option>';
-    }
-  };
-  const applySelectedSshKey = (form) => {
-    const select = form.querySelector('[data-ssh-key-select]');
-    const pathInput = form.querySelector('[data-server-key-path]');
-    const fingerprint = form.querySelector('[data-server-key-fingerprint]');
-    const selected = select?.selectedOptions?.[0];
-    if (!select || !pathInput || !selected || selected.value === '') return;
-    pathInput.value = selected.value;
-    if (fingerprint) {
-      fingerprint.textContent = selected.dataset.fingerprint || 'Not configured';
-    }
-  };
-  let detectedSshKeys = null;
-  let sshKeyDetectionRequest = null;
-  const managedServerConfigForms = Array.from(document.querySelectorAll('[data-managed-server-form="1"]'));
-  const loadDetectedSshKeys = async (force = false) => {
-    if (!force && Array.isArray(detectedSshKeys)) {
-      managedServerConfigForms.forEach((form) => populateSshKeySelect(form, detectedSshKeys));
-      return detectedSshKeys;
-    }
-    if (sshKeyDetectionRequest && !force) return sshKeyDetectionRequest;
-    sshKeyDetectionRequest = fetch('?action=detect-ssh-keys', { cache: 'no-store' })
-      .then(async (response) => {
-        const payload = await response.json();
-        if (!payload.ok) throw new Error(payload.error || 'Unable to detect SSH keys.');
-        detectedSshKeys = payload.keys || [];
-        managedServerConfigForms.forEach((form) => populateSshKeySelect(form, detectedSshKeys));
-        return detectedSshKeys;
-      })
-      .catch((error) => {
-        managedServerConfigForms.forEach((form) => {
-          const fingerprint = form.querySelector('[data-server-key-fingerprint]');
-          if (fingerprint) fingerprint.textContent = error.message;
-        });
-        return [];
-      })
-      .finally(() => {
-        sshKeyDetectionRequest = null;
-      });
-    return sshKeyDetectionRequest;
-  };
-  managedServerConfigForms.forEach((form) => {
-    const select = form.querySelector('[data-ssh-key-select]');
-    select?.addEventListener('change', () => applySelectedSshKey(form));
-    select?.addEventListener('focus', () => {
-      loadDetectedSshKeys(true).then(() => applySelectedSshKey(form));
-    });
-  });
-  if (managedServerConfigForms.length > 0) {
-    loadDetectedSshKeys().then(() => {
-      managedServerConfigForms.forEach((form) => applySelectedSshKey(form));
-    });
-  }
 
   const projectNameInput = document.getElementById('project_name');
   const productionDomainInput = document.getElementById('production_domain');
@@ -3245,26 +3278,29 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     });
   });
 
-  document.querySelectorAll('[data-server-card]').forEach((card) => {
-    const toggle = card.querySelector('[data-server-edit-toggle]');
-    const panel = card.querySelector('[data-server-edit-panel]');
-    const setEditing = (editing) => {
-      if (panel) panel.hidden = !editing;
-      if (toggle) {
-        toggle.textContent = editing ? 'Hide edit' : 'Edit';
-        toggle.setAttribute('aria-expanded', editing ? 'true' : 'false');
-      }
-      if (editing) {
-        loadDetectedSshKeys().then(() => {
-          const form = panel?.querySelector('[data-managed-server-form="1"]');
-          if (form) applySelectedSshKey(form);
-        });
-      }
-    };
-    setEditing(false);
-    toggle?.addEventListener('click', () => {
-      setEditing(panel ? panel.hidden : false);
+  const serverAddPanel = document.querySelector('[data-server-add-panel]');
+  const serverEditPanels = Array.from(document.querySelectorAll('[data-server-edit-panel]'));
+  const serverEditToggles = Array.from(document.querySelectorAll('[data-server-edit-toggle]'));
+  const setServerEditing = (serverId = '') => {
+    serverEditPanels.forEach((panel) => {
+      panel.hidden = (panel.dataset.serverEditId || '') !== serverId;
     });
+    serverEditToggles.forEach((toggle) => {
+      const active = (toggle.dataset.serverId || '') === serverId;
+      toggle.textContent = active ? 'Cancel edit' : 'Edit';
+      toggle.setAttribute('aria-expanded', active ? 'true' : 'false');
+    });
+    if (serverAddPanel) serverAddPanel.hidden = serverId !== '';
+  };
+  setServerEditing('');
+  serverEditToggles.forEach((toggle) => {
+    toggle.addEventListener('click', () => {
+      const serverId = toggle.dataset.serverId || '';
+      setServerEditing(toggle.getAttribute('aria-expanded') === 'true' ? '' : serverId);
+    });
+  });
+  document.querySelectorAll('[data-server-edit-cancel]').forEach((button) => {
+    button.addEventListener('click', () => setServerEditing(''));
   });
 
   let pendingFiles = [];

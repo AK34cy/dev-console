@@ -196,21 +196,118 @@ function projectVhostPath(array $project, string $environment, string $available
     return rtrim($availableDir, '/') . '/' . projectEnvironmentVhostName($project, $environment);
 }
 
+function projectSafeVhostFilename(string $filename): bool
+{
+    return preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*\.conf$/', $filename) === 1
+        && basename($filename) === $filename
+        && !str_contains($filename, '..');
+}
+
+function projectStoredVhostName(array $project, string $environment, bool $remote = false): string
+{
+    $stored = (string)($project['provisioning'][$environment . '_vhost'] ?? '');
+    if ($stored === '') {
+        $setupField = $environment === 'production' ? 'production_site' : 'preview_site';
+        $stored = (string)($project['setup'][$setupField] ?? '');
+    }
+
+    return $stored !== '' ? $stored : ($remote ? projectRemoteEnvironmentVhostName($project, $environment) : projectEnvironmentVhostName($project, $environment));
+}
+
+function projectVhostPathForName(string $filename, string $availableDir = '/etc/apache2/sites-available'): string
+{
+    return rtrim($availableDir, '/') . '/' . $filename;
+}
+
+function projectEnabledPathForName(string $filename, string $enabledDir = '/etc/apache2/sites-enabled'): string
+{
+    return rtrim($enabledDir, '/') . '/' . $filename;
+}
+
 function projectEnabledPath(array $project, string $environment, string $enabledDir = '/etc/apache2/sites-enabled'): string
 {
     return rtrim($enabledDir, '/') . '/' . projectEnvironmentVhostName($project, $environment);
 }
 
-function projectVhostMarkersMatch(string $path, array $project, string $environment): bool
+function projectVhostMarkerStatus(string $path, array $project, string $environment): array
 {
     if (!is_file($path)) {
-        return false;
+        return [
+            'exists' => false,
+            'managed_marker' => 'absent',
+            'project_marker' => 'not checked',
+            'environment_marker' => 'not checked',
+            'matches' => true,
+        ];
     }
 
     $contents = (string)@file_get_contents($path);
-    return str_contains($contents, DEV_CONSOLE_MANAGED_MARKER)
-        && str_contains($contents, '# Project: ' . (string)$project['id'])
-        && str_contains($contents, '# Environment: ' . $environment);
+    $managed = str_contains($contents, DEV_CONSOLE_MANAGED_MARKER);
+    $projectId = (string)$project['id'];
+    $projectMatches = str_contains($contents, '# Project ID: ' . $projectId) || str_contains($contents, '# Project: ' . $projectId);
+    $environmentMatches = str_contains($contents, '# Environment: ' . $environment);
+
+    return [
+        'exists' => true,
+        'managed_marker' => $managed ? 'present' : 'missing',
+        'project_marker' => $projectMatches ? 'present' : 'missing',
+        'environment_marker' => $environmentMatches ? 'present' : 'missing',
+        'matches' => $managed && $projectMatches && $environmentMatches,
+    ];
+}
+
+function projectVhostMarkersMatch(string $path, array $project, string $environment): bool
+{
+    $status = projectVhostMarkerStatus($path, $project, $environment);
+
+    return !empty($status['exists']) && !empty($status['matches']);
+}
+
+function projectVhostDeletionDiagnostic(array $target, string $reason): string
+{
+    return "Deletion stopped for " . ucfirst((string)$target['environment']) . " vhost.\n\n"
+        . 'Project: ' . (string)$target['project_id'] . "\n\n"
+        . 'Expected filename: ' . (string)$target['expected'] . "\n\n"
+        . 'Stored filename: ' . (string)$target['stored'] . "\n\n"
+        . 'Actual file: ' . (string)$target['path'] . "\n\n"
+        . 'Managed marker: ' . (string)($target['managed_marker'] ?? 'not checked') . "\n\n"
+        . 'Project ID marker: ' . (string)($target['project_marker'] ?? 'not checked') . "\n\n"
+        . 'Environment marker: ' . (string)($target['environment_marker'] ?? 'not checked') . "\n\n"
+        . 'Reason: ' . $reason;
+}
+
+function projectResolveDeletionVhostTarget(array $project, string $environment, string $availableDir, string $enabledDir, bool $remote = false): array
+{
+    $expected = $remote ? projectRemoteEnvironmentVhostName($project, $environment) : projectEnvironmentVhostName($project, $environment);
+    $stored = projectStoredVhostName($project, $environment, $remote);
+    $path = projectVhostPathForName($stored, $availableDir);
+    $target = [
+        'environment' => $environment,
+        'project_id' => (string)($project['id'] ?? ''),
+        'expected' => $expected,
+        'stored' => $stored,
+        'path' => $path,
+        'enabled_path' => projectEnabledPathForName($stored, $enabledDir),
+        'safe' => projectSafeVhostFilename($stored),
+        'exists' => null,
+        'matches' => false,
+        'managed_marker' => 'not checked',
+        'project_marker' => 'not checked',
+        'environment_marker' => 'not checked',
+    ];
+    if (!$target['safe']) {
+        $target['error'] = projectVhostDeletionDiagnostic($target, 'Stored vhost filename is not a safe Apache config basename.');
+        return $target;
+    }
+    if (!$remote) {
+        $status = projectVhostMarkerStatus($path, $project, $environment);
+        $target = array_merge($target, $status);
+        if (!empty($status['exists']) && empty($status['matches'])) {
+            $target['error'] = projectVhostDeletionDiagnostic($target, 'Cannot safely prove this Apache vhost belongs to Project ' . (string)$project['id'] . '.');
+        }
+    }
+
+    return $target;
 }
 
 function projectGenerateVhost(array $project, string $environment, string $documentRoot): string
@@ -393,6 +490,51 @@ function projectRemoteApacheConfigIsManagedCommand(string $path, array $project,
         . ' || (grep -F ' . projectRemoteShellValue(DEV_CONSOLE_MANAGED_MARKER) . ' ' . projectRemoteShellPath($path) . ' >/dev/null'
         . ' && grep -F ' . projectRemoteShellValue('# Project ID: ' . (string)$project['id']) . ' ' . projectRemoteShellPath($path) . ' >/dev/null'
         . ' && grep -F ' . projectRemoteShellValue('# Environment: ' . $environment) . ' ' . projectRemoteShellPath($path) . ' >/dev/null)';
+}
+
+function projectRemoteApacheMarkerStatusCommand(string $path, array $project, string $environment): string
+{
+    $quotedPath = projectRemoteShellPath($path);
+    $managed = projectRemoteShellValue(DEV_CONSOLE_MANAGED_MARKER);
+    $projectMarker = projectRemoteShellValue('# Project ID: ' . (string)$project['id']);
+    $legacyProjectMarker = projectRemoteShellValue('# Project: ' . (string)$project['id']);
+    $environmentMarker = projectRemoteShellValue('# Environment: ' . $environment);
+
+    return 'if [ ! -e ' . $quotedPath . ' ]; then printf "exists=0\n"; else '
+        . 'printf "exists=1\n"; '
+        . 'if grep -F ' . $managed . ' ' . $quotedPath . ' >/dev/null; then printf "managed_marker=present\n"; else printf "managed_marker=missing\n"; fi; '
+        . 'if grep -F ' . $projectMarker . ' ' . $quotedPath . ' >/dev/null || grep -F ' . $legacyProjectMarker . ' ' . $quotedPath . ' >/dev/null; then printf "project_marker=present\n"; else printf "project_marker=missing\n"; fi; '
+        . 'if grep -F ' . $environmentMarker . ' ' . $quotedPath . ' >/dev/null; then printf "environment_marker=present\n"; else printf "environment_marker=missing\n"; fi; '
+        . 'fi';
+}
+
+function projectParseRemoteMarkerStatus(string $output): array
+{
+    $status = [
+        'exists' => false,
+        'managed_marker' => 'not checked',
+        'project_marker' => 'not checked',
+        'environment_marker' => 'not checked',
+        'matches' => true,
+    ];
+    foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
+        if (!str_contains($line, '=')) {
+            continue;
+        }
+        [$key, $value] = array_map('trim', explode('=', $line, 2));
+        if ($key === 'exists') {
+            $status['exists'] = $value === '1';
+        } elseif (array_key_exists($key, $status)) {
+            $status[$key] = $value;
+        }
+    }
+    if (!empty($status['exists'])) {
+        $status['matches'] = $status['managed_marker'] === 'present'
+            && $status['project_marker'] === 'present'
+            && $status['environment_marker'] === 'present';
+    }
+
+    return $status;
 }
 
 function projectRemoteInstallSite(array $server, array $project, string $environment, string $content, string $availableDir, array &$log, array &$installedSites): void
@@ -1112,6 +1254,98 @@ function projectRemoveFromConsole(array $configuration, string $projectId): arra
     return projectActionResult(true, 'Project removed from Dev Console.');
 }
 
+function projectRemoteDelete(array $configuration, array $project, string $projectId, string $availableDir, string $enabledDir, string $allowedBase, array $options = []): array
+{
+    $servers = is_array($options['managed_servers'] ?? null)
+        ? $options['managed_servers']
+        : (function_exists('managedServersLoad') ? managedServersLoad() : []);
+    $serverId = (string)($project['managed_server_id'] ?? '');
+    $server = function_exists('managedServersFind') ? managedServersFind($servers, $serverId) : null;
+    $runCommands = $options['run_commands'] ?? true;
+    $log = [];
+
+    try {
+        if ($server === null) {
+            throw new RuntimeException('Managed Server not found.');
+        }
+        projectRemoteValidateServer($server);
+        $paths = projectAssertManagedPathPolicy($project, $allowedBase);
+        $targets = [];
+        foreach (['production', 'preview'] as $environment) {
+            $target = projectResolveDeletionVhostTarget($project, $environment, $availableDir, $enabledDir, true);
+            if (empty($target['safe'])) {
+                throw new RuntimeException((string)$target['error']);
+            }
+            $statusResult = $runCommands
+                ? projectRemoteRun($server, projectRemoteApacheMarkerStatusCommand((string)$target['path'], $project, $environment), $log)
+                : ['exit_code' => 0, 'stdout' => "exists=0\n", 'success' => true, 'output' => ''];
+            if ((int)($statusResult['exit_code'] ?? 1) !== 0) {
+                throw new RuntimeException(projectVhostDeletionDiagnostic($target, 'Unable to inspect remote Apache vhost ownership markers.'));
+            }
+            $status = projectParseRemoteMarkerStatus((string)($statusResult['stdout'] ?? ''));
+            $target = array_merge($target, $status);
+            if (!empty($target['exists']) && empty($target['matches'])) {
+                throw new RuntimeException(projectVhostDeletionDiagnostic($target, 'Cannot safely prove this Apache vhost belongs to Project ' . (string)$project['id'] . '.'));
+            }
+            if ((string)$target['stored'] !== (string)$target['expected']) {
+                $log[] = ucfirst($environment) . ' uses legacy stored vhost filename "' . (string)$target['stored'] . '" instead of current convention "' . (string)$target['expected'] . '".';
+            }
+            if (empty($target['exists'])) {
+                $log[] = ucfirst($environment) . ' Apache config already absent: ' . (string)$target['stored'];
+            }
+            $targets[$environment] = $target;
+        }
+
+        if ($runCommands) {
+            foreach ($targets as $environment => $target) {
+                $enabledCheck = projectRemoteRun($server, 'test -e ' . projectRemoteShellPath((string)$target['enabled_path']) . ' || test -L ' . projectRemoteShellPath((string)$target['enabled_path']), $log);
+                if ((int)$enabledCheck['exit_code'] === 0) {
+                    $result = projectRemoteRun($server, 'a2dissite ' . escapeshellarg((string)$target['stored']), $log);
+                    if ((int)$result['exit_code'] !== 0) {
+                        throw new RuntimeException('Unable to disable ' . $environment . ' site.');
+                    }
+                }
+            }
+            $result = projectRemoteRun($server, 'apache2ctl configtest', $log);
+            if ((int)$result['exit_code'] !== 0) {
+                throw new RuntimeException('Apache configtest failed.');
+            }
+            $result = projectRemoteRun($server, 'systemctl reload apache2', $log);
+            if ((int)$result['exit_code'] !== 0) {
+                throw new RuntimeException('Apache reload failed.');
+            }
+            foreach ($targets as $environment => $target) {
+                if (!empty($target['exists'])) {
+                    $result = projectRemoteRun($server, 'rm -f -- ' . projectRemoteShellPath((string)$target['path']), $log);
+                    if ((int)$result['exit_code'] !== 0) {
+                        throw new RuntimeException('Unable to delete ' . $environment . ' Apache config.');
+                    }
+                    $log[] = 'Deleted remote Apache config: ' . (string)$target['stored'];
+                }
+            }
+            foreach (['production', 'preview'] as $environment) {
+                $result = projectRemoteRun($server, 'rm -rf -- ' . projectRemoteShellPath($paths[$environment]), $log);
+                if ((int)$result['exit_code'] !== 0) {
+                    throw new RuntimeException('Unable to delete remote ' . $environment . ' directory.');
+                }
+                $log[] = 'Deleted remote directory if present: ' . $paths[$environment];
+            }
+        }
+        if (!empty($project['git']['connected'])) {
+            $log[] = 'Git repository preserved: ' . (string)$project['repository_path'];
+        }
+        if (empty($options['skip_save'])) {
+            if (!devConsoleSaveProjectConfiguration(devConsoleRemoveProjectFromConfiguration($configuration, $projectId))) {
+                throw new RuntimeException('Unable to save project configuration.');
+            }
+        }
+
+        return projectActionResult(true, 'Project deleted.', $log);
+    } catch (Throwable $exception) {
+        return projectActionResult(false, $exception->getMessage(), $log);
+    }
+}
+
 function projectSafeRecursiveDelete(string $path, string $expectedPath, string $repositoryPath, array &$log, string $allowedBase = '/var/www/projects'): void
 {
     $target = projectNormalizePath($path);
@@ -1166,25 +1400,29 @@ function projectDelete(array $configuration, string $projectId, string $confirma
     $log = [];
 
     try {
+        if ((string)($project['managed_server_id'] ?? '') !== '') {
+            return projectRemoteDelete($configuration, $project, $projectId, $availableDir, $enabledDir, $allowedBase, $options);
+        }
         $paths = projectAssertManagedPathPolicy($project, $allowedBase);
+        $targets = [];
         foreach (['production', 'preview'] as $environment) {
-            $expectedVhost = projectEnvironmentVhostName($project, $environment);
-            if (($project['provisioning'][$environment . '_vhost'] ?? null) !== $expectedVhost) {
-                throw new RuntimeException('Managed vhost metadata does not match expected filename.');
+            $target = projectResolveDeletionVhostTarget($project, $environment, $availableDir, $enabledDir);
+            if (empty($target['safe']) || !empty($target['error'])) {
+                throw new RuntimeException((string)$target['error']);
             }
-            $vhostPath = projectVhostPath($project, $environment, $availableDir);
-            if (!is_file($vhostPath)) {
-                throw new RuntimeException('Managed Apache config is missing: ' . basename($vhostPath));
+            if ((string)$target['stored'] !== (string)$target['expected']) {
+                $log[] = ucfirst($environment) . ' uses legacy stored vhost filename "' . (string)$target['stored'] . '" instead of current convention "' . (string)$target['expected'] . '".';
             }
-            if (!projectVhostMarkersMatch($vhostPath, $project, $environment)) {
-                throw new RuntimeException('Refusing to delete unverified Apache config: ' . basename($vhostPath));
+            if (empty($target['exists'])) {
+                $log[] = ucfirst($environment) . ' Apache config already absent: ' . (string)$target['stored'];
             }
+            $targets[$environment] = $target;
         }
 
         if ($runCommands) {
-            foreach (['production', 'preview'] as $environment) {
-                if (file_exists(projectEnabledPath($project, $environment, $enabledDir))) {
-                    $result = projectRunFixedCommand([projectApacheCommandPath('a2dissite'), projectEnvironmentVhostName($project, $environment)]);
+            foreach ($targets as $environment => $target) {
+                if (file_exists((string)$target['enabled_path']) || is_link((string)$target['enabled_path'])) {
+                    $result = projectRunFixedCommand([projectApacheCommandPath('a2dissite'), (string)$target['stored']]);
                     projectAppendCommandLog($log, $result);
                     if ($result['exit_code'] !== 0) throw new RuntimeException('Unable to disable ' . $environment . ' site.');
                 }
@@ -1197,8 +1435,8 @@ function projectDelete(array $configuration, string $projectId, string $confirma
             if ($result['exit_code'] !== 0) throw new RuntimeException('Apache reload failed.');
         }
 
-        foreach (['production', 'preview'] as $environment) {
-            $vhostPath = projectVhostPath($project, $environment, $availableDir);
+        foreach ($targets as $target) {
+            $vhostPath = (string)$target['path'];
             if (is_file($vhostPath)) {
                 if (!@unlink($vhostPath)) throw new RuntimeException('Unable to delete Apache config: ' . basename($vhostPath));
                 $log[] = 'Deleted Apache config: ' . basename($vhostPath);

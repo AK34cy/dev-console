@@ -204,6 +204,11 @@ function managedServersKeyFingerprint(string $path): string
     return (string)$matches[1];
 }
 
+function managedServersShellQuote(string $value): string
+{
+    return "'" . str_replace("'", "'\"'\"'", $value) . "'";
+}
+
 function managedServersCurrentHome(): string
 {
     if (function_exists('posix_geteuid') && function_exists('posix_getpwuid')) {
@@ -217,51 +222,137 @@ function managedServersCurrentHome(): string
     return is_string($home) ? $home : '';
 }
 
-function managedServersDetectSshKeys(): array
+function managedServersSharedKeyPath(): string
 {
     $home = managedServersCurrentHome();
-    $sshDirectory = $home === '' ? '' : rtrim($home, '/') . '/.ssh';
-    if ($sshDirectory === '' || !is_dir($sshDirectory) || !is_readable($sshDirectory)) {
-        return [];
+
+    return $home === '' ? '' : rtrim($home, '/') . '/.ssh/dev_console_server';
+}
+
+function managedServersSharedPublicKeyPath(): string
+{
+    $keyPath = managedServersSharedKeyPath();
+
+    return $keyPath === '' ? '' : $keyPath . '.pub';
+}
+
+function managedServersReadPublicKey(string $privateKeyPath): string
+{
+    $publicKeyPath = $privateKeyPath . '.pub';
+    if (is_file($publicKeyPath) && is_readable($publicKeyPath)) {
+        return trim((string)@file_get_contents($publicKeyPath));
     }
-    $keys = [];
-    foreach (scandir($sshDirectory) ?: [] as $entry) {
-        if ($entry === '.' || $entry === '..') {
-            continue;
-        }
-        if (str_ends_with($entry, '.pub') || $entry === 'authorized_keys' || str_starts_with($entry, 'known_hosts') || $entry === 'config') {
-            continue;
-        }
-        $path = $sshDirectory . '/' . $entry;
-        if (!is_file($path) || is_link($path) || !is_readable($path)) {
-            continue;
-        }
-        $fingerprint = managedServersKeyFingerprint($path);
-        if ($fingerprint === '') {
-            continue;
-        }
-        $keys[] = [
-            'name' => $entry,
-            'path' => $path,
-            'fingerprint' => $fingerprint,
-            'permissions_ok' => managedServersKeyPermissionsValid($path),
+
+    if (!is_file($privateKeyPath) || !is_readable($privateKeyPath)) {
+        return '';
+    }
+    $sshKeygen = serverToolsFindExecutable('ssh-keygen', serverToolsDefaultPath());
+    if ($sshKeygen === '') {
+        return '';
+    }
+    $result = processRunCommand([$sshKeygen, '-y', '-f', $privateKeyPath], [
+        'timeout' => 5,
+        'env' => ['PATH' => serverToolsDefaultPath()],
+        'inherit_env' => false,
+    ]);
+    $publicKey = trim((string)($result['stdout'] ?? ''));
+    if (empty($result['success']) || $publicKey === '') {
+        return '';
+    }
+    if (@file_put_contents($publicKeyPath, $publicKey . "\n", LOCK_EX) !== false) {
+        @chmod($publicKeyPath, 0644);
+    }
+
+    return $publicKey;
+}
+
+function managedServersSetupCommand(string $publicKey): string
+{
+    if ($publicKey === '') {
+        return '';
+    }
+    $quotedKey = managedServersShellQuote($publicKey);
+
+    return 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF ' . $quotedKey . ' ~/.ssh/authorized_keys || printf ' . managedServersShellQuote('%s\n') . ' ' . $quotedKey . ' >> ~/.ssh/authorized_keys) && chmod 600 ~/.ssh/authorized_keys';
+}
+
+function managedServersSharedKeyInfo(): array
+{
+    $privateKeyPath = managedServersSharedKeyPath();
+    $publicKeyPath = managedServersSharedPublicKeyPath();
+    $privateExists = $privateKeyPath !== '' && is_file($privateKeyPath);
+    $publicKey = $privateExists ? managedServersReadPublicKey($privateKeyPath) : '';
+    $fingerprint = $privateExists ? managedServersKeyFingerprint($privateKeyPath) : '';
+
+    return [
+        'path' => $privateKeyPath,
+        'public_path' => $publicKeyPath,
+        'generated' => $privateExists && $fingerprint !== '' && $publicKey !== '',
+        'private_exists' => $privateExists,
+        'public_exists' => $publicKeyPath !== '' && is_file($publicKeyPath),
+        'fingerprint' => $fingerprint,
+        'public_key' => $publicKey,
+        'setup_command' => managedServersSetupCommand($publicKey),
+    ];
+}
+
+function managedServersGenerateSharedKey(): array
+{
+    $keyPath = managedServersSharedKeyPath();
+    if ($keyPath === '') {
+        return ['success' => false, 'message' => 'Unable to resolve the Dev Console service user home directory.', 'output' => ''];
+    }
+    if (file_exists($keyPath)) {
+        $info = managedServersSharedKeyInfo();
+        return [
+            'success' => !empty($info['generated']),
+            'message' => !empty($info['generated']) ? 'Server SSH Key already exists.' : 'Server SSH Key exists but is not usable.',
+            'output' => '',
+            'key' => $info,
         ];
     }
-    usort($keys, static fn(array $left, array $right): int => strcasecmp((string)$left['name'], (string)$right['name']));
+    $sshKeygen = serverToolsFindExecutable('ssh-keygen', serverToolsDefaultPath());
+    if ($sshKeygen === '') {
+        return ['success' => false, 'message' => 'ssh-keygen is not installed.', 'output' => ''];
+    }
+    $sshDirectory = dirname($keyPath);
+    if (!is_dir($sshDirectory) && !@mkdir($sshDirectory, 0700, true) && !is_dir($sshDirectory)) {
+        return ['success' => false, 'message' => 'Unable to create the service user .ssh directory.', 'output' => ''];
+    }
+    @chmod($sshDirectory, 0700);
+    $commentHost = gethostname();
+    $comment = 'dev-console@' . (is_string($commentHost) && $commentHost !== '' ? $commentHost : 'server');
+    $result = processRunCommand([$sshKeygen, '-t', 'ed25519', '-N', '', '-f', $keyPath, '-C', $comment], [
+        'timeout' => 15,
+        'env' => ['PATH' => serverToolsDefaultPath()],
+        'inherit_env' => false,
+    ]);
+    @chmod($keyPath, 0600);
+    @chmod($keyPath . '.pub', 0644);
+    $info = managedServersSharedKeyInfo();
 
-    return $keys;
+    return [
+        'success' => !empty($result['success']) && !empty($info['generated']),
+        'message' => !empty($result['success']) && !empty($info['generated']) ? 'Server SSH Key generated.' : 'Server SSH Key generation failed.',
+        'output' => trim((string)($result['output'] ?? '')),
+        'key' => $info,
+    ];
 }
 
 function managedServersBuildFromInput(array $input, array $existingServers, string $existingId = ''): array
 {
     $server = managedServersEmptyServer();
+    $existingServer = $existingId === '' ? null : managedServersFind($existingServers, $existingId);
+    $useSharedKey = devConsoleScalarInput($input, 'use_shared_server_key') === '1';
     $server['id'] = managedServersNormalizeId(devConsoleScalarInput($input, 'server_id'));
     $server['name'] = devConsoleScalarInput($input, 'server_name');
     $server['host'] = devConsoleScalarInput($input, 'server_host');
     $server['user'] = devConsoleScalarInput($input, 'server_user');
-    $server['key'] = devConsoleScalarInput($input, 'server_key');
+    $server['key'] = $existingServer !== null && !$useSharedKey ? (string)($existingServer['key'] ?? '') : managedServersSharedKeyPath();
     $server['key_fingerprint'] = managedServersKeyFingerprint($server['key']);
-    $server['description'] = devConsoleScalarInput($input, 'server_description');
+    $server['description'] = array_key_exists('server_description', $input)
+        ? devConsoleScalarInput($input, 'server_description')
+        : (string)($existingServer['description'] ?? '');
     $server['auth_method'] = 'ssh_key';
     $portValue = devConsoleScalarInput($input, 'server_port');
     $server['port'] = ctype_digit($portValue) ? (int)$portValue : 0;
