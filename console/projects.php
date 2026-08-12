@@ -1295,6 +1295,7 @@ function projectRemoteDelete(array $configuration, array $project, string $proje
             }
             $targets[$environment] = $target;
         }
+        projectHandleGithubRepositoryDeletion($project, $log, $options);
 
         if ($runCommands) {
             foreach ($targets as $environment => $target) {
@@ -1330,6 +1331,15 @@ function projectRemoteDelete(array $configuration, array $project, string $proje
                 }
                 $log[] = 'Deleted remote directory if present: ' . $paths[$environment];
             }
+            $projectRoot = dirname($paths['production']);
+            $quotedRoot = projectRemoteShellPath($projectRoot);
+            $rootResult = projectRemoteRun($server, 'if [ ! -e ' . $quotedRoot . ' ]; then printf %s absent; elif rmdir -- ' . $quotedRoot . ' 2>/dev/null; then printf %s removed; else printf %s preserved; fi', $log);
+            $rootState = trim((string)($rootResult['stdout'] ?? ''));
+            if ($rootState === 'removed') {
+                $log[] = 'Deleted empty remote project root: ' . $projectRoot;
+            } elseif ($rootState === 'preserved') {
+                $log[] = 'Remote project root preserved because it is not empty: ' . $projectRoot;
+            }
         }
         if (!empty($project['git']['connected'])) {
             $log[] = 'Git repository preserved: ' . (string)$project['repository_path'];
@@ -1340,7 +1350,9 @@ function projectRemoteDelete(array $configuration, array $project, string $proje
             }
         }
 
-        return projectActionResult(true, 'Project deleted.', $log);
+        $result = projectActionResult(true, 'Project deleted.', $log);
+        $result['summary_steps'] = projectDeleteSummarySteps($project, $log, $options);
+        return $result;
     } catch (Throwable $exception) {
         return projectActionResult(false, $exception->getMessage(), $log);
     }
@@ -1386,11 +1398,104 @@ function projectSafeRecursiveDelete(string $path, string $expectedPath, string $
     $log[] = 'Deleted directory: ' . $target;
 }
 
+function projectRemoveEmptyGeneratedRoot(array $project, array &$log, string $allowedBase = '/var/www/projects'): void
+{
+    $projectId = (string)($project['id'] ?? '');
+    if (!projectSafeId($projectId)) {
+        throw new RuntimeException('Invalid project identifier.');
+    }
+    $base = rtrim(projectNormalizePath($allowedBase), '/');
+    $productionPath = projectNormalizePath((string)($project['production']['path'] ?? ''));
+    $previewPath = projectNormalizePath((string)($project['preview']['path'] ?? ''));
+    $root = projectNormalizePath(dirname($productionPath));
+    if (projectNormalizePath(dirname($previewPath)) !== $root || basename($productionPath) !== 'production' || basename($previewPath) !== 'preview') {
+        $log[] = 'Project root preserved because environment paths do not match the generated layout.';
+        return;
+    }
+    if (!str_starts_with($root . '/', $base . '/')) {
+        throw new RuntimeException('Project root is outside the managed Project base.');
+    }
+    if (!file_exists($root)) {
+        return;
+    }
+    if (is_link($root) || !is_dir($root)) {
+        $log[] = 'Project root preserved because it is not a normal directory: ' . $root;
+        return;
+    }
+    $entries = array_values(array_diff(scandir($root) ?: [], ['.', '..']));
+    if (!empty($entries)) {
+        $log[] = 'Project root preserved because it is not empty: ' . $root;
+        return;
+    }
+    if (!@rmdir($root)) {
+        $log[] = 'Project root preserved because it could not be removed: ' . $root;
+        return;
+    }
+
+    $log[] = 'Deleted empty project root: ' . $root;
+}
+
+function projectHandleGithubRepositoryDeletion(array $project, array &$log, array $options = []): void
+{
+    $policy = (string)($options['github_repository_policy'] ?? 'keep');
+    if ($policy !== 'delete') {
+        $log[] = 'GitHub repository preserved.';
+        return;
+    }
+    if (!function_exists('gitDeleteConfiguredGithubRepository')) {
+        throw new RuntimeException('GitHub repository deletion is unavailable.');
+    }
+    $github = is_array($options['github_configuration'] ?? null) ? $options['github_configuration'] : devConsoleLoadGithubConfiguration();
+    $delete = gitDeleteConfiguredGithubRepository($project, $github, $log, $options);
+    if (empty($delete['success'])) {
+        throw new RuntimeException((string)($delete['message'] ?? 'GitHub repository deletion failed.'));
+    }
+}
+
+function projectGithubRepositorySummaryLabel(array $project, array $options = []): string
+{
+    if (function_exists('gitConfiguredRepositoryIdentity')) {
+        $github = is_array($options['github_configuration'] ?? null) ? $options['github_configuration'] : null;
+        [$owner, $name, $error] = gitConfiguredRepositoryIdentity($project, $github);
+        if ($error === '' && $owner !== '' && $name !== '') {
+            return $owner . '/' . $name;
+        }
+    }
+
+    return 'GitHub repository';
+}
+
+function projectDeleteSummarySteps(array $project, array $log, array $options = []): array
+{
+    $rootRemoved = false;
+    foreach ($log as $line) {
+        $text = (string)$line;
+        if (str_contains($text, 'Deleted empty project root') || str_contains($text, 'Deleted empty remote project root')) {
+            $rootRemoved = true;
+            break;
+        }
+    }
+    $repositoryLabel = projectGithubRepositorySummaryLabel($project, $options);
+    $deleteGithub = (string)($options['github_repository_policy'] ?? 'keep') === 'delete';
+
+    $githubSummary = $repositoryLabel === 'GitHub repository'
+        ? 'GitHub repository'
+        : 'GitHub repository ' . $repositoryLabel;
+
+    return [
+        'Done: Managed Apache configuration removed',
+        'Done: Managed Project directories removed',
+        $rootRemoved ? 'Done: Project root removed' : 'Kept: Project root preserved',
+        'Done: Project registration removed',
+        $deleteGithub ? 'Done: ' . $githubSummary . ' deleted' : 'Kept: ' . $githubSummary,
+    ];
+}
+
 function projectDelete(array $configuration, string $projectId, string $confirmation, array $options = []): array
 {
     $project = devConsoleFindProjectById($configuration, $projectId);
     if ($project === null) return projectActionResult(false, 'Project not found.');
-    if ($confirmation !== $projectId) return projectActionResult(false, 'Project confirmation did not match.');
+    if ($confirmation !== projectMessageName($project, $projectId)) return projectActionResult(false, 'Project confirmation did not match.');
     if (empty($project['provisioning']['managed'])) return projectActionResult(false, 'Delete Project is available only for Dev Console-managed projects.');
 
     $availableDir = $options['available_dir'] ?? '/etc/apache2/sites-available';
@@ -1418,6 +1523,7 @@ function projectDelete(array $configuration, string $projectId, string $confirma
             }
             $targets[$environment] = $target;
         }
+        projectHandleGithubRepositoryDeletion($project, $log, $options);
 
         if ($runCommands) {
             foreach ($targets as $environment => $target) {
@@ -1445,6 +1551,7 @@ function projectDelete(array $configuration, string $projectId, string $confirma
         foreach (['production', 'preview'] as $environment) {
             projectSafeRecursiveDelete($paths[$environment], $paths[$environment], (string)$project['repository_path'], $log, $allowedBase);
         }
+        projectRemoveEmptyGeneratedRoot($project, $log, $allowedBase);
         if (!empty($project['git']['connected'])) {
             $log[] = 'Git repository preserved: ' . (string)$project['repository_path'];
         }
@@ -1454,7 +1561,9 @@ function projectDelete(array $configuration, string $projectId, string $confirma
             }
         }
 
-        return projectActionResult(true, 'Project deleted.', $log);
+        $result = projectActionResult(true, 'Project deleted.', $log);
+        $result['summary_steps'] = projectDeleteSummarySteps($project, $log, $options);
+        return $result;
     } catch (Throwable $exception) {
         return projectActionResult(false, $exception->getMessage(), $log);
     }
@@ -1565,6 +1674,7 @@ function projectCleanupOrphanedInfrastructure(array $configuration, string $proj
         foreach (['production', 'preview'] as $environment) {
             projectSafeRecursiveDelete($paths[$environment], $paths[$environment], $repositoryPath, $log, $allowedBase);
         }
+        projectRemoveEmptyGeneratedRoot($pseudoProject, $log, $allowedBase);
         $log[] = 'Git repository preserved: ' . $repositoryPath;
         $log[] = 'GitHub repository preserved.';
 

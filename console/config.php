@@ -608,10 +608,16 @@ function devConsoleFindProjectById(array $configuration, string $id): ?array
 
 function devConsoleGeneratedEnvironmentPaths(string $projectId): array
 {
+    $root = devConsoleGeneratedProjectRoot($projectId);
     return [
-        'production' => '/var/www/projects/' . $projectId . '/production',
-        'preview' => '/var/www/projects/' . $projectId . '/preview',
+        'production' => $root . '/production',
+        'preview' => $root . '/preview',
     ];
+}
+
+function devConsoleGeneratedProjectRoot(string $projectId): string
+{
+    return '/var/www/projects/' . $projectId;
 }
 
 function devConsoleGeneratedRepositoryPath(string $projectId): string

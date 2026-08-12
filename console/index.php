@@ -287,7 +287,8 @@ function renderOperationResult(array $result, string $operationLogId, string $do
       <?php if (!empty($operationSteps)): ?>
         <ul class="operation-summary">
           <?php foreach ($operationSteps as $step): ?>
-            <li>Done: <?= h($step) ?></li>
+            <?php $stepText = (string)$step; ?>
+            <li><?= h(preg_match('/^(Done|Kept):\s/', $stepText) === 1 ? $stepText : ('Done: ' . $stepText)) ?></li>
           <?php endforeach; ?>
         </ul>
       <?php endif; ?>
@@ -342,6 +343,11 @@ $projectFormValues = [
     'project_name' => '',
     'production_domain' => '',
     'managed_server_id' => '',
+];
+$generatedPathTemplates = [
+    'repository' => devConsoleGeneratedRepositoryPath('__PROJECT_ID__'),
+    'production' => devConsoleGeneratedEnvironmentPaths('__PROJECT_ID__')['production'],
+    'preview' => devConsoleGeneratedEnvironmentPaths('__PROJECT_ID__')['preview'],
 ];
 $projectFlash = '';
 $results = [];
@@ -778,7 +784,8 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     } elseif ($action === 'verify_project_routing') {
         $projectActionResult = projectVerifyRoutingAction($projectConfigurationForAction, $projectId, ['require_apache_running' => true]);
     } elseif ($action === 'initialize_repository') {
-        $projectActionResult = gitInitializeRepository($projectConfigurationForAction, $projectId);
+        $repositoryName = is_scalar($_POST['repository_name'] ?? null) ? trim((string)$_POST['repository_name']) : '';
+        $projectActionResult = gitInitializeRepository($projectConfigurationForAction, $projectId, $repositoryName);
     } elseif ($action === 'fetch_git_repository') {
         $projectActionResult = gitFetchRepository($projectConfigurationForAction, $projectId);
     } elseif ($action === 'pull_git_repository') {
@@ -790,8 +797,15 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     } elseif ($action === 'cleanup_orphaned_project') {
         $projectActionResult = projectCleanupOrphanedInfrastructure($projectConfigurationForAction, $projectId);
     } else {
-        $confirmation = is_scalar($_POST['confirm_project_id'] ?? null) ? (string)$_POST['confirm_project_id'] : '';
-        $projectActionResult = projectDelete($projectConfigurationForAction, $projectId, $confirmation);
+        $confirmation = is_scalar($_POST['confirm_project_name'] ?? null) ? (string)$_POST['confirm_project_name'] : '';
+        $githubRepositoryPolicy = (string)($_POST['github_repository_policy'] ?? 'keep');
+        if (!in_array($githubRepositoryPolicy, ['keep', 'delete'], true)) {
+            $githubRepositoryPolicy = 'keep';
+        }
+        $projectActionResult = projectDelete($projectConfigurationForAction, $projectId, $confirmation, [
+            'github_repository_policy' => $githubRepositoryPolicy,
+            'github_configuration' => $githubConfiguration,
+        ]);
     }
     $projectActionResult['action'] = $action;
     $projectActionResult['project_id'] = $projectId;
@@ -1767,6 +1781,25 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       </div>
     </div>
   </dialog>
+
+  <dialog id="deleteProjectDialog">
+    <div class="modal-content">
+      <h2 id="deleteProjectTitle">Delete Project</h2>
+      <label for="deleteProjectConfirmation">Type the Project name to confirm deletion.</label>
+      <input id="deleteProjectConfirmation" type="text" autocomplete="off">
+      <section class="environment-block">
+        <h4>GitHub repository</h4>
+        <label id="deleteGithubRepositoryOption"><input id="deleteGithubRepositoryCheckbox" type="checkbox"> <span id="deleteGithubRepositoryLabel"></span></label>
+        <p class="field-help" id="deleteGithubRepositoryHelp">If unchecked, the GitHub repository will be preserved.</p>
+        <p class="field-help" id="deleteGithubRepositoryUnavailable" hidden>GitHub repository deletion is unavailable.</p>
+        <p class="field-help" id="deleteGithubRepositoryUnavailableReason" hidden></p>
+      </section>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="cancelProjectDelete">Cancel</button>
+        <button type="button" class="danger" id="confirmProjectDelete" disabled>Delete Project</button>
+      </div>
+    </div>
+  </dialog>
   </section>
 
   <section id="projectsTab" data-tab-panel="projects"<?= $initialTab === 'projects' ? '' : ' hidden' ?>>
@@ -1822,6 +1855,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                 $gitCanFetch = !empty($gitStatus['can_fetch']) && in_array($gitStatus['status'], ['INITIALIZATION INCOMPLETE', 'CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND', 'REMOTE UNAVAILABLE'], true);
                 $gitCanPull = !empty($gitStatus['can_pull']) && in_array($gitStatus['status'], ['CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND'], true);
                 $gitCanPush = !empty($gitStatus['can_fetch']) && in_array($gitStatus['status'], ['AHEAD', 'AHEAD / BEHIND', 'REMOTE UNAVAILABLE'], true);
+                $githubDeletion = gitGithubRepositoryDeletionAvailable($project, $githubConfiguration);
+                $githubRepositoryLabel = !empty($githubDeletion['available'])
+                    ? ((string)$githubDeletion['owner'] . '/' . (string)$githubDeletion['name'])
+                    : '';
               ?>
               <section class="project-item" data-project-card data-expanded="<?= $cardOpen ? '1' : '0' ?>">
                 <div class="project-summary">
@@ -1840,6 +1877,38 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                 <div class="project-details"<?= $cardOpen ? '' : ' hidden' ?>>
                 <?php if ($cardActionResult !== null): ?>
                   <?php renderOperationResult($cardActionResult, 'projectOperationLog-' . $projectIdForCard, ((string)($cardActionResult['action'] ?? 'project-operation')) . '-' . $projectIdForCard . '.log'); ?>
+                  <?php if (!empty($cardActionResult['repository_collision'])): ?>
+                    <section class="result-block warning" data-repository-collision-panel>
+                      <h4>Repository already exists</h4>
+                      <dl class="dashboard-list">
+                        <div><dt>Preferred</dt><dd><?= h((string)($cardActionResult['repository_owner'] ?? '') . '/' . (string)($cardActionResult['repository_name'] ?? '')) ?></dd></div>
+                        <?php if ((string)($cardActionResult['suggested_repository_name'] ?? '') !== ''): ?>
+                          <div><dt>Suggested</dt><dd><?= h((string)($cardActionResult['repository_owner'] ?? '') . '/' . (string)$cardActionResult['suggested_repository_name']) ?></dd></div>
+                        <?php endif; ?>
+                      </dl>
+                      <div class="project-actions">
+                        <?php if ((string)($cardActionResult['suggested_repository_name'] ?? '') !== ''): ?>
+                          <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1">
+                            <input type="hidden" name="action" value="initialize_repository">
+                            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                            <input type="hidden" name="project_id" value="<?= h($projectIdForCard) ?>">
+                            <input type="hidden" name="repository_name" value="<?= h((string)$cardActionResult['suggested_repository_name']) ?>">
+                            <button type="submit">Create <?= h((string)$cardActionResult['suggested_repository_name']) ?></button>
+                          </form>
+                        <?php endif; ?>
+                        <button type="button" class="secondary" data-show-repository-name-choice>Choose another name</button>
+                        <button type="button" class="secondary" data-cancel-repository-collision>Cancel</button>
+                        <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1" data-repository-name-choice hidden>
+                          <input type="hidden" name="action" value="initialize_repository">
+                          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                          <input type="hidden" name="project_id" value="<?= h($projectIdForCard) ?>">
+                          <label for="repository_name_retry_<?= h($projectIdForCard) ?>">Manual repository name</label>
+                          <input id="repository_name_retry_<?= h($projectIdForCard) ?>" name="repository_name" type="text" maxlength="100" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,99}" value="<?= h((string)($cardActionResult['suggested_repository_name'] ?? '')) ?>">
+                          <button type="submit" class="secondary">Create chosen repository</button>
+                        </form>
+                      </div>
+                    </section>
+                  <?php endif; ?>
                 <?php endif; ?>
                 <div class="project-item-header">
                   <div>
@@ -1972,6 +2041,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                           <input type="hidden" name="action" value="initialize_repository">
                           <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                           <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
+                          <?php if ((string)($project['git']['repository_name'] ?? '') !== ''): ?>
+                            <input type="hidden" name="repository_name" value="<?= h((string)$project['git']['repository_name']) ?>">
+                          <?php endif; ?>
                           <button type="submit"<?= $githubConfigured ? '' : ' disabled title="Configure GitHub in Settings before initializing repositories."' ?>><?= $gitStatus['status'] === 'NOT INITIALIZED' ? 'Initialize Repository' : ($gitStatus['status'] === 'REMOTE UNAVAILABLE' ? 'Retry remote verification' : 'Retry Initialization') ?></button>
                         </form>
                       <?php endif; ?>
@@ -2029,13 +2101,14 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                     <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
                     <button type="submit" class="secondary" title="Removes only this project record.">Remove from Console</button>
                   </form>
-                  <p class="action-note">Delete Project removes the project registration and local project infrastructure. The local Git repository and GitHub repository are preserved.</p>
-                  <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1" data-delete-project-form="1" data-project-id="<?= h((string)$project['id']) ?>">
+                  <p class="action-note">Delete Project removes the project registration and local project infrastructure. The local Git repository is always preserved.</p>
+                  <form method="post" action="/?tab=projects#projects" data-preserve-settings-scroll="1" data-delete-project-form="1" data-project-id="<?= h((string)$project['id']) ?>" data-project-name="<?= h(projectMessageName($project, (string)$project['id'])) ?>" data-github-delete-available="<?= !empty($githubDeletion['available']) ? '1' : '0' ?>" data-github-repository="<?= h($githubRepositoryLabel) ?>" data-github-delete-reason="<?= h((string)($githubDeletion['reason'] ?? 'Repository identity cannot be verified.')) ?>">
                     <input type="hidden" name="action" value="delete_project">
                     <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
                     <input type="hidden" name="project_id" value="<?= h((string)$project['id']) ?>">
-                    <input type="hidden" name="confirm_project_id" value="">
-                    <button type="submit" class="danger" title="Removes Dev Console-managed directories and Apache configuration. Preserves Git repositories."<?= $isManaged ? '' : ' disabled' ?>>Delete Project</button>
+                    <input type="hidden" name="confirm_project_name" value="">
+                    <input type="hidden" name="github_repository_policy" value="keep">
+                    <button type="button" class="danger" data-open-delete-project title="Removes Dev Console-managed directories and Apache configuration. GitHub deletion happens only when explicitly selected."<?= $isManaged ? '' : ' disabled' ?>>Delete Project</button>
                   </form>
                 </div>
                 </div>
@@ -2811,16 +2884,77 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       projectForm.action = target === 'dashboard' ? '/?tab=dashboard' : '/?tab=projects#projects';
     });
   });
-  document.querySelectorAll('[data-delete-project-form="1"]').forEach((deleteForm) => {
-    deleteForm.addEventListener('submit', (event) => {
-      const projectId = deleteForm.dataset.projectId || '';
-      const confirmation = window.prompt(`Type ${projectId} to delete Dev Console-managed directories and Apache configuration. The local Git repository and GitHub repository will be preserved.`);
-      if (confirmation !== projectId) {
-        event.preventDefault();
-        return;
+  const deleteProjectDialog = document.getElementById('deleteProjectDialog');
+  const deleteProjectTitle = document.getElementById('deleteProjectTitle');
+  const deleteProjectConfirmation = document.getElementById('deleteProjectConfirmation');
+  const deleteGithubRepositoryOption = document.getElementById('deleteGithubRepositoryOption');
+  const deleteGithubRepositoryCheckbox = document.getElementById('deleteGithubRepositoryCheckbox');
+  const deleteGithubRepositoryLabel = document.getElementById('deleteGithubRepositoryLabel');
+  const deleteGithubRepositoryHelp = document.getElementById('deleteGithubRepositoryHelp');
+  const deleteGithubRepositoryUnavailable = document.getElementById('deleteGithubRepositoryUnavailable');
+  const deleteGithubRepositoryUnavailableReason = document.getElementById('deleteGithubRepositoryUnavailableReason');
+  const cancelProjectDelete = document.getElementById('cancelProjectDelete');
+  const confirmProjectDelete = document.getElementById('confirmProjectDelete');
+  let pendingDeleteProjectForm = null;
+  const updateDeleteProjectConfirmation = () => {
+    const expected = pendingDeleteProjectForm?.dataset.projectName || '';
+    if (confirmProjectDelete) confirmProjectDelete.disabled = !deleteProjectConfirmation || deleteProjectConfirmation.value !== expected;
+  };
+  document.querySelectorAll('[data-open-delete-project]').forEach((button) => {
+    button.addEventListener('click', () => {
+      pendingDeleteProjectForm = button.closest('form[data-delete-project-form="1"]');
+      if (!pendingDeleteProjectForm || !deleteProjectDialog) return;
+      const projectName = pendingDeleteProjectForm.dataset.projectName || '';
+      const githubAvailable = pendingDeleteProjectForm.dataset.githubDeleteAvailable === '1';
+      const githubRepository = pendingDeleteProjectForm.dataset.githubRepository || '';
+      const githubReason = pendingDeleteProjectForm.dataset.githubDeleteReason || 'Repository identity cannot be verified.';
+      if (deleteProjectTitle) deleteProjectTitle.textContent = `Delete Project: ${projectName}`;
+      if (deleteProjectConfirmation) deleteProjectConfirmation.value = '';
+      if (deleteGithubRepositoryCheckbox) {
+        deleteGithubRepositoryCheckbox.checked = false;
+        deleteGithubRepositoryCheckbox.disabled = !githubAvailable;
       }
-      const confirmationInput = deleteForm.querySelector('input[name="confirm_project_id"]');
-      if (confirmationInput) confirmationInput.value = confirmation;
+      if (deleteGithubRepositoryLabel) deleteGithubRepositoryLabel.textContent = githubAvailable ? `Delete GitHub repository ${githubRepository}` : 'Delete GitHub repository';
+      if (deleteGithubRepositoryOption) deleteGithubRepositoryOption.hidden = !githubAvailable;
+      if (deleteGithubRepositoryHelp) deleteGithubRepositoryHelp.hidden = !githubAvailable;
+      if (deleteGithubRepositoryUnavailable) {
+        deleteGithubRepositoryUnavailable.hidden = githubAvailable;
+      }
+      if (deleteGithubRepositoryUnavailableReason) {
+        deleteGithubRepositoryUnavailableReason.hidden = githubAvailable;
+        deleteGithubRepositoryUnavailableReason.textContent = githubAvailable ? '' : `Reason: ${githubReason}`;
+      }
+      updateDeleteProjectConfirmation();
+      deleteProjectDialog.showModal();
+      deleteProjectConfirmation?.focus();
+    });
+  });
+  deleteProjectConfirmation?.addEventListener('input', updateDeleteProjectConfirmation);
+  cancelProjectDelete?.addEventListener('click', () => {
+    pendingDeleteProjectForm = null;
+    deleteProjectDialog?.close();
+  });
+  confirmProjectDelete?.addEventListener('click', () => {
+    if (!pendingDeleteProjectForm || !deleteProjectConfirmation || confirmProjectDelete.disabled) return;
+    const confirmationInput = pendingDeleteProjectForm.querySelector('input[name="confirm_project_name"]');
+    const githubPolicyInput = pendingDeleteProjectForm.querySelector('input[name="github_repository_policy"]');
+    if (confirmationInput) confirmationInput.value = deleteProjectConfirmation.value;
+    if (githubPolicyInput) githubPolicyInput.value = deleteGithubRepositoryCheckbox?.checked ? 'delete' : 'keep';
+    deleteProjectDialog?.close();
+    pendingDeleteProjectForm.submit();
+  });
+  document.querySelectorAll('[data-show-repository-name-choice]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const panel = button.closest('[data-repository-collision-panel]');
+      const form = panel?.querySelector('[data-repository-name-choice]');
+      if (form) form.hidden = false;
+      button.hidden = true;
+    });
+  });
+  document.querySelectorAll('[data-cancel-repository-collision]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const panel = button.closest('[data-repository-collision-panel]');
+      if (panel) panel.hidden = true;
     });
   });
   document.querySelectorAll('[data-copy-log]').forEach((button) => {
@@ -3120,15 +3254,17 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const setPreviewText = (element, value) => {
     if (element) element.textContent = value || '-';
   };
+  const generatedPathTemplates = <?= json_encode($generatedPathTemplates, JSON_UNESCAPED_SLASHES) ?>;
+  const generatedPath = (key, slug) => slug ? String(generatedPathTemplates[key] || '').replace('__PROJECT_ID__', slug) : '';
   const updateGeneratedPreview = () => {
     const slug = slugFromProjectName(projectNameInput?.value || '');
     const domain = normalizeDomainPreview(productionDomainInput?.value || '');
     setPreviewText(projectIdPreview, slug);
-    setPreviewText(repositoryPreview, slug ? `/var/www/git/${slug}` : '');
+    setPreviewText(repositoryPreview, generatedPath('repository', slug));
     setPreviewText(productionDomainPreview, domain);
     setPreviewText(previewDomainPreview, domain ? `preview.${domain}` : '');
-    setPreviewText(productionDirectoryPreview, slug ? `/var/www/projects/${slug}/production` : '');
-    setPreviewText(previewDirectoryPreview, slug ? `/var/www/projects/${slug}/preview` : '');
+    setPreviewText(productionDirectoryPreview, generatedPath('production', slug));
+    setPreviewText(previewDirectoryPreview, generatedPath('preview', slug));
   };
   projectNameInput?.addEventListener('input', updateGeneratedPreview);
   productionDomainInput?.addEventListener('input', updateGeneratedPreview);

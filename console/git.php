@@ -279,6 +279,25 @@ function gitExpectedRemoteIdentity(array $project, ?array $githubConfiguration =
     return [$owner, $name];
 }
 
+function gitRepositoryNameValid(string $name): bool
+{
+    return preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/', $name) === 1
+        && !str_contains($name, '..')
+        && !str_ends_with(strtolower($name), '.git');
+}
+
+function gitProjectWithRepositoryIdentity(array $project, string $owner, string $name): array
+{
+    $remoteUrl = 'git@github.com-dev-console-account:' . $owner . '/' . $name . '.git';
+    return gitSetMetadata($project, [
+        'provider' => 'github',
+        'repository_owner' => $owner,
+        'repository_name' => $name,
+        'remote_url' => $remoteUrl,
+        'clone_url' => $remoteUrl,
+    ]);
+}
+
 function gitRepairableRemoteUrls(array $project, array $githubConfiguration): array
 {
     return array_values(array_filter(array_unique([
@@ -688,7 +707,8 @@ function gitRunAuthenticatedGitCommand(array $arguments, array $githubConfigurat
 
 function gitRepositoryFullName(array $project, array $githubConfiguration): string
 {
-    return (string)$githubConfiguration['account'] . '/' . (string)$project['id'];
+    [$owner, $name] = gitExpectedRemoteIdentity($project, $githubConfiguration);
+    return $owner . '/' . $name;
 }
 
 function gitGithubAuthenticatedLogin(array $githubConfiguration, array &$log): ?string
@@ -769,9 +789,10 @@ function gitBootstrapMetadataMatches(array $project, array $githubConfiguration)
         return false;
     }
 
+    [$owner, $name] = gitExpectedRemoteIdentity($project, $githubConfiguration);
     return (string)($git['provider'] ?? '') === 'github'
-        && (string)($git['repository_owner'] ?? '') === (string)$githubConfiguration['account']
-        && (string)($git['repository_name'] ?? '') === (string)$project['id']
+        && (string)($git['repository_owner'] ?? '') === $owner
+        && (string)($git['repository_name'] ?? '') === $name
         && (string)($git['remote_url'] ?? '') === gitExpectedRemoteUrl($project, $githubConfiguration)
         && (string)($git['clone_url'] ?? '') === gitExpectedCloneUrl($project, $githubConfiguration);
 }
@@ -879,7 +900,126 @@ function gitGithubRemoteIdentityMatches(array $metadata, array $project, array $
     $owner = is_array($metadata['owner'] ?? null) && is_scalar($metadata['owner']['login'] ?? null) ? (string)$metadata['owner']['login'] : '';
     $name = is_scalar($metadata['name'] ?? null) ? (string)$metadata['name'] : '';
     return strcasecmp($owner, (string)$githubConfiguration['account']) === 0
-        && $name === (string)$project['id'];
+        && $name === (string)(gitExpectedRemoteIdentity($project, $githubConfiguration)[1] ?? '');
+}
+
+function gitParseGithubRepositoryUrl(string $url): array
+{
+    $url = trim($url);
+    if ($url === '') {
+        return ['', ''];
+    }
+    if (preg_match('~^git@github\.com(?::|-[A-Za-z0-9._-]+:)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?$~', $url, $matches) === 1) {
+        return [$matches[1], $matches[2]];
+    }
+    if (preg_match('~^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$~', $url, $matches) === 1) {
+        return [$matches[1], $matches[2]];
+    }
+
+    return ['', ''];
+}
+
+function gitConfiguredRepositoryIdentity(array $project, ?array $githubConfiguration = null): array
+{
+    $git = is_array($project['git'] ?? null) ? $project['git'] : [];
+    $storedOwner = is_scalar($git['repository_owner'] ?? null) ? trim((string)$git['repository_owner']) : '';
+    $storedName = is_scalar($git['repository_name'] ?? null) ? trim((string)$git['repository_name']) : '';
+    [$remoteOwner, $remoteName] = gitParseGithubRepositoryUrl((string)($git['remote_url'] ?? ''));
+
+    if ($storedOwner !== '' && $remoteOwner !== '' && strcasecmp($storedOwner, $remoteOwner) !== 0) {
+        return ['', '', 'Stored repository owner and remote URL do not match.'];
+    }
+    if ($storedName !== '' && $remoteName !== '' && $storedName !== $remoteName) {
+        return ['', '', 'Stored repository name and remote URL do not match.'];
+    }
+
+    $owner = $storedOwner !== '' ? $storedOwner : $remoteOwner;
+    $name = $storedName !== '' ? $storedName : $remoteName;
+    if ($owner === '' || $name === '') {
+        return ['', '', 'GitHub repository identity is not configured.'];
+    }
+    if ($githubConfiguration !== null && strcasecmp($owner, (string)($githubConfiguration['account'] ?? '')) !== 0) {
+        return ['', '', 'Configured repository is not owned by the configured GitHub account.'];
+    }
+    if (!gitRepositoryNameValid($name)) {
+        return ['', '', 'Configured GitHub repository name is invalid.'];
+    }
+
+    return [$owner, $name, ''];
+}
+
+function gitGithubRepositoryDeletionAvailable(array $project, array $githubConfiguration): array
+{
+    if (!devConsoleGithubConfigured($githubConfiguration)) {
+        return ['available' => false, 'owner' => '', 'name' => '', 'reason' => 'GitHub is not configured.'];
+    }
+    [$owner, $name, $error] = gitConfiguredRepositoryIdentity($project, $githubConfiguration);
+    if ($error !== '') {
+        return ['available' => false, 'owner' => '', 'name' => '', 'reason' => $error];
+    }
+
+    return ['available' => true, 'owner' => $owner, 'name' => $name, 'reason' => ''];
+}
+
+function gitDeleteConfiguredGithubRepository(array $project, array $githubConfiguration, array &$log, array $options = []): array
+{
+    $availability = gitGithubRepositoryDeletionAvailable($project, $githubConfiguration);
+    if (empty($availability['available'])) {
+        return ['success' => false, 'message' => (string)$availability['reason']];
+    }
+
+    $fullName = (string)$availability['owner'] . '/' . (string)$availability['name'];
+    $metadata = gitGithubRepositoryMetadata($fullName, $githubConfiguration, $log);
+    if (!empty($metadata['error'])) {
+        return ['success' => false, 'message' => (string)$metadata['error']];
+    }
+    if (empty($metadata['exists'])) {
+        return ['success' => false, 'message' => 'Configured GitHub repository no longer exists.'];
+    }
+    $remoteUrl = (string)($project['git']['remote_url'] ?? '');
+    if ($remoteUrl !== '') {
+        [$remoteOwner, $remoteName] = gitParseGithubRepositoryUrl($remoteUrl);
+        if (strcasecmp($remoteOwner, (string)$availability['owner']) !== 0 || $remoteName !== (string)$availability['name']) {
+            return ['success' => false, 'message' => 'Stored Git remote does not match the configured GitHub repository.'];
+        }
+    }
+    if (!empty($options['dry_run_github_delete'])) {
+        $log[] = 'Dry run: GitHub repository would be deleted: ' . $fullName;
+        return ['success' => true, 'message' => 'GitHub repository deletion verified.', 'repository' => $fullName];
+    }
+
+    $delete = gitGithubRunCommand(['gh', 'api', '-X', 'DELETE', 'repos/' . $fullName], $githubConfiguration, 60);
+    gitAppendCommandSummary($log, $delete);
+    if ($delete['exit_code'] !== 0) {
+        return ['success' => false, 'message' => gitGithubCliFailureMessage($delete, 'GitHub repository deletion failed. Confirm the token has permission to delete repositories.')];
+    }
+    $log[] = 'Deleted GitHub repository: ' . $fullName;
+
+    return ['success' => true, 'message' => 'GitHub repository deleted.', 'repository' => $fullName];
+}
+
+function gitSuggestAvailableRepositoryName(string $baseName, array $githubConfiguration, array &$log): string
+{
+    $baseName = trim($baseName);
+    if ($baseName === '' || !gitRepositoryNameValid($baseName)) {
+        return '';
+    }
+    $owner = (string)($githubConfiguration['account'] ?? '');
+    for ($suffix = 2; $suffix <= 50; $suffix++) {
+        $candidate = $baseName . '-' . $suffix;
+        if (!gitRepositoryNameValid($candidate)) {
+            continue;
+        }
+        $metadata = gitGithubRepositoryMetadata($owner . '/' . $candidate, $githubConfiguration, $log);
+        if (empty($metadata['error']) && empty($metadata['exists'])) {
+            return $candidate;
+        }
+        if (!empty($metadata['error'])) {
+            return '';
+        }
+    }
+
+    return '';
 }
 
 function gitCreateGithubRepository(array $project, array $githubConfiguration, array &$log): array
@@ -898,7 +1038,7 @@ function gitCreateGithubRepository(array $project, array $githubConfiguration, a
         'POST',
         $endpoint,
         '-f',
-        'name=' . (string)$project['id'],
+        'name=' . (string)(gitExpectedRemoteIdentity($project, $githubConfiguration)[1] ?? ''),
         '-F',
         'private=true',
         '-F',
@@ -1057,7 +1197,7 @@ function gitInitializeLocalRepository(array $configuration, array $project, arra
     return $project;
 }
 
-function gitInitializeRepository(array $configuration, string $projectId): array
+function gitInitializeRepository(array $configuration, string $projectId, string $requestedRepositoryName = ''): array
 {
     $originalConfiguration = $configuration;
     $project = devConsoleFindProjectById($configuration, $projectId);
@@ -1077,6 +1217,14 @@ function gitInitializeRepository(array $configuration, string $projectId): array
     }
     if ($error = gitValidateProjectRepositoryPath($project)) return gitActionResult(false, $error);
 
+    $repositoryOwner = (string)$github['account'];
+    $repositoryName = trim($requestedRepositoryName) !== ''
+        ? trim($requestedRepositoryName)
+        : (string)(gitExpectedRemoteIdentity($project, $github)[1] ?? $projectId);
+    if (!gitRepositoryNameValid($repositoryName)) {
+        return gitActionResult(false, 'GitHub repository name is invalid.');
+    }
+    $project = gitProjectWithRepositoryIdentity($project, $repositoryOwner, $repositoryName);
     $fullName = gitRepositoryFullName($project, $github);
     $remoteUrl = gitExpectedRemoteUrl($project, $github);
     $cloneUrl = gitExpectedCloneUrl($project, $github);
@@ -1088,19 +1236,6 @@ function gitInitializeRepository(array $configuration, string $projectId): array
 
     if ((string)($project['git']['bootstrap_status'] ?? '') === 'ready' && gitStatus($project, $github)['status'] === 'CONNECTED') {
         return gitActionResult(true, 'Repository is already initialized.', $log);
-    }
-    if (file_exists($path) && is_link($path)) {
-        return gitActionResult(false, 'Local repository path must not be a symlink.');
-    }
-    if (is_dir($path . '/.git') || is_file($path . '/.git')) {
-        if (!$matchingBootstrapMetadata && !$bootstrapAttempted) {
-            return gitActionResult(false, 'An existing repository was found, but it cannot be verified as a repository created by this Dev Console initialization process.');
-        }
-        if (!gitLocalBootstrapRepositoryValid($project, $log)) {
-            return gitActionResult(false, 'An existing repository was found, but it cannot be verified as a repository created by this Dev Console initialization process.', $log);
-        }
-    } elseif (file_exists($path) && (!is_dir($path) || !gitDirectoryIsEmpty($path))) {
-        return gitActionResult(false, 'Local repository directory must be absent or empty before initialization.');
     }
     if (!gitEnsureRepositoryBase($log)) {
         return gitActionResult(false, gitRepositoryBaseProvisioningInstructions(), $log);
@@ -1116,8 +1251,31 @@ function gitInitializeRepository(array $configuration, string $projectId): array
             return gitActionResult(false, 'GitHub repository check failed', $log);
         }
         if (!$matchingBootstrapMetadata && !$bootstrapAttempted) {
+            $suggestedName = gitSuggestAvailableRepositoryName($repositoryName, $github, $log);
+            $message = 'GitHub repository already exists: ' . $fullName . '. Dev Console will not reuse, attach, overwrite, or delete an existing repository during initialization.';
+            if ($suggestedName !== '') {
+                $message .= ' Suggested available repository name: ' . $suggestedName . '.';
+            }
+            $result = gitActionResult(false, $message, $log);
+            $result['repository_collision'] = true;
+            $result['repository_owner'] = $repositoryOwner;
+            $result['repository_name'] = $repositoryName;
+            $result['suggested_repository_name'] = $suggestedName;
+            return $result;
+        }
+    }
+    if (file_exists($path) && is_link($path)) {
+        return gitActionResult(false, 'Local repository path must not be a symlink.', $log);
+    }
+    if (is_dir($path . '/.git') || is_file($path . '/.git')) {
+        if (!$matchingBootstrapMetadata && !$bootstrapAttempted) {
+            return gitActionResult(false, 'Local repository path already contains a Git repository. Dev Console will not overwrite, attach, or reuse it during initialization.', $log);
+        }
+        if (!gitLocalBootstrapRepositoryValid($project, $log)) {
             return gitActionResult(false, 'An existing repository was found, but it cannot be verified as a repository created by this Dev Console initialization process.', $log);
         }
+    } elseif (file_exists($path) && (!is_dir($path) || !gitDirectoryIsEmpty($path))) {
+        return gitActionResult(false, 'Local repository directory must be absent or empty before initialization.', $log);
     }
 
     try {
@@ -1141,8 +1299,8 @@ function gitInitializeRepository(array $configuration, string $projectId): array
                 if (empty($postFailureRemote['error']) && !empty($postFailureRemote['exists'])) {
                     $project = gitSetMetadata($project, [
                         'provider' => 'github',
-                        'repository_owner' => (string)$github['account'],
-                        'repository_name' => (string)$project['id'],
+                        'repository_owner' => $repositoryOwner,
+                        'repository_name' => $repositoryName,
                         'remote_url' => $remoteUrl,
                         'clone_url' => $cloneUrl,
                         'remote_created_at' => date('c'),
@@ -1158,8 +1316,8 @@ function gitInitializeRepository(array $configuration, string $projectId): array
             }
             $project = gitSetMetadata($project, [
                 'provider' => 'github',
-                'repository_owner' => (string)$github['account'],
-                'repository_name' => (string)$project['id'],
+                'repository_owner' => $repositoryOwner,
+                'repository_name' => $repositoryName,
                 'remote_url' => $remoteUrl,
                 'clone_url' => $cloneUrl,
                 'remote_created_at' => date('c'),
@@ -1173,8 +1331,8 @@ function gitInitializeRepository(array $configuration, string $projectId): array
         } elseif (!$matchingBootstrapMetadata) {
             $project = gitSetMetadata($project, [
                 'provider' => 'github',
-                'repository_owner' => (string)$github['account'],
-                'repository_name' => (string)$project['id'],
+                'repository_owner' => $repositoryOwner,
+                'repository_name' => $repositoryName,
                 'remote_url' => $remoteUrl,
                 'clone_url' => $cloneUrl,
                 'connected' => false,
@@ -1220,8 +1378,8 @@ function gitInitializeRepository(array $configuration, string $projectId): array
         }
         $project = gitSetMetadata($project, [
             'provider' => 'github',
-            'repository_owner' => (string)$github['account'],
-            'repository_name' => (string)$project['id'],
+            'repository_owner' => $repositoryOwner,
+            'repository_name' => $repositoryName,
             'remote_url' => $remoteUrl,
             'clone_url' => $cloneUrl,
             'connected' => true,
@@ -1281,8 +1439,8 @@ function gitFetchRepository(array $configuration, string $projectId): array
     }
     $baseMetadata = [
         'provider' => 'github',
-        'repository_owner' => (string)$github['account'],
-        'repository_name' => (string)$project['id'],
+        'repository_owner' => (string)(gitExpectedRemoteIdentity($project, $github)[0] ?? ''),
+        'repository_name' => (string)(gitExpectedRemoteIdentity($project, $github)[1] ?? ''),
         'remote_url' => gitExpectedRemoteUrl($project, $github),
         'clone_url' => gitExpectedCloneUrl($project, $github),
         'last_fetch_at' => date('c'),
@@ -1332,8 +1490,8 @@ function gitPullRepository(array $configuration, string $projectId): array
     }
     $project = gitSetMetadata($project, $verified + [
         'provider' => 'github',
-        'repository_owner' => (string)$github['account'],
-        'repository_name' => (string)$project['id'],
+        'repository_owner' => (string)(gitExpectedRemoteIdentity($project, $github)[0] ?? ''),
+        'repository_name' => (string)(gitExpectedRemoteIdentity($project, $github)[1] ?? ''),
         'remote_url' => gitExpectedRemoteUrl($project, $github),
         'clone_url' => gitExpectedCloneUrl($project, $github),
         'bootstrap_status' => 'ready',
@@ -1379,8 +1537,8 @@ function gitPushRepository(array $configuration, string $projectId): array
     }
     $project = gitSetMetadata($project, $verified + [
         'provider' => 'github',
-        'repository_owner' => (string)$github['account'],
-        'repository_name' => (string)$project['id'],
+        'repository_owner' => (string)(gitExpectedRemoteIdentity($project, $github)[0] ?? ''),
+        'repository_name' => (string)(gitExpectedRemoteIdentity($project, $github)[1] ?? ''),
         'remote_url' => gitExpectedRemoteUrl($project, $github),
         'clone_url' => gitExpectedCloneUrl($project, $github),
         'bootstrap_status' => 'ready',
