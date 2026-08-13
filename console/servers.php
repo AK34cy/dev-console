@@ -36,6 +36,7 @@ function managedServersEmptyServer(): array
         'remote_kernel' => '',
         'remote_working_directory' => '',
         'remote_user' => '',
+        'passwordless_sudo' => 'unknown',
         'last_error' => '',
     ];
 }
@@ -57,7 +58,7 @@ function managedServersNormalize(array $input): array
             continue;
         }
         $server = managedServersEmptyServer();
-        foreach (['id', 'name', 'host', 'user', 'auth_method', 'key', 'key_fingerprint', 'description', 'status', 'remote_hostname', 'remote_os', 'remote_kernel', 'remote_working_directory', 'remote_user', 'last_error'] as $field) {
+        foreach (['id', 'name', 'host', 'user', 'auth_method', 'key', 'key_fingerprint', 'description', 'status', 'remote_hostname', 'remote_os', 'remote_kernel', 'remote_working_directory', 'remote_user', 'passwordless_sudo', 'last_error'] as $field) {
             if (isset($serverInput[$field]) && is_scalar($serverInput[$field])) {
                 $server[$field] = trim((string)$serverInput[$field]);
             }
@@ -65,6 +66,7 @@ function managedServersNormalize(array $input): array
         $server['id'] = managedServersNormalizeId($server['id']);
         $server['auth_method'] = $server['auth_method'] === 'ssh_key' ? 'ssh_key' : 'ssh_key';
         $server['status'] = in_array($server['status'], ['never_tested', 'reachable', 'unreachable'], true) ? $server['status'] : 'never_tested';
+        $server['passwordless_sudo'] = in_array($server['passwordless_sudo'], ['unknown', 'ready', 'setup_required', 'root'], true) ? $server['passwordless_sudo'] : 'unknown';
         $server['port'] = isset($serverInput['port']) && is_numeric($serverInput['port']) ? (int)$serverInput['port'] : 22;
         if (array_key_exists('last_connection_test_at', $serverInput)) {
             $value = $serverInput['last_connection_test_at'];
@@ -165,7 +167,7 @@ function managedServersHostValid(string $host): bool
 
 function managedServersUsernameValid(string $user): bool
 {
-    return $user !== '' && strlen($user) <= 64 && preg_match('/^[a-z_][a-z0-9_-]*[$]?$/i', $user) === 1;
+    return $user !== '' && strlen($user) <= 64 && preg_match('/^[a-z_][a-z0-9_-]*$/i', $user) === 1;
 }
 
 function managedServersSshExecutable(): string
@@ -266,14 +268,43 @@ function managedServersReadPublicKey(string $privateKeyPath): string
     return $publicKey;
 }
 
-function managedServersSetupCommand(string $publicKey): string
+function managedServersSetupCommand(string $publicKey, string $user = ''): string
 {
-    if ($publicKey === '') {
+    $user = trim($user);
+    if ($publicKey === '' || $user === '' || !managedServersUsernameValid($user)) {
         return '';
     }
     $quotedKey = managedServersShellQuote($publicKey);
+    $quotedUser = managedServersShellQuote($user);
+    $sudoersPath = '/etc/sudoers.d/dev-console-' . preg_replace('/[^A-Za-z0-9_-]/', '_', $user);
 
-    return 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && (grep -qxF ' . $quotedKey . ' ~/.ssh/authorized_keys || printf ' . managedServersShellQuote('%s\n') . ' ' . $quotedKey . ' >> ~/.ssh/authorized_keys) && chmod 600 ~/.ssh/authorized_keys';
+    $lines = [
+        'set -eu',
+        'DEV_CONSOLE_EXPECTED_USER=' . $quotedUser,
+        'DEV_CONSOLE_USER="$(id -un)"',
+        'DEV_CONSOLE_GROUP="$(id -gn)"',
+        'if [ "$DEV_CONSOLE_USER" != "$DEV_CONSOLE_EXPECTED_USER" ]; then printf "%s\n" "Run this command as $DEV_CONSOLE_EXPECTED_USER, not $DEV_CONSOLE_USER." >&2; exit 1; fi',
+        'case "$DEV_CONSOLE_USER" in ""|[0-9]*|*[!A-Za-z0-9_-]*) printf "%s\n" "Unsafe Linux username: $DEV_CONSOLE_USER" >&2; exit 1 ;; esac',
+        'mkdir -p "$HOME/.ssh"',
+        'chmod 700 "$HOME/.ssh"',
+        'touch "$HOME/.ssh/authorized_keys"',
+        'chmod 600 "$HOME/.ssh/authorized_keys"',
+        'grep -qxF ' . $quotedKey . ' "$HOME/.ssh/authorized_keys" || printf ' . managedServersShellQuote('%s\n') . ' ' . $quotedKey . ' >> "$HOME/.ssh/authorized_keys"',
+        'chmod 600 "$HOME/.ssh/authorized_keys"',
+    ];
+    if ($user === 'root') {
+        $lines[] = 'install -d -m 0755 /var/www/projects';
+    } else {
+        $lines[] = 'sudoers_tmp="$(mktemp)"';
+        $lines[] = 'trap ' . managedServersShellQuote('rm -f "$sudoers_tmp"') . ' EXIT';
+        $lines[] = 'printf ' . managedServersShellQuote('%s ALL=(ALL) NOPASSWD: ALL\n') . ' "$DEV_CONSOLE_USER" > "$sudoers_tmp"';
+        $lines[] = 'sudo visudo -cf "$sudoers_tmp"';
+        $lines[] = 'sudo install -m 0440 -o root -g root "$sudoers_tmp" ' . managedServersShellQuote($sudoersPath);
+        $lines[] = 'sudo visudo -cf ' . managedServersShellQuote($sudoersPath);
+        $lines[] = 'sudo install -d -m 0755 -o "$DEV_CONSOLE_USER" -g "$DEV_CONSOLE_GROUP" /var/www/projects';
+    }
+
+    return "(\n  " . implode("\n  ", $lines) . "\n)";
 }
 
 function managedServersSharedKeyInfo(): array
@@ -412,6 +443,7 @@ function managedServersUpsert(array $servers, array $server, string $existingId 
         'remote_kernel',
         'remote_working_directory',
         'remote_user',
+        'passwordless_sudo',
         'last_error',
     ];
     $connectionFields = ['host', 'port', 'user', 'key', 'key_fingerprint'];
@@ -438,6 +470,7 @@ function managedServersUpsert(array $servers, array $server, string $existingId 
                     $server['remote_kernel'] = '';
                     $server['remote_working_directory'] = '';
                     $server['remote_user'] = '';
+                    $server['passwordless_sudo'] = 'unknown';
                     $server['last_error'] = '';
                 }
                 $replaced = true;
@@ -493,6 +526,7 @@ function managedServersUpdateConnectionResult(string $serverId, array $result): 
         $servers[$index]['remote_kernel'] = $success ? (string)($result['kernel'] ?? '') : '';
         $servers[$index]['remote_working_directory'] = $success ? (string)($result['working_directory'] ?? '') : '';
         $servers[$index]['remote_user'] = $success ? (string)($result['remote_user'] ?? '') : '';
+        $servers[$index]['passwordless_sudo'] = $success ? (string)($result['passwordless_sudo'] ?? 'unknown') : 'unknown';
         $servers[$index]['last_error'] = $success ? '' : (string)($result['message'] ?? 'SSH connection failed');
         $servers[$index]['key_fingerprint'] = managedServersKeyFingerprint((string)($server['key'] ?? ''));
         managedServersSave($servers);
@@ -576,6 +610,17 @@ function managedServerParseConnectionOutput(string $stdout): array
     if (($lines[0] ?? '') === '__DEV_CONSOLE_CONNECTED__' || ($lines[0] ?? '') === 'connected') {
         array_shift($lines);
     }
+    $passwordlessSudo = 'unknown';
+    $filtered = [];
+    foreach ($lines as $line) {
+        if (str_starts_with($line, '__DEV_CONSOLE_SUDO__=')) {
+            $value = substr($line, strlen('__DEV_CONSOLE_SUDO__='));
+            $passwordlessSudo = in_array($value, ['ready', 'setup_required', 'root'], true) ? $value : 'unknown';
+            continue;
+        }
+        $filtered[] = $line;
+    }
+    $lines = $filtered;
 
     return [
         'hostname' => (string)($lines[0] ?? ''),
@@ -584,6 +629,7 @@ function managedServerParseConnectionOutput(string $stdout): array
         'working_directory' => (string)($lines[2] ?? ''),
         'remote_user' => (string)($lines[3] ?? ''),
         'os' => (string)($lines[4] ?? ''),
+        'passwordless_sudo' => $passwordlessSudo,
     ];
 }
 
@@ -714,7 +760,7 @@ function managedServerRunConnectionTest(string $operationId, array $server): voi
         $target,
         'sh',
         '-c',
-        'printf "__DEV_CONSOLE_CONNECTED__\n"; hostname; uname -a; pwd; whoami; if [ -r /etc/os-release ]; then . /etc/os-release; printf "%s\n" "${PRETTY_NAME:-${NAME:-}}"; fi',
+        'printf "__DEV_CONSOLE_CONNECTED__\n"; hostname; uname -a; pwd; whoami; if [ -r /etc/os-release ]; then . /etc/os-release; printf "%s\n" "${PRETTY_NAME:-${NAME:-}}"; fi; if [ "$(id -u)" = 0 ]; then printf "__DEV_CONSOLE_SUDO__=root\n"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf "__DEV_CONSOLE_SUDO__=ready\n"; else printf "__DEV_CONSOLE_SUDO__=setup_required\n"; fi',
     ];
     managedServerOperationAppendLog($operationId, '$ ssh [managed-server-options] ' . $target . ' [diagnostic-command]');
     $result = processRunCommand($arguments, [
@@ -730,15 +776,32 @@ function managedServerRunConnectionTest(string $operationId, array $server): voi
 
     $connected = !empty($result['success']) && (int)$result['exit_code'] === 0;
     $parsed = managedServerParseConnectionOutput($connected ? (string)$result['stdout'] : '');
+    if ($connected) {
+        managedServerOperationAppendLog($operationId, 'SSH access: Ready');
+        $sudoLabel = match ((string)$parsed['passwordless_sudo']) {
+            'ready', 'root' => 'Ready',
+            'setup_required' => 'Setup required',
+            default => 'Unknown',
+        };
+        managedServerOperationAppendLog($operationId, 'Passwordless sudo: ' . $sudoLabel);
+        if ((string)$parsed['passwordless_sudo'] === 'setup_required') {
+            managedServerOperationAppendLog($operationId, 'Run the Managed Server setup command for this SSH user, then test the connection again.');
+        }
+    }
     $resultData = [
         'success' => $connected,
-        'message' => $connected ? 'Connected' : managedServerConnectionResultMessage((string)$result['output']),
+        'message' => $connected
+            ? ((string)$parsed['passwordless_sudo'] === 'setup_required'
+                ? 'Connected. Passwordless sudo is not configured for this deployment user. Run the Managed Server setup command for this SSH user, then test the connection again.'
+                : 'Connected')
+            : managedServerConnectionResultMessage((string)$result['output']),
         'hostname' => (string)$parsed['hostname'],
         'os' => (string)$parsed['os'],
         'kernel' => (string)$parsed['kernel'],
         'uname' => (string)$parsed['uname'],
         'working_directory' => (string)$parsed['working_directory'],
         'remote_user' => (string)$parsed['remote_user'],
+        'passwordless_sudo' => (string)$parsed['passwordless_sudo'],
         'round_trip_ms' => $roundTripMs,
         'output' => managedServerOperationLog($operationId),
     ];

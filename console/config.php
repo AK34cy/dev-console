@@ -233,7 +233,7 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         }
 
         $setupInput = is_array($projectInput['setup'] ?? null) ? $projectInput['setup'] : [];
-        if (isset($setupInput['status']) && is_scalar($setupInput['status']) && in_array((string)$setupInput['status'], ['Not configured', 'Configured', 'Failed'], true)) {
+        if (isset($setupInput['status']) && is_scalar($setupInput['status']) && in_array((string)$setupInput['status'], ['Not configured', 'Configured', 'Failed', 'Update required'], true)) {
             $project['setup']['status'] = (string)$setupInput['status'];
         }
         foreach (['server_id', 'timestamp', 'message', 'preview_site', 'production_site', 'apache_version'] as $field) {
@@ -899,10 +899,21 @@ function devConsoleValidateProjectUpdate(array $configuration, array $input, arr
     }
 
     $project = $existing ?? devConsoleEmptyProject();
+    $infrastructureChanged = $existing !== null && (
+        (string)($existing['managed_server_id'] ?? '') !== $managedServerId
+        || devConsoleNormalizeDomain((string)($existing['production']['domain'] ?? '')) !== $productionDomain
+        || devConsoleNormalizeDomain((string)($existing['preview']['domain'] ?? '')) !== $previewDomain
+        || (string)($existing['production']['path'] ?? '') !== (string)($project['production']['path'] ?? '')
+        || (string)($existing['preview']['path'] ?? '') !== (string)($project['preview']['path'] ?? '')
+    );
     $project['name'] = $name;
     $project['managed_server_id'] = $managedServerId;
     $project['production']['domain'] = $productionDomain;
     $project['preview']['domain'] = $previewDomain;
+    if ($infrastructureChanged && (string)($project['setup']['status'] ?? '') === 'Configured') {
+        $project['setup']['status'] = 'Update required';
+        $project['setup']['message'] = 'Project infrastructure settings changed. Update Infrastructure is required.';
+    }
     $project['last_activity_at'] = date('c');
 
     return [

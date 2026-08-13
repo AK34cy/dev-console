@@ -470,6 +470,153 @@ function projectRemoteValidateServer(array $server): void
     }
 }
 
+function projectRemoteCapabilityCommand(string $managedRoot = '/var/www/projects'): string
+{
+    $root = projectRemoteShellPath($managedRoot);
+
+    return 'printf "whoami=%s\n" "$(whoami)"; '
+        . 'printf "uid=%s\n" "$(id -u)"; '
+        . 'printf "gid=%s\n" "$(id -g)"; '
+        . 'printf "gid_name=%s\n" "$(id -gn)"; '
+        . 'for c in apache2 apache2ctl a2ensite a2dissite systemctl sudo install rm; do p=$(command -v "$c" 2>/dev/null || true); printf "cmd_%s=%s\n" "$c" "$p"; done; '
+        . 'if command -v apache2 >/dev/null 2>&1; then apache2 -v 2>/dev/null | sed -n "s/^Server version:[[:space:]]*/apache_version=/p" | head -n 1; fi; '
+        . 'if [ -d ' . $root . ' ] && [ -w ' . $root . ' ]; then printf "managed_root_writable=1\n"; else printf "managed_root_writable=0\n"; fi; '
+        . 'if [ "$(id -u)" = 0 ]; then printf "apache_privilege=direct\n"; '
+        . 'elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf "apache_privilege=sudo\n"; '
+        . 'else printf "apache_privilege=missing\n"; fi';
+}
+
+function projectParseRemoteCapabilities(string $output): array
+{
+    $capabilities = [
+        'whoami' => '',
+        'uid' => '',
+        'gid' => '',
+        'gid_name' => '',
+        'apache_version' => '',
+        'managed_root_writable' => false,
+        'apache_privilege' => 'missing',
+        'commands' => [],
+    ];
+    foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
+        if (!str_contains($line, '=')) {
+            continue;
+        }
+        [$key, $value] = explode('=', $line, 2);
+        $key = trim($key);
+        $value = trim($value);
+        if (str_starts_with($key, 'cmd_')) {
+            $capabilities['commands'][substr($key, 4)] = $value;
+        } elseif ($key === 'managed_root_writable') {
+            $capabilities[$key] = $value === '1';
+        } elseif (array_key_exists($key, $capabilities)) {
+            $capabilities[$key] = $value;
+        }
+    }
+
+    return $capabilities;
+}
+
+function projectRemoteCheckCapabilities(array $server, array &$log, string $managedRoot = '/var/www/projects'): array
+{
+    $result = projectRemoteRun($server, projectRemoteCapabilityCommand($managedRoot), $log);
+    if ((int)$result['exit_code'] !== 0) {
+        throw new RuntimeException('Unable to inspect Managed Server deployment capabilities.');
+    }
+
+    return projectParseRemoteCapabilities((string)$result['stdout']);
+}
+
+function projectRemoteCommandAvailable(array $capabilities, string $command): bool
+{
+    return (string)($capabilities['commands'][$command] ?? '') !== '';
+}
+
+function projectDiagnosticValue(string $value): string
+{
+    return trim($value) === '' ? 'Not detected' : $value;
+}
+
+function projectRemoteCapabilityReady(array $capabilities): bool
+{
+    foreach (['apache2', 'apache2ctl', 'a2ensite', 'a2dissite', 'systemctl', 'install', 'rm'] as $command) {
+        if (!projectRemoteCommandAvailable($capabilities, $command)) {
+            return false;
+        }
+    }
+    if ((string)($capabilities['apache_privilege'] ?? '') === 'sudo' && !projectRemoteCommandAvailable($capabilities, 'sudo')) {
+        return false;
+    }
+
+    return in_array((string)($capabilities['apache_privilege'] ?? ''), ['direct', 'sudo'], true);
+}
+
+function projectRemotePrivilegeDiagnostic(array $server, array $capabilities, string $managedRoot = '/var/www/projects'): string
+{
+    $commandStatus = static function (bool $ready): string {
+        return $ready ? 'Available' : 'Missing';
+    };
+    $setupCommand = projectRemoteServerSetupCommand($server);
+    $apacheDetected = projectRemoteCommandAvailable($capabilities, 'apache2') ? 'Detected' : 'Missing';
+    $apachePrivilege = (string)($capabilities['apache_privilege'] ?? 'missing');
+    $privilegeLabel = match ($apachePrivilege) {
+        'direct' => 'Available',
+        'sudo' => 'Available through sudo -n',
+        default => 'Missing',
+    };
+    $sudoMessage = $apachePrivilege === 'missing'
+        ? "\nPasswordless sudo is not configured for this deployment user.\nRun the Managed Server setup command for this SSH user, then test the connection again.\n"
+        : '';
+
+    return "Project setup cannot continue\n\n"
+        . 'Connected as: ' . projectDiagnosticValue((string)($capabilities['whoami'] ?? '')) . ' (uid ' . projectDiagnosticValue((string)($capabilities['uid'] ?? '')) . ")\n\n"
+        . 'Managed Project root: ' . $managedRoot . "\n"
+        . 'Status: ' . (!empty($capabilities['managed_root_writable']) ? 'Writable' : 'Will be managed with sudo -n') . "\n\n"
+        . 'Apache: ' . $apacheDetected . "\n"
+        . 'Apache version: ' . projectDiagnosticValue((string)($capabilities['apache_version'] ?? '')) . "\n\n"
+        . "System privileges:\n"
+        . 'Apache config test       ' . $commandStatus(projectRemoteCommandAvailable($capabilities, 'apache2ctl') && $apachePrivilege !== 'missing') . "\n"
+        . 'Enable/disable sites     ' . $commandStatus(projectRemoteCommandAvailable($capabilities, 'a2ensite') && projectRemoteCommandAvailable($capabilities, 'a2dissite') && $apachePrivilege !== 'missing') . "\n"
+        . 'Apache reload            ' . $commandStatus(projectRemoteCommandAvailable($capabilities, 'systemctl') && $apachePrivilege !== 'missing') . "\n"
+        . 'Vhost installation       ' . $privilegeLabel . "\n\n"
+        . $sudoMessage
+        . "Dev Console requires one-time server preparation.\n\n"
+        . "Log in as the configured SSH user, run the setup command below, then return here and use Retry Setup.\n\n"
+        . $setupCommand;
+}
+
+function projectRemoteServerSetupCommand(array $server): string
+{
+    if (!function_exists('managedServersReadPublicKey') || !function_exists('managedServersSetupCommand')) {
+        return '';
+    }
+
+    return managedServersSetupCommand(managedServersReadPublicKey((string)($server['key'] ?? '')), (string)($server['user'] ?? ''));
+}
+
+function projectRemotePrivilegedCommand(array $capabilities, string $directCommand): string
+{
+    if ((string)($capabilities['apache_privilege'] ?? '') === 'direct') {
+        return $directCommand;
+    }
+
+    return 'sudo -n ' . $directCommand;
+}
+
+function projectRemotePrivilegedCommandChain(array $capabilities, array $commands): string
+{
+    $prepared = [];
+    foreach ($commands as $command) {
+        $command = trim((string)$command);
+        if ($command === '') {
+            continue;
+        }
+        $prepared[] = projectRemotePrivilegedCommand($capabilities, $command);
+    }
+
+    return implode(' && ', $prepared);
+}
+
 function projectRemoteSetupMetadata(array $project): array
 {
     $setup = is_array($project['setup'] ?? null) ? $project['setup'] : [];
@@ -537,7 +684,7 @@ function projectParseRemoteMarkerStatus(string $output): array
     return $status;
 }
 
-function projectRemoteInstallSite(array $server, array $project, string $environment, string $content, string $availableDir, array &$log, array &$installedSites): void
+function projectRemoteInstallSite(array $server, array $project, string $environment, string $content, string $availableDir, array $capabilities, array &$log, array &$installedSites): void
 {
     $siteName = projectRemoteEnvironmentVhostName($project, $environment);
     $remotePath = rtrim($availableDir, '/') . '/' . $siteName;
@@ -561,9 +708,13 @@ function projectRemoteInstallSite(array $server, array $project, string $environ
         if ($copy['exit_code'] !== 0) {
             throw new RuntimeException(ucfirst($environment) . ' VirtualHost could not be installed.');
         }
-        $installCommand = ($hadExisting ? 'cp -- ' . projectRemoteShellPath($remotePath) . ' ' . projectRemoteShellPath($backupRemote) . ' && ' : '')
-            . 'install -m 0644 -- ' . projectRemoteShellPath($tmpRemote) . ' ' . projectRemoteShellPath($remotePath)
-            . ' && rm -f -- ' . projectRemoteShellPath($tmpRemote);
+        $installCommands = [];
+        if ($hadExisting) {
+            $installCommands[] = 'cp -- ' . projectRemoteShellPath($remotePath) . ' ' . projectRemoteShellPath($backupRemote);
+        }
+        $installCommands[] = 'install -m 0644 -- ' . projectRemoteShellPath($tmpRemote) . ' ' . projectRemoteShellPath($remotePath);
+        $installCommands[] = 'rm -f -- ' . projectRemoteShellPath($tmpRemote);
+        $installCommand = projectRemotePrivilegedCommandChain($capabilities, $installCommands);
         $install = projectRemoteRun($server, $installCommand, $log);
         if ($install['exit_code'] !== 0) {
             throw new RuntimeException(ucfirst($environment) . ' VirtualHost could not be installed.');
@@ -572,6 +723,8 @@ function projectRemoteInstallSite(array $server, array $project, string $environ
             'path' => $remotePath,
             'backup' => $hadExisting ? $backupRemote : '',
             'created' => !$hadExisting,
+            'project_id' => (string)$project['id'],
+            'environment' => $environment,
         ];
         $log[] = ucfirst($environment) . ' site installed: ' . $siteName;
     } finally {
@@ -581,7 +734,7 @@ function projectRemoteInstallSite(array $server, array $project, string $environ
     }
 }
 
-function projectRemoteRollbackInstalledSites(array $server, array $installedSites, array &$log): void
+function projectRemoteRollbackInstalledSites(array $server, array $installedSites, array &$log, array $capabilities = ['apache_privilege' => 'direct']): void
 {
     foreach (array_reverse($installedSites) as $site) {
         $path = (string)($site['path'] ?? '');
@@ -590,10 +743,14 @@ function projectRemoteRollbackInstalledSites(array $server, array $installedSite
             continue;
         }
         if ($backup !== '') {
-            projectRemoteRun($server, 'if [ -e ' . projectRemoteShellPath($backup) . ' ]; then mv -- ' . projectRemoteShellPath($backup) . ' ' . projectRemoteShellPath($path) . '; fi', $log);
+            projectRemoteRun($server, 'if [ -e ' . projectRemoteShellPath($backup) . ' ]; then ' . projectRemotePrivilegedCommand($capabilities, 'mv -- ' . projectRemoteShellPath($backup) . ' ' . projectRemoteShellPath($path)) . '; fi', $log);
             $log[] = 'Restored previous remote Apache config: ' . basename($path);
         } elseif (!empty($site['created'])) {
-            projectRemoteRun($server, 'rm -f -- ' . projectRemoteShellPath($path), $log);
+            projectRemoteRun(
+                $server,
+                projectRemotePrivilegedCommand($capabilities, 'rm -f -- ' . projectRemoteShellPath($path)),
+                $log
+            );
             $log[] = 'Removed newly created remote Apache config: ' . basename($path);
         }
     }
@@ -612,6 +769,7 @@ function projectRemoteSetup(array $configuration, string $projectId, array $opti
     $availableDir = '/etc/apache2/sites-available';
     $enabledDir = '/etc/apache2/sites-enabled';
     $apacheVersion = '';
+    $capabilities = ['apache_privilege' => 'direct'];
 
     try {
         $serverId = (string)($project['managed_server_id'] ?? '');
@@ -632,22 +790,27 @@ function projectRemoteSetup(array $configuration, string $projectId, array $opti
         projectValidateStoredConfiguration($configuration, $project);
         $paths = projectAssertManagedPathPolicy($project);
 
-        $diagnosticCommand = 'command -v apache2 && command -v apache2ctl && command -v a2ensite && command -v systemctl && apache2 -v && test -d /etc/apache2/sites-available && test -d /etc/apache2/sites-enabled && id -u';
-        $diagnostics = projectRemoteRun($server, $diagnosticCommand, $log);
-        if ($diagnostics['exit_code'] !== 0) {
-            throw new RuntimeException('Apache is not installed or the server uses an unsupported Apache layout.');
+        $capabilities = projectRemoteCheckCapabilities($server, $log);
+        $apacheVersion = (string)($capabilities['apache_version'] ?? '');
+        if (!projectRemoteCapabilityReady($capabilities)) {
+            $message = projectRemotePrivilegeDiagnostic($server, $capabilities);
+            $result = projectActionResult(false, 'Project setup cannot continue. Server preparation is required.', $log);
+            $result['setup_command'] = projectRemoteServerSetupCommand($server);
+            $result['output'] .= ($result['output'] === '' ? '' : "\n\n") . $message;
+            return $result;
         }
-        $diagnosticLines = array_values(array_filter(array_map('trim', preg_split('/\R/', (string)$diagnostics['stdout']) ?: []), static fn(string $line): bool => $line !== ''));
-        $apacheVersion = implode(' ', array_values(array_filter($diagnosticLines, static fn(string $line): bool => str_starts_with($line, 'Server version:'))));
-        $remoteUid = (string)end($diagnosticLines);
-        if ($remoteUid !== '0') {
-            throw new RuntimeException('Remote deployment user needs root or appropriate non-interactive privileges for Apache setup.');
-        }
+        $log[] = 'Deployment user: ' . projectDiagnosticValue((string)($capabilities['whoami'] ?? '')) . ' (uid ' . projectDiagnosticValue((string)($capabilities['uid'] ?? '')) . ').';
+        $log[] = 'Apache control: ' . ((string)($capabilities['apache_privilege'] ?? '') === 'direct' ? 'direct root access' : 'sudo -n passwordless sudo') . '.';
 
         foreach (['preview', 'production'] as $environment) {
             $path = $paths[$environment];
-            $prepare = 'mkdir -p -- ' . projectRemoteShellPath($path)
-                . ' && chmod 755 -- ' . projectRemoteShellPath($path)
+            $owner = projectRemoteShellValue((string)($capabilities['whoami'] ?? ''));
+            $group = projectRemoteShellValue((string)($capabilities['gid_name'] ?? $capabilities['whoami'] ?? ''));
+            $prepare = projectRemotePrivilegedCommandChain($capabilities, [
+                'mkdir -p -- ' . projectRemoteShellPath($path),
+                'chown ' . $owner . ':' . $group . ' -- ' . projectRemoteShellPath($path),
+                'chmod 755 -- ' . projectRemoteShellPath($path),
+            ])
                 . ' && test -d ' . projectRemoteShellPath($path)
                 . ' && test -r ' . projectRemoteShellPath($path)
                 . ' && test -w ' . projectRemoteShellPath($path);
@@ -659,23 +822,23 @@ function projectRemoteSetup(array $configuration, string $projectId, array $opti
         }
 
         foreach (['preview', 'production'] as $environment) {
-            projectRemoteInstallSite($server, $project, $environment, projectGenerateRemoteVhost($project, $environment, $paths[$environment]), $availableDir, $log, $installedSites);
+            projectRemoteInstallSite($server, $project, $environment, projectGenerateRemoteVhost($project, $environment, $paths[$environment]), $availableDir, $capabilities, $log, $installedSites);
         }
 
         foreach (['preview', 'production'] as $environment) {
             $siteName = projectRemoteEnvironmentVhostName($project, $environment);
-            $enable = projectRemoteRun($server, 'a2ensite ' . escapeshellarg($siteName), $log);
+            $enable = projectRemoteRun($server, projectRemotePrivilegedCommand($capabilities, 'a2ensite ' . escapeshellarg($siteName)), $log);
             if ($enable['exit_code'] !== 0) {
                 throw new RuntimeException('Unable to enable ' . $environment . ' site.');
             }
         }
 
-        $configtest = projectRemoteRun($server, 'apache2ctl configtest', $log);
+        $configtest = projectRemoteRun($server, projectRemotePrivilegedCommand($capabilities, 'apache2ctl configtest'), $log);
         if ($configtest['exit_code'] !== 0) {
-            projectRemoteRollbackInstalledSites($server, $installedSites, $log);
+            projectRemoteRollbackInstalledSites($server, $installedSites, $log, $capabilities);
             throw new RuntimeException('Apache configtest failed.');
         }
-        $reload = projectRemoteRun($server, 'systemctl reload apache2', $log);
+        $reload = projectRemoteRun($server, projectRemotePrivilegedCommand($capabilities, 'systemctl reload apache2'), $log);
         if ($reload['exit_code'] !== 0) {
             throw new RuntimeException('Apache reload failed.');
         }
@@ -708,7 +871,7 @@ function projectRemoteSetup(array $configuration, string $projectId, array $opti
         return projectActionResult(true, 'Remote Project setup completed.', $log);
     } catch (Throwable $exception) {
         if (is_array($server)) {
-            projectRemoteRollbackInstalledSites($server, $installedSites, $log);
+            projectRemoteRollbackInstalledSites($server, $installedSites, $log, $capabilities);
         }
         $project['setup'] = [
             'status' => 'Failed',
@@ -965,6 +1128,7 @@ function projectStatus(array $project, string $availableDir = '/etc/apache2/site
     if ((string)($project['managed_server_id'] ?? '') !== '') {
         $setup = projectRemoteSetupMetadata($project);
         $configured = $setup['status'] === 'Configured';
+        $updateRequired = $setup['status'] === 'Update required';
         $failed = $setup['status'] === 'Failed';
         $environmentStatus = static function (string $environment) use ($project, $setup, $configured): array {
             $siteField = $environment === 'production' ? 'production_site' : 'preview_site';
@@ -983,7 +1147,7 @@ function projectStatus(array $project, string $availableDir = '/etc/apache2/site
         };
 
         return [
-            'label' => $configured ? 'Ready' : ($failed ? 'Incomplete' : 'Not set up'),
+            'label' => $configured ? 'Ready' : ($updateRequired ? 'Update required' : ($failed ? 'Setup failed' : 'Not set up')),
             'production' => $environmentStatus('production'),
             'preview' => $environmentStatus('preview'),
         ];
@@ -1263,6 +1427,7 @@ function projectRemoteDelete(array $configuration, array $project, string $proje
     $server = function_exists('managedServersFind') ? managedServersFind($servers, $serverId) : null;
     $runCommands = $options['run_commands'] ?? true;
     $log = [];
+    $capabilities = ['apache_privilege' => 'direct'];
 
     try {
         if ($server === null) {
@@ -1270,6 +1435,16 @@ function projectRemoteDelete(array $configuration, array $project, string $proje
         }
         projectRemoteValidateServer($server);
         $paths = projectAssertManagedPathPolicy($project, $allowedBase);
+        if ($runCommands) {
+            $capabilities = projectRemoteCheckCapabilities($server, $log);
+            if (!projectRemoteCapabilityReady($capabilities)) {
+                $message = projectRemotePrivilegeDiagnostic($server, $capabilities);
+                $result = projectActionResult(false, 'Project deletion cannot continue. Server preparation is required.', $log);
+                $result['setup_command'] = projectRemoteServerSetupCommand($server);
+                $result['output'] .= ($result['output'] === '' ? '' : "\n\n") . $message;
+                return $result;
+            }
+        }
         $targets = [];
         foreach (['production', 'preview'] as $environment) {
             $target = projectResolveDeletionVhostTarget($project, $environment, $availableDir, $enabledDir, true);
@@ -1301,23 +1476,23 @@ function projectRemoteDelete(array $configuration, array $project, string $proje
             foreach ($targets as $environment => $target) {
                 $enabledCheck = projectRemoteRun($server, 'test -e ' . projectRemoteShellPath((string)$target['enabled_path']) . ' || test -L ' . projectRemoteShellPath((string)$target['enabled_path']), $log);
                 if ((int)$enabledCheck['exit_code'] === 0) {
-                    $result = projectRemoteRun($server, 'a2dissite ' . escapeshellarg((string)$target['stored']), $log);
+                    $result = projectRemoteRun($server, projectRemotePrivilegedCommand($capabilities, 'a2dissite ' . escapeshellarg((string)$target['stored'])), $log);
                     if ((int)$result['exit_code'] !== 0) {
                         throw new RuntimeException('Unable to disable ' . $environment . ' site.');
                     }
                 }
             }
-            $result = projectRemoteRun($server, 'apache2ctl configtest', $log);
+            $result = projectRemoteRun($server, projectRemotePrivilegedCommand($capabilities, 'apache2ctl configtest'), $log);
             if ((int)$result['exit_code'] !== 0) {
                 throw new RuntimeException('Apache configtest failed.');
             }
-            $result = projectRemoteRun($server, 'systemctl reload apache2', $log);
+            $result = projectRemoteRun($server, projectRemotePrivilegedCommand($capabilities, 'systemctl reload apache2'), $log);
             if ((int)$result['exit_code'] !== 0) {
                 throw new RuntimeException('Apache reload failed.');
             }
             foreach ($targets as $environment => $target) {
                 if (!empty($target['exists'])) {
-                    $result = projectRemoteRun($server, 'rm -f -- ' . projectRemoteShellPath((string)$target['path']), $log);
+                    $result = projectRemoteRun($server, projectRemotePrivilegedCommand($capabilities, 'rm -f -- ' . projectRemoteShellPath((string)$target['path'])), $log);
                     if ((int)$result['exit_code'] !== 0) {
                         throw new RuntimeException('Unable to delete ' . $environment . ' Apache config.');
                     }
@@ -1325,7 +1500,7 @@ function projectRemoteDelete(array $configuration, array $project, string $proje
                 }
             }
             foreach (['production', 'preview'] as $environment) {
-                $result = projectRemoteRun($server, 'rm -rf -- ' . projectRemoteShellPath($paths[$environment]), $log);
+                $result = projectRemoteRun($server, projectRemotePrivilegedCommand($capabilities, 'rm -rf -- ' . projectRemoteShellPath($paths[$environment])), $log);
                 if ((int)$result['exit_code'] !== 0) {
                     throw new RuntimeException('Unable to delete remote ' . $environment . ' directory.');
                 }
@@ -1333,7 +1508,7 @@ function projectRemoteDelete(array $configuration, array $project, string $proje
             }
             $projectRoot = dirname($paths['production']);
             $quotedRoot = projectRemoteShellPath($projectRoot);
-            $rootResult = projectRemoteRun($server, 'if [ ! -e ' . $quotedRoot . ' ]; then printf %s absent; elif rmdir -- ' . $quotedRoot . ' 2>/dev/null; then printf %s removed; else printf %s preserved; fi', $log);
+            $rootResult = projectRemoteRun($server, 'if [ ! -e ' . $quotedRoot . ' ]; then printf %s absent; elif ' . projectRemotePrivilegedCommand($capabilities, 'rmdir -- ' . $quotedRoot) . ' 2>/dev/null; then printf %s removed; else printf %s preserved; fi', $log);
             $rootState = trim((string)($rootResult['stdout'] ?? ''));
             if ($rootState === 'removed') {
                 $log[] = 'Deleted empty remote project root: ' . $projectRoot;
@@ -1710,7 +1885,7 @@ function projectLifecycleLabel(array $project, array $projectStatus): string
     if ($status === 'Ready') {
         return $managed ? 'Ready' : 'Imported';
     }
-    if ($status === 'Configuration drift' || $status === 'Incomplete') {
+    if ($status === 'Configuration drift' || $status === 'Incomplete' || $status === 'Update required' || $status === 'Setup failed') {
         return $status;
     }
 
@@ -1745,9 +1920,6 @@ function operationSummarySteps(string $action, array $result): array
     }
     if ($action === 'provision_project') {
         return ['Project directories prepared', 'Apache configuration ready', 'Apache validated and reloaded'];
-    }
-    if ($action === 'verify_project_routing') {
-        return ['Apache ServerName checked', 'Websites checked'];
     }
     if ($action === 'delete_project') {
         return ['Managed Apache configuration removed', 'Managed project directories removed', 'Git repository preserved'];

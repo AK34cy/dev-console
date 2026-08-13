@@ -58,3 +58,9 @@ curl -fsS http://127.0.0.1:8090/health
 The endpoint returns HTTP 200 with JSON containing the console status, version,
 PHP version, current timestamp, process uptime, and current Dev Console Git
 commit. If Git metadata is unavailable, `git_commit` is returned as `null`.
+
+## Documentation Updates
+
+Any task that changes user-visible workflow or major architecture should update
+the relevant documentation in the same change. User-facing help lives under
+`docs/user/`; technical reference documents live directly under `docs/`.
