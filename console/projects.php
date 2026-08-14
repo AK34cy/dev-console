@@ -460,6 +460,138 @@ function projectRemoteShellValue(string $value): string
     return escapeshellarg($value);
 }
 
+function projectWebIndexFiles(): array
+{
+    return ['index.php', 'index.html', 'index.htm'];
+}
+
+function projectSourceUsesPublicWebRoot(string $sourceRoot): bool
+{
+    $publicPath = rtrim($sourceRoot, '/') . '/public';
+    if (!is_dir($publicPath)) {
+        return false;
+    }
+    foreach (projectWebIndexFiles() as $indexFile) {
+        if (is_file($publicPath . '/' . $indexFile)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function projectEnvironmentDocumentRoot(array $project, string $environment, ?string $sourceRoot = null): string
+{
+    if (!in_array($environment, ['production', 'preview'], true)) {
+        throw new RuntimeException('Invalid environment.');
+    }
+    $environmentPath = projectNormalizePath((string)($project[$environment]['path'] ?? ''));
+    $sourcePath = $sourceRoot ?? (string)($project['repository_path'] ?? '');
+    if ($sourcePath !== '' && projectSourceUsesPublicWebRoot($sourcePath)) {
+        return rtrim($environmentPath, '/') . '/public';
+    }
+
+    return $environmentPath;
+}
+
+function projectRemoteApacheUserShellFragment(): string
+{
+    return 'apache_user=$(if [ -r /etc/apache2/envvars ]; then . /etc/apache2/envvars >/dev/null 2>&1 || true; fi; printf "%s" "${APACHE_RUN_USER:-www-data}")';
+}
+
+function projectRemoteApacheReadabilityCommand(array $capabilities, string $documentRoot, bool $requireIndex = false, bool $allowMissing = false): string
+{
+    $docRoot = projectRemoteShellPath($documentRoot);
+    $checks = 'test -x ' . $docRoot . ' && test -r ' . $docRoot;
+    if ($requireIndex) {
+        $indexChecks = [];
+        foreach (projectWebIndexFiles() as $indexFile) {
+            $indexChecks[] = 'test -r ' . projectRemoteShellPath(rtrim($documentRoot, '/') . '/' . $indexFile);
+        }
+        $checks .= ' && ( ' . implode(' || ', $indexChecks) . ' )';
+    }
+    $runAsApache = (string)($capabilities['apache_privilege'] ?? '') === 'direct'
+        ? 'su -s /bin/sh -c ' . projectRemoteShellValue($checks) . ' "$apache_user"'
+        : 'sudo -n -u "$apache_user" sh -c ' . projectRemoteShellValue($checks);
+    $missingCheck = $allowMissing ? 'if [ ! -e ' . $docRoot . ' ]; then exit 0; fi; ' : '';
+
+    return projectRemoteApacheUserShellFragment() . '; ' . $missingCheck . $runAsApache;
+}
+
+function projectRemoteEnvironmentRootPermissionCommand(string $path): string
+{
+    $root = projectRemoteShellPath($path);
+
+    return 'chmod 755 -- ' . $root . ' && test -d ' . $root . ' && test -x ' . $root . ' && test -r ' . $root;
+}
+
+function projectRemoteVhostDocumentRootMatchesCommand(array $project, string $environment, string $documentRoot, string $availableDir = '/etc/apache2/sites-available'): string
+{
+    $path = projectRemoteVhostPath($project, $environment, $availableDir);
+    $quotedPath = projectRemoteShellPath($path);
+    $documentRootPattern = projectRemoteShellValue('DocumentRoot ' . $documentRoot);
+
+    return projectRemoteApacheConfigIsManagedCommand($path, $project, $environment)
+        . ' && grep -F ' . $documentRootPattern . ' ' . $quotedPath . ' >/dev/null';
+}
+
+function projectInfrastructureSnapshot(array $project): array
+{
+    $remote = (string)($project['managed_server_id'] ?? '') !== '';
+
+    return [
+        'schema' => 'managed-apache-v2',
+        'project_id' => (string)($project['id'] ?? ''),
+        'managed_server_id' => (string)($project['managed_server_id'] ?? ''),
+        'preview_domain' => devConsoleNormalizeDomain((string)($project['preview']['domain'] ?? '')),
+        'production_domain' => devConsoleNormalizeDomain((string)($project['production']['domain'] ?? '')),
+        'preview_path' => projectNormalizePath((string)($project['preview']['path'] ?? '')),
+        'production_path' => projectNormalizePath((string)($project['production']['path'] ?? '')),
+        'preview_document_root' => projectEnvironmentDocumentRoot($project, 'preview'),
+        'production_document_root' => projectEnvironmentDocumentRoot($project, 'production'),
+        'preview_vhost' => $remote ? projectRemoteEnvironmentVhostName($project, 'preview') : projectEnvironmentVhostName($project, 'preview'),
+        'production_vhost' => $remote ? projectRemoteEnvironmentVhostName($project, 'production') : projectEnvironmentVhostName($project, 'production'),
+    ];
+}
+
+function projectInfrastructureFingerprint(array $snapshot): string
+{
+    ksort($snapshot);
+    $json = json_encode($snapshot, JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        throw new RuntimeException('Unable to generate infrastructure fingerprint.');
+    }
+
+    return hash('sha256', $json);
+}
+
+function projectInfrastructureSnapshotPayload(array $project): array
+{
+    $snapshot = projectInfrastructureSnapshot($project);
+
+    return [
+        'infrastructure' => $snapshot,
+        'infrastructure_fingerprint' => projectInfrastructureFingerprint($snapshot),
+    ];
+}
+
+function projectInfrastructureSnapshotMatches(array $project): bool
+{
+    $setup = is_array($project['setup'] ?? null) ? $project['setup'] : [];
+    $storedSnapshot = is_array($setup['infrastructure'] ?? null) ? $setup['infrastructure'] : [];
+    $storedFingerprint = (string)($setup['infrastructure_fingerprint'] ?? '');
+    if (empty($storedSnapshot) || $storedFingerprint === '') {
+        return false;
+    }
+
+    try {
+        return hash_equals(projectInfrastructureFingerprint(projectInfrastructureSnapshot($project)), $storedFingerprint)
+            && $storedSnapshot === projectInfrastructureSnapshot($project);
+    } catch (Throwable) {
+        return false;
+    }
+}
+
 function projectRemoteValidateServer(array $server): void
 {
     if ((string)($server['status'] ?? '') !== 'reachable') {
@@ -822,7 +954,13 @@ function projectRemoteSetup(array $configuration, string $projectId, array $opti
         }
 
         foreach (['preview', 'production'] as $environment) {
-            projectRemoteInstallSite($server, $project, $environment, projectGenerateRemoteVhost($project, $environment, $paths[$environment]), $availableDir, $capabilities, $log, $installedSites);
+            $documentRoot = projectEnvironmentDocumentRoot($project, $environment);
+            projectRemoteInstallSite($server, $project, $environment, projectGenerateRemoteVhost($project, $environment, $documentRoot), $availableDir, $capabilities, $log, $installedSites);
+            $readability = projectRemoteRun($server, projectRemoteApacheReadabilityCommand($capabilities, $documentRoot, false, true), $log);
+            if ($readability['exit_code'] !== 0) {
+                throw new RuntimeException(ucfirst($environment) . ' Apache DocumentRoot is not readable by Apache: ' . $documentRoot);
+            }
+            $log[] = ucfirst($environment) . ' DocumentRoot configured: ' . $documentRoot;
         }
 
         foreach (['preview', 'production'] as $environment) {
@@ -860,7 +998,7 @@ function projectRemoteSetup(array $configuration, string $projectId, array $opti
             'preview_site' => projectRemoteEnvironmentVhostName($project, 'preview'),
             'production_site' => projectRemoteEnvironmentVhostName($project, 'production'),
             'apache_version' => $apacheVersion,
-        ];
+        ] + projectInfrastructureSnapshotPayload($project);
         if (empty($options['skip_save'])) {
             $updatedConfiguration = devConsoleTouchProject(devConsoleReplaceProject($configuration, $project), (string)$project['id']);
             if (!devConsoleSaveProjectConfiguration($updatedConfiguration)) {
@@ -1100,6 +1238,7 @@ function projectVerifyRoutingAction(array $configuration, string $projectId, arr
 function projectEnvironmentStatus(array $project, string $environment, string $availableDir = '/etc/apache2/sites-available', string $enabledDir = '/etc/apache2/sites-enabled'): array
 {
     $path = projectNormalizePath((string)$project[$environment]['path']);
+    $documentRoot = projectEnvironmentDocumentRoot($project, $environment);
     $vhostPath = projectVhostPath($project, $environment, $availableDir);
     $enabledPath = projectEnabledPath($project, $environment, $enabledDir);
     $serverNameMatches = false;
@@ -1108,7 +1247,7 @@ function projectEnvironmentStatus(array $project, string $environment, string $a
     if (is_file($vhostPath)) {
         $parsed = devConsoleParseApacheSite($vhostPath);
         $serverNameMatches = devConsoleNormalizeDomain((string)$parsed['server_name']) === devConsoleNormalizeDomain((string)$project[$environment]['domain']);
-        $documentRootMatches = $parsed['document_root'] !== '' && projectNormalizePath((string)$parsed['document_root']) === $path;
+        $documentRootMatches = $parsed['document_root'] !== '' && projectNormalizePath((string)$parsed['document_root']) === $documentRoot;
     }
 
     return [
@@ -1120,6 +1259,7 @@ function projectEnvironmentStatus(array $project, string $environment, string $a
         'vhost_name' => basename($vhostPath),
         'routing_status' => projectRoutingStatusLabel($project, $environment),
         'routing_verified_at' => (string)($project['provisioning']['routing_verified_at'] ?? ''),
+        'document_root' => $documentRoot,
     ];
 }
 
@@ -1127,8 +1267,8 @@ function projectStatus(array $project, string $availableDir = '/etc/apache2/site
 {
     if ((string)($project['managed_server_id'] ?? '') !== '') {
         $setup = projectRemoteSetupMetadata($project);
-        $configured = $setup['status'] === 'Configured';
-        $updateRequired = $setup['status'] === 'Update required';
+        $configured = $setup['status'] === 'Configured' && projectInfrastructureSnapshotMatches($project);
+        $updateRequired = $setup['status'] === 'Update required' || ($setup['status'] === 'Configured' && !projectInfrastructureSnapshotMatches($project));
         $failed = $setup['status'] === 'Failed';
         $environmentStatus = static function (string $environment) use ($project, $setup, $configured): array {
             $siteField = $environment === 'production' ? 'production_site' : 'preview_site';
@@ -1143,6 +1283,7 @@ function projectStatus(array $project, string $availableDir = '/etc/apache2/site
                 'routing_verified_at' => (string)$setup['timestamp'],
                 'remote_path' => (string)($project[$environment]['path'] ?? ''),
                 'remote_domain' => (string)($project[$environment]['domain'] ?? ''),
+                'document_root' => projectEnvironmentDocumentRoot($project, $environment),
             ];
         };
 
@@ -1296,10 +1437,17 @@ function projectProvision(array $configuration, string $projectId, array $option
 
         foreach (['production', 'preview'] as $environment) {
             $vhostPath = projectVhostPath($project, $environment, $availableDir);
-            $content = projectGenerateVhost($project, $environment, $paths[$environment]);
+            $documentRoot = projectEnvironmentDocumentRoot($project, $environment);
+            $content = projectGenerateVhost($project, $environment, $documentRoot);
             if (is_file($vhostPath)) {
-                if (!projectVhostMatches($vhostPath, $project, $environment, $paths[$environment])) {
+                if (!projectVhostMarkersMatch($vhostPath, $project, $environment)) {
                     throw new RuntimeException('Refusing to overwrite unrelated Apache config: ' . basename($vhostPath));
+                }
+                if (!projectVhostMatches($vhostPath, $project, $environment, $documentRoot)) {
+                    if (@file_put_contents($vhostPath, $content, LOCK_EX) === false) {
+                        throw new RuntimeException('Unable to update Apache config: ' . basename($vhostPath));
+                    }
+                    $log[] = 'Updated Apache config: ' . basename($vhostPath);
                 }
             } else {
                 if (@file_put_contents($vhostPath, $content, LOCK_EX) === false) {
@@ -1359,6 +1507,15 @@ function projectProvision(array $configuration, string $projectId, array $option
             'production_routing_verified' => !empty($verification['results']['production']['matched']),
             'preview_routing_verified' => !empty($verification['results']['preview']['matched']),
         ];
+        $project['setup'] = [
+            'status' => 'Configured',
+            'server_id' => null,
+            'timestamp' => $project['provisioning']['provisioned_at'],
+            'message' => 'Local Apache setup completed.',
+            'preview_site' => projectEnvironmentVhostName($project, 'preview'),
+            'production_site' => projectEnvironmentVhostName($project, 'production'),
+            'apache_version' => null,
+        ] + projectInfrastructureSnapshotPayload($project);
         if (empty($options['skip_save'])) {
             $updatedConfiguration = devConsoleTouchProject(devConsoleReplaceProject($configuration, $project), (string)$project['id']);
             if (!devConsoleSaveProjectConfiguration($updatedConfiguration)) {

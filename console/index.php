@@ -1675,7 +1675,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
               'running' => 'Running',
               default => 'Never deployed',
           };
-          $previewStatusClass = $previewStatus === 'deployed' ? 'success' : ($previewStatus === 'failed' ? 'failed' : 'pending');
+          $previewStatusClass = $previewStatus === 'deployed' ? 'success' : ($previewStatus === 'failed' ? 'failed' : ($previewStatus === 'running' ? 'running' : 'pending'));
           $previewCommit = (string)($managedPreviewDeploymentOverview['commit'] ?? '');
           $previewDuration = $managedPreviewDeploymentOverview['duration_ms'] ?? null;
           $previewReady = !empty($managedPreviewDeploymentReadiness['ready']);
@@ -1694,6 +1694,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <div><dt>Preview version</dt><dd><code id="previewDeploymentCommit" title="<?= h($previewCommit) ?>"><?= h($previewCommit === '' ? 'Not deployed' : shortSha($previewCommit)) ?></code></dd></div>
           <div><dt>Last deployment</dt><dd id="previewLastDeploymentTime"><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['deployed_at'] ?? '')) ?></dd></div>
           <div><dt>Duration</dt><dd id="previewDeploymentDuration"><?= h($previewDuration === null ? 'Not configured' : ((string)round(((int)$previewDuration) / 1000, 1) . 's')) ?></dd></div>
+          <?php if ((string)($managedPreviewDeploymentOverview['last_attempt_status'] ?? '') === 'failed'): ?>
+            <div><dt>Latest attempt</dt><dd><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['last_attempt_at'] ?? '')) ?>: <?= h(configuredDisplayValue($managedPreviewDeploymentOverview['last_attempt_message'] ?? 'Failed')) ?></dd></div>
+          <?php endif; ?>
         </dl>
         <?php if (!empty($previewWarnings)): ?>
           <ul class="operation-summary">
@@ -1703,7 +1706,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         <?php if (!$previewReady): ?>
           <p class="field-help"><?= h(implode(' ', array_map('strval', $previewReasons))) ?></p>
         <?php endif; ?>
-        <button type="button" id="deployPreview" data-operation-id="<?= h($previewOperationId) ?>"<?= $previewReady ? '' : ' disabled title="' . h(implode(' ', array_map('strval', $previewReasons))) . '"' ?>>Deploy to Preview</button>
+        <button type="button" id="deployPreview" data-operation-id="<?= h($previewOperationId) ?>"<?= ($previewReady && $previewStatus !== 'running') ? '' : ' disabled title="' . h($previewStatus === 'running' ? 'Preview deployment is already running.' : implode(' ', array_map('strval', $previewReasons))) . '"' ?>>Deploy to Preview</button>
         <dl class="tool-operation-grid" id="previewDeploymentProgress"<?= $previewOperationId !== '' ? '' : ' hidden' ?>>
           <div><dt>Stage</dt><dd id="previewDeploymentStage">Preparing</dd></div>
           <div><dt>Elapsed</dt><dd id="previewDeploymentElapsed">0s</dd></div>
@@ -2036,6 +2039,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                         <table class="compact-table">
                           <tbody>
                             <tr><th>Directory</th><td><?= !empty($environmentStatus['directory_exists']) ? 'Yes' : 'No' ?></td></tr>
+                            <tr><th>Effective DocumentRoot</th><td><code><?= h(configuredDisplayValue($environmentStatus['document_root'] ?? '')) ?></code></td></tr>
                             <tr><th>Vhost</th><td><?= !empty($environmentStatus['vhost_exists']) ? 'Yes' : 'No' ?></td></tr>
                             <tr><th>Enabled</th><td><?= !empty($environmentStatus['site_enabled']) ? 'Yes' : 'No' ?></td></tr>
                             <tr><th>ServerName</th><td><?= !empty($environmentStatus['server_name_matches']) ? 'OK' : 'Mismatch' ?></td></tr>
@@ -3949,7 +3953,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     if (result.branch && previewDeploymentBranch) previewDeploymentBranch.textContent = result.branch;
     if (result.duration_ms && previewDeploymentDuration) previewDeploymentDuration.textContent = `${(Number(result.duration_ms) / 1000).toFixed(1)}s`;
     const lastDeployment = document.getElementById('previewLastDeploymentTime');
-    if (lastDeployment && operation.finished_at) lastDeployment.textContent = operation.finished_at;
+    if (lastDeployment && operation.status === 'completed' && operation.finished_at) lastDeployment.textContent = operation.finished_at;
   };
   const pollPreviewManagedDeployment = (operationId) => {
     if (!operationId) return;
@@ -3961,7 +3965,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       setPreviewManagedStatus(payload.operation);
       if (['completed', 'failed'].includes(payload.operation.status)) {
         clearInterval(deploymentPolls.preview);
-        if (previewDeployButton) previewDeployButton.disabled = false;
+        if (previewDeployButton) {
+          previewDeployButton.disabled = false;
+          previewDeployButton.title = '';
+        }
       }
     };
     update().catch((error) => {
@@ -4032,7 +4039,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       setProductionManagedStatus(payload.operation);
       if (['completed', 'failed'].includes(payload.operation.status)) {
         clearInterval(deploymentPolls.production);
-        if (deployButton) deployButton.disabled = false;
+        if (deployButton) {
+          deployButton.disabled = false;
+          deployButton.title = '';
+        }
       }
     };
     update().catch((error) => {

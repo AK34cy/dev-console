@@ -139,7 +139,10 @@ function productionDeploymentRemotePromoteCommand(string $previewPath, string $p
 {
     $source = productionDeploymentShellPath(rtrim($previewPath, '/') . '/');
     $target = productionDeploymentShellPath(rtrim($productionPath, '/') . '/');
-    return 'rsync -a --delete --no-owner --no-group -- ' . $source . ' ' . $target;
+    $targetRoot = productionDeploymentShellPath($productionPath);
+    return 'rsync -a --delete --no-owner --no-group -- ' . $source . ' ' . $target
+        . ' && ' . projectRemoteEnvironmentRootPermissionCommand($productionPath)
+        . ' && test -d ' . $targetRoot;
 }
 
 function productionDeploymentRemoteVerifyCommand(string $productionPath): string
@@ -148,6 +151,11 @@ function productionDeploymentRemoteVerifyCommand(string $productionPath): string
     return 'test -d ' . $path
         . ' && test -r ' . $path
         . ' && find ' . $path . ' -mindepth 1 -maxdepth 1 -print -quit';
+}
+
+function productionDeploymentRemoteApacheCapabilities(array $server): array
+{
+    return ['apache_privilege' => (string)($server['user'] ?? '') === 'root' ? 'direct' : 'sudo'];
 }
 
 function productionDeploymentStatusLabel(string $status): string
@@ -178,6 +186,12 @@ function productionDeploymentOverview(array $project, ?array $server): array
 {
     $previewDeployment = is_array($project['preview_deployment'] ?? null) ? $project['preview_deployment'] : devConsoleEmptyProject()['preview_deployment'];
     $productionDeployment = is_array($project['production_deployment'] ?? null) ? $project['production_deployment'] : devConsoleEmptyProject()['production_deployment'];
+    $status = (string)($productionDeployment['status'] ?? 'never_deployed');
+    $lastAttemptStatus = (string)($productionDeployment['last_attempt_status'] ?? '');
+    if (in_array($lastAttemptStatus, ['running', 'failed'], true)) {
+        $status = $lastAttemptStatus;
+    }
+
     return [
         'managed_server' => $server,
         'production_path' => (string)($project['production']['path'] ?? ''),
@@ -186,14 +200,14 @@ function productionDeploymentOverview(array $project, ?array $server): array
         'preview_commit' => (string)($previewDeployment['commit'] ?? ''),
         'preview_branch' => (string)($previewDeployment['branch'] ?? $project['branch'] ?? ''),
         'preview_deployed_at' => (string)($previewDeployment['deployed_at'] ?? ''),
-        'status' => (string)($productionDeployment['status'] ?? 'never_deployed'),
+        'status' => $status,
         'commit' => (string)($productionDeployment['commit'] ?? ''),
         'branch' => (string)($productionDeployment['branch'] ?? ''),
         'deployed_at' => (string)($productionDeployment['deployed_at'] ?? ''),
         'duration_ms' => $productionDeployment['duration_ms'] ?? null,
         'operation_id' => (string)($productionDeployment['operation_id'] ?? ''),
         'message' => (string)($productionDeployment['message'] ?? ''),
-        'last_attempt_status' => (string)($productionDeployment['last_attempt_status'] ?? ''),
+        'last_attempt_status' => $lastAttemptStatus,
         'last_attempt_at' => (string)($productionDeployment['last_attempt_at'] ?? ''),
         'last_attempt_commit' => (string)($productionDeployment['last_attempt_commit'] ?? ''),
         'last_attempt_message' => (string)($productionDeployment['last_attempt_message'] ?? ''),
@@ -281,7 +295,6 @@ function productionDeploymentApplyMetadata(array $project, array $metadata, bool
         ]);
     } elseif (($metadata['status'] ?? null) === 'running') {
         $project['production_deployment'] = array_merge(devConsoleEmptyProject()['production_deployment'], $existing, [
-            'status' => 'running',
             'operation_id' => $metadata['operation_id'] ?? ($existing['operation_id'] ?? null),
             'message' => $metadata['message'] ?? 'Production deployment running.',
             'last_attempt_status' => 'running',
@@ -290,8 +303,10 @@ function productionDeploymentApplyMetadata(array $project, array $metadata, bool
             'last_attempt_message' => $metadata['message'] ?? 'Production deployment running.',
         ]);
     } else {
+        $hasSuccessfulDeployment = (string)($existing['commit'] ?? '') !== '' && (string)($existing['deployed_at'] ?? '') !== '';
+        $preservedStatus = $hasSuccessfulDeployment ? 'deployed' : 'never_deployed';
         $project['production_deployment'] = array_merge(devConsoleEmptyProject()['production_deployment'], $existing, [
-            'status' => 'failed',
+            'status' => $preservedStatus,
             'operation_id' => $metadata['operation_id'] ?? ($existing['operation_id'] ?? null),
             'message' => $metadata['message'] ?? 'Production deployment failed.',
             'last_attempt_status' => 'failed',
@@ -310,10 +325,74 @@ function productionDeploymentStatus(string $operationId): array
     if (empty($state)) {
         throw new RuntimeException('Production deployment operation not found.');
     }
+    if ((string)($state['status'] ?? '') === 'running' && productionDeploymentWorkerRunning($state) === false) {
+        productionDeploymentAppendLog($operationId, '[' . date('c') . '] Failed: Production deployment worker stopped before writing a terminal state.');
+        $state = productionDeploymentFailOperation($operationId, 'Production deployment worker stopped before writing a terminal state.');
+    }
     $state['log'] = productionDeploymentLog($operationId);
-    $startedAt = strtotime((string)($state['started_at'] ?? '')) ?: time();
-    $finishedAt = strtotime((string)($state['finished_at'] ?? '')) ?: time();
-    $state['elapsed_seconds'] = max(0, $finishedAt - $startedAt);
+    $result = is_array($state['result'] ?? null) ? $state['result'] : [];
+    if (in_array((string)($state['status'] ?? ''), ['completed', 'failed'], true) && is_numeric($result['duration_ms'] ?? null)) {
+        $state['elapsed_seconds'] = max(0, (int)floor(((int)$result['duration_ms']) / 1000));
+    } else {
+        $startedAt = strtotime((string)($state['started_at'] ?? '')) ?: time();
+        $finishedAt = strtotime((string)($state['finished_at'] ?? '')) ?: time();
+        $state['elapsed_seconds'] = max(0, $finishedAt - $startedAt);
+    }
+
+    return $state;
+}
+
+function productionDeploymentWorkerRunning(array $state): ?bool
+{
+    $pid = (int)($state['pid'] ?? 0);
+    if ($pid <= 0) {
+        return null;
+    }
+    if (is_dir('/proc/' . $pid)) {
+        return true;
+    }
+    if (function_exists('posix_kill')) {
+        return @posix_kill($pid, 0);
+    }
+
+    return false;
+}
+
+function productionDeploymentFailOperation(string $operationId, string $message, ?int $durationMs = null): array
+{
+    $state = productionDeploymentReadOperation($operationId);
+    if (empty($state)) {
+        return [];
+    }
+    $finishedAt = date('c');
+    if ($durationMs === null) {
+        $startedAt = strtotime((string)($state['started_at'] ?? '')) ?: time();
+        $durationMs = max(0, (time() - $startedAt) * 1000);
+    }
+    $stage = trim((string)($state['stage'] ?? ''));
+    $state['status'] = 'failed';
+    $state['stage'] = $stage === '' ? 'Failed' : $stage;
+    $state['message'] = $message;
+    $state['updated_at'] = $finishedAt;
+    $state['finished_at'] = $finishedAt;
+    $state['result'] = [
+        'success' => false,
+        'message' => $message,
+        'commit' => (string)($state['commit'] ?? $state['preview_commit'] ?? ''),
+        'branch' => (string)($state['branch'] ?? ''),
+        'duration_ms' => $durationMs,
+    ];
+    productionDeploymentWriteOperation($state);
+
+    $projectId = (string)($state['project_id'] ?? '');
+    if ($projectId !== '') {
+        productionDeploymentPersist(devConsoleLoadProjectConfiguration(), $projectId, [
+            'operation_id' => $operationId,
+            'message' => $message,
+            'deployed_at' => $finishedAt,
+            'commit' => (string)($state['commit'] ?? $state['preview_commit'] ?? ''),
+        ], false);
+    }
 
     return $state;
 }
@@ -355,17 +434,7 @@ function productionDeploymentStart(array $configuration, string $projectId): arr
     $command = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($operationId) . ' >/dev/null 2>&1 & echo $!';
     $pid = (int)trim((string)shell_exec($command));
     if ($pid <= 0) {
-        $state['status'] = 'failed';
-        $state['stage'] = 'Failed';
-        $state['finished_at'] = date('c');
-        $state['message'] = 'Unable to start Production deployment worker.';
-        productionDeploymentWriteOperation($state);
-        productionDeploymentPersist($configuration, $projectId, [
-            'operation_id' => $operationId,
-            'message' => 'Unable to start Production deployment worker.',
-            'deployed_at' => date('c'),
-            'commit' => (string)($previewDeployment['commit'] ?? ''),
-        ], false);
+        productionDeploymentFailOperation($operationId, 'Unable to start Production deployment worker.');
         throw new RuntimeException('Unable to start Production deployment worker.');
     }
     $state['pid'] = $pid;
@@ -379,6 +448,7 @@ function productionDeploymentSetStage(string $operationId, string $stage, string
     $state = productionDeploymentReadOperation($operationId);
     $state['stage'] = $stage;
     $state['message'] = $message;
+    $state['updated_at'] = date('c');
     productionDeploymentWriteOperation($state);
     productionDeploymentAppendLog($operationId, '[' . date('c') . '] ' . $stage . ': ' . $message);
 
@@ -413,6 +483,8 @@ function productionDeploymentRun(string $operationId, string $projectId): void
         }
         $previewPath = (string)$project['preview']['path'];
         $productionPath = (string)$project['production']['path'];
+        $documentRoot = projectEnvironmentDocumentRoot($project, 'production');
+        $usesPublicWebRoot = projectSourceUsesPublicWebRoot((string)($project['repository_path'] ?? ''));
 
         productionDeploymentSetStage($operationId, 'Validating Preview', 'Verifying the remote Preview directory and selected Preview version.');
         $previewCheck = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, productionDeploymentRemotePreviewCheckCommand($previewPath)), [
@@ -443,6 +515,14 @@ function productionDeploymentRun(string $operationId, string $projectId): void
         if ($remotePrep['exit_code'] !== 0) {
             throw new RuntimeException(productionDeploymentFailureMessage($remotePrep, 'Production directory cannot be created or is not writable.'));
         }
+        $vhostCheck = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, projectRemoteVhostDocumentRootMatchesCommand($project, 'production', $documentRoot)), [
+            'timeout' => 30,
+            'env' => ['PATH' => serverToolsDefaultPath()],
+            'inherit_env' => false,
+        ]);
+        if ($vhostCheck['exit_code'] !== 0) {
+            throw new RuntimeException('Production Apache DocumentRoot does not match the deployed web root. Run Update Infrastructure before deploying Production.');
+        }
 
         productionDeploymentSetStage($operationId, 'Promoting Preview', 'Synchronizing remote Preview to remote Production with delete semantics.');
         $promote = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, productionDeploymentRemotePromoteCommand($previewPath, $productionPath)), [
@@ -463,6 +543,14 @@ function productionDeploymentRun(string $operationId, string $projectId): void
         if ($verify['exit_code'] !== 0 || trim((string)$verify['stdout']) === '') {
             throw new RuntimeException(productionDeploymentFailureMessage($verify, 'Production verification failed.'));
         }
+        $apacheReadable = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, projectRemoteApacheReadabilityCommand(productionDeploymentRemoteApacheCapabilities($server), $documentRoot, $usesPublicWebRoot)), [
+            'timeout' => 30,
+            'env' => ['PATH' => serverToolsDefaultPath()],
+            'inherit_env' => false,
+        ]);
+        if ($apacheReadable['exit_code'] !== 0) {
+            throw new RuntimeException("Production files were promoted, but Apache cannot read the Production web root:\n\n" . $documentRoot . "\n\nCheck directory permissions.");
+        }
 
         $durationMs = (int)round((microtime(true) - $started) * 1000);
         $deployedAt = date('c');
@@ -475,6 +563,7 @@ function productionDeploymentRun(string $operationId, string $projectId): void
             'managed_server_id' => (string)$server['id'],
             'preview_path' => $previewPath,
             'production_path' => $productionPath,
+            'document_root' => $documentRoot,
             'duration_ms' => $durationMs,
         ];
         productionDeploymentPersist(devConsoleLoadProjectConfiguration(), $projectId, [
@@ -489,6 +578,8 @@ function productionDeploymentRun(string $operationId, string $projectId): void
             'source' => 'Preview',
         ], true);
         $state = productionDeploymentReadOperation($operationId);
+        $state['commit'] = $commit;
+        $state['branch'] = $branch;
         $state['status'] = 'completed';
         $state['stage'] = 'Completed';
         $state['message'] = 'Production deployed.';
@@ -498,25 +589,11 @@ function productionDeploymentRun(string $operationId, string $projectId): void
         productionDeploymentAppendLog($operationId, '[' . date('c') . '] Completed: Production promoted from Preview at ' . substr($commit, 0, 12) . '.');
     } catch (Throwable $exception) {
         $durationMs = (int)round((microtime(true) - $started) * 1000);
-        productionDeploymentPersist(devConsoleLoadProjectConfiguration(), $projectId, [
-            'operation_id' => $operationId,
-            'message' => $exception->getMessage(),
-            'deployed_at' => date('c'),
-            'commit' => $commit === '' ? null : $commit,
-        ], false);
         $state = productionDeploymentReadOperation($operationId);
-        $state['status'] = 'failed';
-        $state['stage'] = (string)($state['stage'] ?? 'Failed');
-        $state['message'] = $exception->getMessage();
-        $state['finished_at'] = date('c');
-        $state['result'] = [
-            'success' => false,
-            'message' => $exception->getMessage(),
-            'commit' => $commit,
-            'branch' => $branch,
-            'duration_ms' => $durationMs,
-        ];
+        $state['commit'] = $commit;
+        $state['branch'] = $branch;
         productionDeploymentWriteOperation($state);
+        productionDeploymentFailOperation($operationId, $exception->getMessage(), $durationMs);
         productionDeploymentAppendLog($operationId, '[' . date('c') . '] Failed: ' . $exception->getMessage());
     }
 }

@@ -61,6 +61,10 @@ function devConsoleEmptyProject(): array
             'duration_ms' => null,
             'operation_id' => null,
             'message' => null,
+            'last_attempt_status' => null,
+            'last_attempt_at' => null,
+            'last_attempt_commit' => null,
+            'last_attempt_message' => null,
         ],
         'production_deployment' => [
             'status' => 'never_deployed',
@@ -114,6 +118,8 @@ function devConsoleEmptyProject(): array
             'preview_site' => null,
             'production_site' => null,
             'apache_version' => null,
+            'infrastructure_fingerprint' => null,
+            'infrastructure' => [],
         ],
     ];
 }
@@ -194,7 +200,7 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         if (isset($previewDeploymentInput['status']) && is_scalar($previewDeploymentInput['status']) && in_array((string)$previewDeploymentInput['status'], ['never_deployed', 'running', 'deployed', 'failed'], true)) {
             $project['preview_deployment']['status'] = (string)$previewDeploymentInput['status'];
         }
-        foreach (['commit', 'branch', 'deployed_at', 'managed_server_id', 'operation_id', 'message'] as $field) {
+        foreach (['commit', 'branch', 'deployed_at', 'managed_server_id', 'operation_id', 'message', 'last_attempt_status', 'last_attempt_at', 'last_attempt_commit', 'last_attempt_message'] as $field) {
             if (array_key_exists($field, $previewDeploymentInput)) {
                 $value = $previewDeploymentInput[$field];
                 $project['preview_deployment'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
@@ -236,11 +242,14 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         if (isset($setupInput['status']) && is_scalar($setupInput['status']) && in_array((string)$setupInput['status'], ['Not configured', 'Configured', 'Failed', 'Update required'], true)) {
             $project['setup']['status'] = (string)$setupInput['status'];
         }
-        foreach (['server_id', 'timestamp', 'message', 'preview_site', 'production_site', 'apache_version'] as $field) {
+        foreach (['server_id', 'timestamp', 'message', 'preview_site', 'production_site', 'apache_version', 'infrastructure_fingerprint'] as $field) {
             if (array_key_exists($field, $setupInput)) {
                 $value = $setupInput[$field];
                 $project['setup'][$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;
             }
+        }
+        if (array_key_exists('infrastructure', $setupInput) && is_array($setupInput['infrastructure'])) {
+            $project['setup']['infrastructure'] = $setupInput['infrastructure'];
         }
 
         $project = devConsoleMergeProjectArrays($projectInput, $project);

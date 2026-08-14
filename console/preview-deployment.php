@@ -97,6 +97,12 @@ function previewDeploymentLocalRsync(): string
 function previewDeploymentOverview(array $project, ?array $server): array
 {
     $deployment = is_array($project['preview_deployment'] ?? null) ? $project['preview_deployment'] : devConsoleEmptyProject()['preview_deployment'];
+    $status = (string)($deployment['status'] ?? 'never_deployed');
+    $lastAttemptStatus = (string)($deployment['last_attempt_status'] ?? '');
+    if (in_array($lastAttemptStatus, ['running', 'failed'], true)) {
+        $status = $lastAttemptStatus;
+    }
+
     return [
         'managed_server' => $server,
         'remote_path' => (string)($project['preview']['path'] ?? ''),
@@ -105,12 +111,16 @@ function previewDeploymentOverview(array $project, ?array $server): array
         'branch' => (string)($deployment['branch'] ?? $project['branch'] ?? ''),
         'source_branch' => (string)($project['branch'] ?? ''),
         'source_commit' => '',
-        'status' => (string)($deployment['status'] ?? 'never_deployed'),
+        'status' => $status,
         'commit' => (string)($deployment['commit'] ?? ''),
         'deployed_at' => (string)($deployment['deployed_at'] ?? ''),
         'duration_ms' => $deployment['duration_ms'] ?? null,
         'message' => (string)($deployment['message'] ?? ''),
         'operation_id' => (string)($deployment['operation_id'] ?? ''),
+        'last_attempt_status' => $lastAttemptStatus,
+        'last_attempt_at' => (string)($deployment['last_attempt_at'] ?? ''),
+        'last_attempt_commit' => (string)($deployment['last_attempt_commit'] ?? ''),
+        'last_attempt_message' => (string)($deployment['last_attempt_message'] ?? ''),
     ];
 }
 
@@ -201,11 +211,102 @@ function previewDeploymentPersist(array $configuration, string $projectId, array
     if ($project === null) {
         return false;
     }
-    $existing = is_array($project['preview_deployment'] ?? null) ? $project['preview_deployment'] : devConsoleEmptyProject()['preview_deployment'];
-    $project['preview_deployment'] = array_merge(devConsoleEmptyProject()['preview_deployment'], $existing, $metadata);
+    $project = previewDeploymentApplyMetadata($project, $metadata);
     $updated = devConsoleUpdateProjectInConfiguration($configuration, $project);
 
     return devConsoleSaveProjectConfiguration($updated);
+}
+
+function previewDeploymentApplyMetadata(array $project, array $metadata): array
+{
+    $existing = is_array($project['preview_deployment'] ?? null) ? $project['preview_deployment'] : devConsoleEmptyProject()['preview_deployment'];
+    $status = (string)($metadata['status'] ?? '');
+    if ($status === 'deployed') {
+        $project['preview_deployment'] = array_merge(devConsoleEmptyProject()['preview_deployment'], $existing, $metadata, [
+            'last_attempt_status' => 'deployed',
+            'last_attempt_at' => $metadata['deployed_at'] ?? date('c'),
+            'last_attempt_commit' => $metadata['commit'] ?? null,
+            'last_attempt_message' => $metadata['message'] ?? 'Preview deployed.',
+        ]);
+    } elseif ($status === 'running') {
+        $project['preview_deployment'] = array_merge(devConsoleEmptyProject()['preview_deployment'], $existing, [
+            'operation_id' => $metadata['operation_id'] ?? ($existing['operation_id'] ?? null),
+            'message' => $metadata['message'] ?? 'Preview deployment running.',
+            'last_attempt_status' => 'running',
+            'last_attempt_at' => date('c'),
+            'last_attempt_commit' => $metadata['commit'] ?? null,
+            'last_attempt_message' => $metadata['message'] ?? 'Preview deployment running.',
+        ]);
+    } else {
+        $hasSuccessfulDeployment = (string)($existing['commit'] ?? '') !== '' && (string)($existing['deployed_at'] ?? '') !== '';
+        $preservedStatus = $hasSuccessfulDeployment ? 'deployed' : 'never_deployed';
+        $project['preview_deployment'] = array_merge(devConsoleEmptyProject()['preview_deployment'], $existing, [
+            'status' => $preservedStatus,
+            'operation_id' => $metadata['operation_id'] ?? ($existing['operation_id'] ?? null),
+            'message' => $metadata['message'] ?? 'Preview deployment failed.',
+            'last_attempt_status' => 'failed',
+            'last_attempt_at' => $metadata['deployed_at'] ?? date('c'),
+            'last_attempt_commit' => $metadata['commit'] ?? null,
+            'last_attempt_message' => $metadata['message'] ?? 'Preview deployment failed.',
+        ]);
+    }
+
+    return $project;
+}
+
+function previewDeploymentWorkerRunning(array $state): ?bool
+{
+    $pid = (int)($state['pid'] ?? 0);
+    if ($pid <= 0) {
+        return null;
+    }
+    if (is_dir('/proc/' . $pid)) {
+        return true;
+    }
+    if (function_exists('posix_kill')) {
+        return @posix_kill($pid, 0);
+    }
+
+    return false;
+}
+
+function previewDeploymentFailOperation(string $operationId, string $message, ?int $durationMs = null): array
+{
+    $state = previewDeploymentReadOperation($operationId);
+    if (empty($state)) {
+        return [];
+    }
+    $finishedAt = date('c');
+    if ($durationMs === null) {
+        $startedAt = strtotime((string)($state['started_at'] ?? '')) ?: time();
+        $durationMs = max(0, (time() - $startedAt) * 1000);
+    }
+    $stage = trim((string)($state['stage'] ?? ''));
+    $state['status'] = 'failed';
+    $state['stage'] = $stage === '' ? 'Failed' : $stage;
+    $state['message'] = $message;
+    $state['updated_at'] = $finishedAt;
+    $state['finished_at'] = $finishedAt;
+    $state['result'] = [
+        'success' => false,
+        'message' => $message,
+        'commit' => (string)($state['commit'] ?? ''),
+        'branch' => (string)($state['branch'] ?? ''),
+        'duration_ms' => $durationMs,
+    ];
+    previewDeploymentWriteOperation($state);
+
+    $projectId = (string)($state['project_id'] ?? '');
+    if ($projectId !== '') {
+        previewDeploymentPersist(devConsoleLoadProjectConfiguration(), $projectId, [
+            'operation_id' => $operationId,
+            'message' => $message,
+            'deployed_at' => $finishedAt,
+            'commit' => (string)($state['commit'] ?? ''),
+        ]);
+    }
+
+    return $state;
 }
 
 function previewDeploymentStatus(string $operationId): array
@@ -214,10 +315,19 @@ function previewDeploymentStatus(string $operationId): array
     if (empty($state)) {
         throw new RuntimeException('Preview deployment operation not found.');
     }
+    if ((string)($state['status'] ?? '') === 'running' && previewDeploymentWorkerRunning($state) === false) {
+        previewDeploymentAppendLog($operationId, '[' . date('c') . '] Failed: Preview deployment worker stopped before writing a terminal state.');
+        $state = previewDeploymentFailOperation($operationId, 'Preview deployment worker stopped before writing a terminal state.');
+    }
     $state['log'] = previewDeploymentLog($operationId);
-    $startedAt = strtotime((string)($state['started_at'] ?? '')) ?: time();
-    $finishedAt = strtotime((string)($state['finished_at'] ?? '')) ?: time();
-    $state['elapsed_seconds'] = max(0, $finishedAt - $startedAt);
+    $result = is_array($state['result'] ?? null) ? $state['result'] : [];
+    if (in_array((string)($state['status'] ?? ''), ['completed', 'failed'], true) && is_numeric($result['duration_ms'] ?? null)) {
+        $state['elapsed_seconds'] = max(0, (int)floor(((int)$result['duration_ms']) / 1000));
+    } else {
+        $startedAt = strtotime((string)($state['started_at'] ?? '')) ?: time();
+        $finishedAt = strtotime((string)($state['finished_at'] ?? '')) ?: time();
+        $state['elapsed_seconds'] = max(0, $finishedAt - $startedAt);
+    }
 
     return $state;
 }
@@ -258,17 +368,7 @@ function previewDeploymentStart(array $configuration, string $projectId): array
     $command = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($operationId) . ' >/dev/null 2>&1 & echo $!';
     $pid = (int)trim((string)shell_exec($command));
     if ($pid <= 0) {
-        $state['status'] = 'failed';
-        $state['stage'] = 'Failed';
-        $state['finished_at'] = date('c');
-        $state['message'] = 'Unable to start Preview deployment worker.';
-        previewDeploymentWriteOperation($state);
-        previewDeploymentPersist($configuration, $projectId, [
-            'status' => 'failed',
-            'operation_id' => $operationId,
-            'message' => 'Unable to start Preview deployment worker.',
-            'deployed_at' => date('c'),
-        ]);
+        previewDeploymentFailOperation($operationId, 'Unable to start Preview deployment worker.');
         throw new RuntimeException('Unable to start Preview deployment worker.');
     }
     $state['pid'] = $pid;
@@ -282,6 +382,7 @@ function previewDeploymentSetStage(string $operationId, string $stage, string $m
     $state = previewDeploymentReadOperation($operationId);
     $state['stage'] = $stage;
     $state['message'] = $message;
+    $state['updated_at'] = date('c');
     previewDeploymentWriteOperation($state);
     previewDeploymentAppendLog($operationId, '[' . date('c') . '] ' . $stage . ': ' . $message);
 
@@ -305,6 +406,16 @@ function previewDeploymentRemoteVerifyCommand(string $remotePath): string
     return 'test -d ' . $path
         . ' && test -r ' . $path
         . ' && find ' . $path . ' -mindepth 1 -maxdepth 1 -print -quit';
+}
+
+function previewDeploymentRemoteNormalizeRootCommand(string $remotePath): string
+{
+    return projectRemoteEnvironmentRootPermissionCommand($remotePath);
+}
+
+function previewDeploymentRemoteApacheCapabilities(array $server): array
+{
+    return ['apache_privilege' => (string)($server['user'] ?? '') === 'root' ? 'direct' : 'sudo'];
 }
 
 function previewDeploymentSshArguments(array $server, string $remoteCommand): array
@@ -337,6 +448,8 @@ function previewDeploymentRsyncArguments(array $server, string $sourceDirectory,
         '-a',
         '--delete',
         '--itemize-changes',
+        '--no-owner',
+        '--no-group',
         '--exclude=.git/',
         '--exclude=TASKS/',
         '-e',
@@ -431,6 +544,9 @@ function previewDeploymentRun(string $operationId, string $projectId): void
         if ($extract['exit_code'] !== 0) {
             throw new RuntimeException('Unable to prepare deployment source.');
         }
+        $documentRoot = projectEnvironmentDocumentRoot($project, 'preview', $sourceDirectory);
+        $usesPublicWebRoot = projectSourceUsesPublicWebRoot($sourceDirectory);
+
         previewDeploymentSetStage($operationId, 'Checking Managed Server', 'Preparing the remote Preview directory.');
         $remotePrep = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, previewDeploymentRemotePrepareCommand($remotePath)), [
             'timeout' => 30,
@@ -439,6 +555,15 @@ function previewDeploymentRun(string $operationId, string $projectId): void
         ]);
         if ($remotePrep['exit_code'] !== 0) {
             throw new RuntimeException('Remote Preview directory cannot be created or used by the SSH user.');
+        }
+
+        $vhostCheck = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, projectRemoteVhostDocumentRootMatchesCommand($project, 'preview', $documentRoot)), [
+            'timeout' => 30,
+            'env' => ['PATH' => serverToolsDefaultPath()],
+            'inherit_env' => false,
+        ]);
+        if ($vhostCheck['exit_code'] !== 0) {
+            throw new RuntimeException('Preview Apache DocumentRoot does not match the deployed web root. Run Update Infrastructure before deploying Preview.');
         }
 
         previewDeploymentSetStage($operationId, 'Transferring Files', 'Synchronizing the GitHub commit to remote Preview with delete semantics.');
@@ -450,6 +575,14 @@ function previewDeploymentRun(string $operationId, string $projectId): void
         if ($rsync['exit_code'] !== 0) {
             throw new RuntimeException('File transfer failed.');
         }
+        $normalizeRoot = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, previewDeploymentRemoteNormalizeRootCommand($remotePath)), [
+            'timeout' => 30,
+            'env' => ['PATH' => serverToolsDefaultPath()],
+            'inherit_env' => false,
+        ]);
+        if ($normalizeRoot['exit_code'] !== 0) {
+            throw new RuntimeException('Preview files were transferred, but the Preview root permissions could not be normalized.');
+        }
 
         previewDeploymentSetStage($operationId, 'Verifying Preview', 'Verifying remote Preview directory and deployed files.');
         $verify = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, previewDeploymentRemoteVerifyCommand($remotePath)), [
@@ -460,6 +593,14 @@ function previewDeploymentRun(string $operationId, string $projectId): void
         if ($verify['exit_code'] !== 0 || trim((string)$verify['stdout']) === '') {
             throw new RuntimeException('Preview verification failed.');
         }
+        $apacheReadable = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, projectRemoteApacheReadabilityCommand(previewDeploymentRemoteApacheCapabilities($server), $documentRoot, $usesPublicWebRoot)), [
+            'timeout' => 30,
+            'env' => ['PATH' => serverToolsDefaultPath()],
+            'inherit_env' => false,
+        ]);
+        if ($apacheReadable['exit_code'] !== 0) {
+            throw new RuntimeException("Preview files were transferred, but Apache cannot read the Preview web root:\n\n" . $documentRoot . "\n\nCheck directory permissions.");
+        }
 
         $durationMs = (int)round((microtime(true) - $started) * 1000);
         $result = [
@@ -469,6 +610,7 @@ function previewDeploymentRun(string $operationId, string $projectId): void
             'branch' => $branch,
             'managed_server_id' => (string)$server['id'],
             'remote_path' => $remotePath,
+            'document_root' => $documentRoot,
             'duration_ms' => $durationMs,
         ];
         previewDeploymentPersist(devConsoleLoadProjectConfiguration(), $projectId, [
@@ -482,6 +624,8 @@ function previewDeploymentRun(string $operationId, string $projectId): void
             'message' => 'Preview deployed.',
         ]);
         $state = previewDeploymentReadOperation($operationId);
+        $state['commit'] = $commit;
+        $state['branch'] = $branch;
         $state['status'] = 'completed';
         $state['stage'] = 'Completed';
         $state['message'] = 'Preview deployed.';
@@ -491,29 +635,11 @@ function previewDeploymentRun(string $operationId, string $projectId): void
         previewDeploymentAppendLog($operationId, '[' . date('c') . '] Completed: Preview deployed at ' . substr($commit, 0, 12) . '.');
     } catch (Throwable $exception) {
         $durationMs = (int)round((microtime(true) - $started) * 1000);
-        previewDeploymentPersist(devConsoleLoadProjectConfiguration(), $projectId, [
-            'status' => 'failed',
-            'commit' => $commit === '' ? null : $commit,
-            'branch' => $branch === '' ? null : $branch,
-            'deployed_at' => date('c'),
-            'managed_server_id' => is_array($server) ? (string)($server['id'] ?? '') : null,
-            'duration_ms' => $durationMs,
-            'operation_id' => $operationId,
-            'message' => $exception->getMessage(),
-        ]);
         $state = previewDeploymentReadOperation($operationId);
-        $state['status'] = 'failed';
-        $state['stage'] = (string)($state['stage'] ?? 'Failed');
-        $state['message'] = $exception->getMessage();
-        $state['finished_at'] = date('c');
-        $state['result'] = [
-            'success' => false,
-            'message' => $exception->getMessage(),
-            'commit' => $commit,
-            'branch' => $branch,
-            'duration_ms' => $durationMs,
-        ];
+        $state['commit'] = $commit;
+        $state['branch'] = $branch;
         previewDeploymentWriteOperation($state);
+        previewDeploymentFailOperation($operationId, $exception->getMessage(), $durationMs);
         previewDeploymentAppendLog($operationId, '[' . date('c') . '] Failed: ' . $exception->getMessage());
     } finally {
         previewDeploymentRemoveDirectory($tmpRoot);
