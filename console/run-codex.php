@@ -6,6 +6,7 @@ require __DIR__ . '/deployment.php';
 require __DIR__ . '/projects.php';
 require __DIR__ . '/git.php';
 require __DIR__ . '/tasks.php';
+require __DIR__ . '/task-lifecycle.php';
 
 $taskId = (string)($argv[1] ?? '');
 $projectId = (string)($argv[2] ?? '');
@@ -16,44 +17,7 @@ $githubConfiguration = devConsoleLoadGithubConfiguration();
 $repoRoot = devConsoleProjectTaskRoot($projectConfiguration, $project);
 $runsDir = devConsoleProjectRunsDir($project);
 $startedAt = time();
-
-function workerRunFile(string $runsDir, string $taskId, string $extension, string $source = 'project'): string
-{
-    return runFile($runsDir, $taskId, $extension, $source);
-}
-
-function appendLog(string $logPath, string $message): void
-{
-    file_put_contents($logPath, '[' . date('c') . '] ' . $message . "\n", FILE_APPEND | LOCK_EX);
-}
-
-function appendActivity(string $logPath, string $message): void
-{
-    $message = trim($message);
-    if ($message === '') {
-        return;
-    }
-
-    $currentLog = is_file($logPath) ? (string)file_get_contents($logPath) : '';
-    if (preg_match('/\] ' . preg_quote($message, '/') . '$/m', $currentLog) === 1) {
-        return;
-    }
-
-    appendLog($logPath, $message);
-}
-
-function writeStatus(string $statusPath, string $status): void
-{
-    file_put_contents($statusPath, $status, LOCK_EX);
-}
-
-function writeResult(string $runsDir, string $taskId, string $source, array $result): void
-{
-    $json = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-    if ($json !== false) {
-        file_put_contents(workerRunFile($runsDir, $taskId, 'result.json', $source), $json . "\n", LOCK_EX);
-    }
-}
+$protectedTasksSnapshot = null;
 
 function resolveCodexCommand(): string
 {
@@ -72,14 +36,6 @@ function resolveCodexCommand(): string
     }
 
     return '';
-}
-
-function cleanActivityText(string $text): string
-{
-    $text = preg_replace('/\e\[[0-9;?]*[A-Za-z]/', '', $text) ?? $text;
-    $text = trim($text);
-
-    return strlen($text) > 1000 ? substr($text, 0, 1000) . '...' : $text;
 }
 
 function eventValue(array $event, array $keys): string
@@ -184,29 +140,6 @@ function processEnvironment(): array
     return $environment;
 }
 
-function runLoggedCommand(array $arguments, string $cwd, string $logPath, int $timeout = 120): array
-{
-    $result = processRunCommand($arguments, [
-        'cwd' => $cwd,
-        'env' => [
-            'GIT_TERMINAL_PROMPT' => '0',
-            'GIT_AUTHOR_NAME' => 'IOVON Dev Console',
-            'GIT_AUTHOR_EMAIL' => 'iovon@iovon.com',
-            'GIT_COMMITTER_NAME' => 'IOVON Dev Console',
-            'GIT_COMMITTER_EMAIL' => 'iovon@iovon.com',
-        ],
-        'inherit_env' => true,
-        'timeout' => $timeout,
-    ]);
-    appendLog($logPath, '$ ' . (string)$result['command_display']);
-    appendLog($logPath, 'Exit code: ' . (string)$result['exit_code']);
-    if (trim((string)$result['output']) !== '') {
-        appendLog($logPath, cleanActivityText((string)$result['output']));
-    }
-
-    return $result;
-}
-
 function gitStatusPorcelain(string $repoRoot, string $logPath): string
 {
     $status = runLoggedCommand(['git', 'status', '--porcelain=v1'], $repoRoot, $logPath, 30);
@@ -251,37 +184,6 @@ function assertCodexAuthenticated(string $codex, string $repoRoot): void
     }
 }
 
-function taskPathForStatus(string $repoRoot, string $status, string $taskId): string
-{
-    $directory = match ($status) {
-        'TODO' => 'TODO',
-        'IN PROGRESS' => 'IN PROGRESS',
-        'DONE' => 'DONE',
-        default => throw new RuntimeException('Invalid task status.'),
-    };
-
-    return $repoRoot . '/TASKS/' . $directory . '/' . $taskId . '.md';
-}
-
-function moveTaskFile(string $repoRoot, string $taskId, string $from, string $to): void
-{
-    $source = taskPathForStatus($repoRoot, $from, $taskId);
-    $target = taskPathForStatus($repoRoot, $to, $taskId);
-    $targetDir = dirname($target);
-    if (!is_file($source)) {
-        throw new RuntimeException('Task file is not in ' . $from . '.');
-    }
-    if (!is_dir($targetDir) && !mkdir($targetDir, 0755, true) && !is_dir($targetDir)) {
-        throw new RuntimeException('Unable to create TASKS/' . $to . '.');
-    }
-    if (is_file($target)) {
-        throw new RuntimeException('Task file already exists in ' . $to . '.');
-    }
-    if (!rename($source, $target)) {
-        throw new RuntimeException('Unable to move task to ' . $to . '.');
-    }
-}
-
 function currentTaskPath(string $repoRoot, string $taskId): string
 {
     foreach (['IN PROGRESS', 'TODO'] as $status) {
@@ -292,14 +194,6 @@ function currentTaskPath(string $repoRoot, string $taskId): string
     }
 
     throw new RuntimeException('Task file is not runnable.');
-}
-
-function assertTaskMetadata(string $path, string $projectId): void
-{
-    $metadataProjectId = taskProjectId((string)file_get_contents($path));
-    if ($metadataProjectId === '' || $metadataProjectId !== $projectId) {
-        throw new RuntimeException('Task belongs to another Project.');
-    }
 }
 
 function changedProjectRecords(string $repoRoot, string $logPath): array
@@ -372,68 +266,19 @@ function commitAndPushProjectChanges(string $repoRoot, string $taskId, string $t
     if ($commit['exit_code'] !== 0) {
         throw new RuntimeException('Commit failed.');
     }
+    appendActivity($logPath, 'Source commit created');
     appendActivity($logPath, 'Push');
     $push = runLoggedCommand(['git', 'push', 'origin', 'main'], $repoRoot, $logPath, 180);
     if ($push['exit_code'] !== 0) {
         throw new RuntimeException('Push failed.');
     }
+    appendActivity($logPath, 'Source pushed');
     $head = runLoggedCommand(['git', 'rev-parse', 'HEAD'], $repoRoot, $logPath, 30);
     if ($head['exit_code'] !== 0) {
         throw new RuntimeException('Git status failed.');
     }
 
     return trim((string)$head['stdout']);
-}
-
-function gitPathIsTracked(string $repoRoot, string $path): bool
-{
-    $result = processRunCommand(['git', 'ls-files', '--', $path], [
-        'cwd' => $repoRoot,
-        'env' => ['GIT_TERMINAL_PROMPT' => '0'],
-        'inherit_env' => true,
-        'timeout' => 30,
-    ]);
-
-    return $result['exit_code'] === 0 && trim((string)$result['stdout']) !== '';
-}
-
-function taskLifecycleStagePaths(string $repoRoot, string $taskId): array
-{
-    $paths = [
-        'TASKS/TODO/' . $taskId . '.md',
-        'TASKS/IN PROGRESS/' . $taskId . '.md',
-        'TASKS/DONE/' . $taskId . '.md',
-    ];
-
-    return array_values(array_filter($paths, static function (string $path) use ($repoRoot): bool {
-        return file_exists($repoRoot . '/' . $path) || gitPathIsTracked($repoRoot, $path);
-    }));
-}
-
-function commitAndPushTaskDone(string $repoRoot, string $taskId, string $logPath): void
-{
-    appendActivity($logPath, 'Task moved to DONE');
-    $paths = taskLifecycleStagePaths($repoRoot, $taskId);
-    if (empty($paths)) {
-        throw new RuntimeException('Commit failed.');
-    }
-    $add = runLoggedCommand(array_merge(['git', 'add', '--'], $paths), $repoRoot, $logPath, 120);
-    if ($add['exit_code'] !== 0) {
-        throw new RuntimeException('Commit failed.');
-    }
-    $commit = runLoggedCommand(['git', 'commit', '-m', $taskId . ': mark task done'], $repoRoot, $logPath, 120);
-    if ($commit['exit_code'] !== 0) {
-        throw new RuntimeException('Commit failed.');
-    }
-    $push = runLoggedCommand(['git', 'push', 'origin', 'main'], $repoRoot, $logPath, 180);
-    if ($push['exit_code'] !== 0) {
-        $done = taskPathForStatus($repoRoot, 'DONE', $taskId);
-        $inProgress = taskPathForStatus($repoRoot, 'IN PROGRESS', $taskId);
-        if (is_file($done) && !is_file($inProgress)) {
-            @rename($done, $inProgress);
-        }
-        throw new RuntimeException('Push failed.');
-    }
 }
 
 function streamCodexActivity($process, array $pipes, string $prompt, string $logPath): array
@@ -494,6 +339,7 @@ function streamCodexActivity($process, array $pipes, string $prompt, string $log
     ];
 }
 
+if (realpath((string)($argv[0] ?? '')) === __FILE__) {
 try {
     if (!isTaskId($taskId)) {
         throw new RuntimeException('Invalid task id.');
@@ -523,6 +369,7 @@ try {
         moveTaskFile($repoRoot, $taskId, 'TODO', 'IN PROGRESS');
         appendActivity($logPath, 'Task moved to IN PROGRESS');
     }
+    $protectedTasksSnapshot = createProtectedTasksSnapshot($repoRoot);
 
     $codex = resolveCodexCommand();
     if ($codex === '') {
@@ -556,6 +403,8 @@ try {
         }
         throw new RuntimeException('Codex process failed.');
     }
+    appendActivity($logPath, 'Codex completed');
+    restoreProtectedTasksState($repoRoot, $protectedTasksSnapshot, $logPath);
 
     $changedRecords = changedProjectRecords($repoRoot, $logPath);
     $changedFiles = implementationChangedFiles($changedRecords);
@@ -563,11 +412,12 @@ try {
         throw new RuntimeException('No task changes to commit.');
     }
     validateCodexChanges($repoRoot, $changedFiles, $logPath);
+    appendActivity($logPath, 'Source validation passed');
     $taskBody = (string)file_get_contents(taskPathForStatus($repoRoot, 'IN PROGRESS', $taskId));
     $title = taskMarkdownMetadata($taskBody)['title'] ?? '';
     $commitHash = commitAndPushProjectChanges($repoRoot, $taskId, $title, $changedFiles, $logPath);
-    moveTaskFile($repoRoot, $taskId, 'IN PROGRESS', 'DONE');
-    commitAndPushTaskDone($repoRoot, $taskId, $logPath);
+    completeTaskLifecycleTransaction($repoRoot, $taskId, $projectId, $logPath);
+    appendActivity($logPath, 'Task lifecycle synchronized');
 
     writeStatus($statusPath, 'completed');
     $duration = max(0, time() - $startedAt);
@@ -583,7 +433,9 @@ try {
         'finished_at' => date('c'),
     ]);
     appendActivity($logPath, 'Completed');
+    cleanupProtectedTasksSnapshot($protectedTasksSnapshot);
 } catch (Throwable $exception) {
+    cleanupProtectedTasksSnapshot($protectedTasksSnapshot);
     if (isTaskId($taskId) && in_array($taskSource, ['project', 'legacy'], true)) {
         $statusPath = workerRunFile($runsDir, $taskId, 'status', $taskSource);
         $logPath = workerRunFile($runsDir, $taskId, 'log', $taskSource);
@@ -602,4 +454,5 @@ try {
         appendActivity($logPath, 'Failed');
     }
     exit(1);
+}
 }

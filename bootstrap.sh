@@ -199,7 +199,7 @@ install_service_file() {
         printf 'WorkingDirectory=%s\n' "$console_dir"
         ;;
       ExecStart=*)
-        printf 'ExecStart=%s -S 127.0.0.1:8090 -t %s %s/index.php\n' "$PHP_BIN" "$console_dir" "$console_dir"
+        printf 'ExecStart=%s/bin/run-dev-console\n' "$REPOSITORY_ROOT"
         ;;
       *)
         printf '%s\n' "$line"

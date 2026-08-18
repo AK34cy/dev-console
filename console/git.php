@@ -752,12 +752,14 @@ function gitTaskDocumentationContent(array $project): string
         . "- `TASKS/TODO/` stores open task files.\n"
         . "- `TASKS/IN PROGRESS/` stores the task currently being executed by Codex.\n"
         . "- `TASKS/DONE/` stores completed task files.\n"
-        . "- `TASKS/ATTACHMENTS/<TASK-ID>/` stores files attached to a task.\n\n"
+        . "- `TASKS/attachments/<TASK-ID>/` stores files attached to a task. Older `TASKS/ATTACHMENTS/` directories remain readable.\n\n"
         . "Task numbers are project-specific and use the next available `TASK-001`, `TASK-002`, and so on.\n\n"
-        . "Dev Console automatically prepends YAML metadata to each task:\n\n"
-        . "```yaml\n---\nproject_id: {$projectId}\n---\n```\n\n"
-        . "When creating a task manually, keep the YAML metadata at the top and write the task body below it.\n\n"
-        . "Use **Use in Workflow** to select a task in Dev Console, then use **Run Codex** to execute it.\n";
+        . "Dev Console automatically prepends YAML Front Matter to each task:\n\n"
+        . "```yaml\n---\ntask_id: TASK-001\nproject_id: {$projectId}\ntitle: Example task\nstatus: TODO\ncreated_at: 2026-08-14T00:00:00+00:00\nupdated_at: 2026-08-14T00:00:00+00:00\nattachments: []\n---\n```\n\n"
+        . "Current task files include `task_id`, `project_id`, `title`, `status`, `created_at`, `updated_at`, and `attachments` fields. Each attachment entry records the original name, stable path, MIME type, and size.\n\n"
+        . "When creating a task manually, keep the YAML Front Matter at the top and write the Markdown task body below it.\n\n"
+        . "Use **Use in Workflow** to select a task in Dev Console, then use **Run Codex** to execute it.\n\n"
+        . "Dev Console is the sole owner of task lifecycle state. Codex may read `TASKS/` files and attachments as input, but must not edit, move, delete, rename, stage, or update status/metadata for files under `TASKS/`. Dev Console performs the TODO -> IN PROGRESS -> DONE transitions and commits task lifecycle updates separately from implementation commits.\n";
 }
 
 function gitEnsureTaskDocumentation(array $project, string $path): ?string

@@ -42,6 +42,23 @@ sudo systemctl restart iovon-dev-console.service
 journalctl -u iovon-dev-console.service -f
 ```
 
+The systemd unit starts `bin/run-dev-console`, which applies Dev Console-specific
+PHP runtime options before launching the built-in PHP server. Attachment upload
+limits are stored locally in `console/config/runtime.json` and are applied as:
+
+```sh
+php -d upload_max_filesize=<MB>M -d post_max_size=<MB>M ...
+```
+
+Changing these values in Settings saves the local runtime configuration, but the
+effective PHP values do not change until `iovon-dev-console.service` is
+restarted. This does not modify global PHP configuration and does not affect
+Managed Servers.
+
+Older installed units may still start `/usr/bin/php -S` directly. Run
+`sudo ./bootstrap.sh` from the repository root once to install the updated unit
+that uses `bin/run-dev-console`; the bootstrap reloads and restarts the service.
+
 Confirm the local bind and private HTTPS route with:
 
 ```sh

@@ -75,6 +75,13 @@ Retrieve the configured token when needed:
 sudo sed -n 's/^IOVON_DEV_CONSOLE_TOKEN=//p' /etc/iovon-dev-console.env
 ```
 
+Dev Console runtime settings, including task attachment upload limits, are
+managed in Settings -> Dev Console Runtime. The defaults are 25 MB per
+attachment and 50 MB per request. Saving new values requires restarting
+`iovon-dev-console.service` before PHP reports them as effective. If Settings
+reports that the runtime unit needs an update, run `sudo ./bootstrap.sh` once to
+install the service unit that starts `bin/run-dev-console`.
+
 ## Starting the Service
 
 Start, restart, or inspect the systemd service with:

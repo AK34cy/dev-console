@@ -18,11 +18,17 @@ function shortSha(string $sha): string
 function taskMarkdownMetadata(string $body): array
 {
     $metadata = ['title' => '', 'milestone' => '', 'tag' => '', 'notes' => '', 'commit' => ''];
-    if (preg_match('/^##\s+Title\s*$\R+\s*(.+)$/mi', $body, $matches)) {
-        $metadata['title'] = trim($matches[1]);
-    } elseif (preg_match('/^#\s+(?:TASK-\d{3}\s*[-:]\s*)?(.+)$/mi', $body, $matches)) {
-        $metadata['title'] = trim($matches[1]);
+    $frontMatter = taskSystemMetadata($body);
+    foreach (['title', 'milestone', 'tag', 'notes', 'commit'] as $field) {
+        if (isset($frontMatter[$field]) && is_scalar($frontMatter[$field]) && trim((string)$frontMatter[$field]) !== '') {
+            $metadata[$field] = trim((string)$frontMatter[$field]);
+        }
     }
+    if ($metadata['title'] !== '') {
+        return $metadata;
+    }
+
+    $metadata['title'] = taskTitleFromBody($body);
 
     $metadataBlock = preg_split('/^\s*---\s*$/m', $body, 2)[0] ?? '';
     foreach (['milestone', 'tag', 'notes', 'commit'] as $field) {
@@ -36,18 +42,96 @@ function taskMarkdownMetadata(string $body): array
 
 function taskSystemMetadata(string $body): array
 {
+    return taskParseDocument($body)['metadata'];
+}
+
+function taskParseDocument(string $body): array
+{
+    $metadata = [];
     if (preg_match('/\A---\s*\R(.*?)\R---\s*(?:\R|$)/s', $body, $matches) !== 1) {
-        return [];
+        return ['metadata' => [], 'body' => $body, 'has_front_matter' => false];
     }
 
-    $metadata = [];
+    $currentList = '';
+    $currentItem = null;
     foreach (preg_split('/\R/', $matches[1]) ?: [] as $line) {
         if (preg_match('/^([a-z0-9_]+):\s*(.*?)\s*$/i', $line, $lineMatches) === 1) {
-            $metadata[strtolower($lineMatches[1])] = trim($lineMatches[2], " \t\"'");
+            if ($currentList !== '' && $currentItem !== null) {
+                $metadata[$currentList][] = $currentItem;
+                $currentItem = null;
+            }
+            $key = strtolower($lineMatches[1]);
+            $value = trim($lineMatches[2]);
+            if ($value === '') {
+                $metadata[$key] = [];
+                $currentList = $key;
+            } elseif ($value === '[]') {
+                $metadata[$key] = [];
+                $currentList = '';
+            } else {
+                $metadata[$key] = taskYamlValue($value);
+                $currentList = '';
+            }
+            continue;
+        }
+        if ($currentList !== '' && preg_match('/^\s*-\s+([a-z0-9_]+):\s*(.*?)\s*$/i', $line, $itemMatches) === 1) {
+            if ($currentItem !== null) {
+                $metadata[$currentList][] = $currentItem;
+            }
+            $currentItem = [strtolower($itemMatches[1]) => taskYamlValue(trim($itemMatches[2]))];
+            continue;
+        }
+        if ($currentList !== '' && $currentItem !== null && preg_match('/^\s+([a-z0-9_]+):\s*(.*?)\s*$/i', $line, $fieldMatches) === 1) {
+            $currentItem[strtolower($fieldMatches[1])] = taskYamlValue(trim($fieldMatches[2]));
         }
     }
+    if ($currentList !== '' && $currentItem !== null) {
+        $metadata[$currentList][] = $currentItem;
+    }
+    if (isset($metadata['attachments']) && is_array($metadata['attachments'])) {
+        $metadata['attachments'] = array_values(array_filter(array_map('taskNormalizeAttachmentRecord', $metadata['attachments'])));
+    }
 
-    return $metadata;
+    return [
+        'metadata' => $metadata,
+        'body' => preg_replace('/\A---\s*\R.*?\R---\s*(?:\R|$)/s', '', $body, 1) ?? $body,
+        'has_front_matter' => true,
+    ];
+}
+
+function taskYamlValue(string $value)
+{
+    $value = trim($value);
+    if ($value === 'null') {
+        return null;
+    }
+    if (preg_match('/^\d+$/', $value) === 1) {
+        return (int)$value;
+    }
+    if (
+        (str_starts_with($value, '"') && str_ends_with($value, '"'))
+        || (str_starts_with($value, "'") && str_ends_with($value, "'"))
+    ) {
+        return stripcslashes(substr($value, 1, -1));
+    }
+
+    return $value;
+}
+
+function taskYamlScalar($value): string
+{
+    if ($value === null || $value === '') {
+        return '';
+    }
+    if (is_int($value) || is_float($value)) {
+        return (string)$value;
+    }
+    $text = (string)$value;
+    if (preg_match('/^[A-Za-z0-9_.\/:@ -]+$/', $text) === 1 && !str_starts_with($text, ' ') && !str_ends_with($text, ' ')) {
+        return $text;
+    }
+
+    return '"' . str_replace(['\\', '"'], ['\\\\', '\"'], $text) . '"';
 }
 
 function taskProjectId(string $body): string
@@ -60,24 +144,87 @@ function taskProjectId(string $body): string
     return '';
 }
 
-function taskBodyWithProjectMetadata(string $body, string $projectId): string
+function taskBodyWithProjectMetadata(string $body, string $projectId, string $taskId = '', string $status = 'TODO', array $attachments = [], array $existingMetadata = []): string
 {
-    return taskMetadataBlock($projectId) . "\n\n" . rtrim(taskEditableBody($body));
+    $editableBody = rtrim(taskEditableBody($body));
+    $metadata = $existingMetadata;
+    $metadata['task_id'] = $taskId;
+    $metadata['project_id'] = $projectId;
+    $metadata['title'] = taskTitleFromBody($editableBody);
+    $metadata['status'] = $status;
+    $metadata['created_at'] = (string)($metadata['created_at'] ?? date('c'));
+    $metadata['updated_at'] = date('c');
+    $metadata['attachments'] = array_values(array_filter(array_map('taskNormalizeAttachmentRecord', $attachments)));
+
+    return taskMetadataBlockFromArray($metadata) . "\n\n" . $editableBody;
 }
 
-function taskMetadataBlock(string $projectId): string
+function taskMetadataBlock(string $projectId, string $taskId = '', string $body = '', string $status = 'TODO', array $attachments = []): string
 {
-    return "---\nproject_id: " . $projectId . "\n---";
+    return taskMetadataBlockFromArray([
+        'task_id' => $taskId,
+        'project_id' => $projectId,
+        'title' => taskTitleFromBody($body),
+        'status' => $status,
+        'created_at' => '',
+        'updated_at' => '',
+        'attachments' => $attachments,
+    ]);
+}
+
+function taskMetadataBlockFromArray(array $metadata): string
+{
+    $orderedFields = ['task_id', 'project_id', 'title', 'status', 'created_at', 'updated_at'];
+    $lines = ['---'];
+    foreach ($orderedFields as $field) {
+        $lines[] = $field . ': ' . taskYamlScalar($metadata[$field] ?? '');
+    }
+    $attachments = is_array($metadata['attachments'] ?? null) ? array_values(array_filter(array_map('taskNormalizeAttachmentRecord', $metadata['attachments']))) : [];
+    if (empty($attachments)) {
+        $lines[] = 'attachments: []';
+    } else {
+        $lines[] = 'attachments:';
+        foreach ($attachments as $attachment) {
+            $lines[] = '- name: ' . taskYamlScalar($attachment['name']);
+            $lines[] = '  path: ' . taskYamlScalar($attachment['path']);
+            $lines[] = '  mime: ' . taskYamlScalar($attachment['mime']);
+            $lines[] = '  size: ' . taskYamlScalar($attachment['size']);
+        }
+    }
+    foreach ($metadata as $field => $value) {
+        if (in_array((string)$field, array_merge($orderedFields, ['attachments']), true) || is_array($value)) {
+            continue;
+        }
+        $lines[] = (string)$field . ': ' . taskYamlScalar($value);
+    }
+    $lines[] = '---';
+
+    return implode("\n", $lines);
 }
 
 function taskEditableBody(string $body): string
 {
-    return preg_replace('/\A---\s*\R.*?\R---\s*(?:\R|$)/s', '', $body, 1) ?? $body;
+    return taskParseDocument($body)['body'];
 }
 
 function taskDefaultTemplate(string $taskId): string
 {
     return "# {$taskId}\n\n## Title\n\n...\n";
+}
+
+function taskTitleFromBody(string $body): string
+{
+    if (preg_match('/^##\s+Title\s*$\R+\s*(.+)$/mi', $body, $matches)) {
+        return trim($matches[1]);
+    }
+    if (preg_match('/^Title:\s*\R+\s*(.+)$/mi', $body, $matches)) {
+        return trim($matches[1]);
+    }
+    if (preg_match('/^#\s+(?:TASK-\d{3}\s*[-:]\s*)?(.+)$/mi', $body, $matches)) {
+        return trim($matches[1]);
+    }
+
+    return '';
 }
 
 function taskBelongsToProject(string $body, string $projectId, bool $allowImplicitOwnership): bool
@@ -104,7 +251,8 @@ function taskStorageContexts(array $configuration, ?array $project): array
         'todo' => $projectRoot . '/TASKS/TODO',
         'in_progress' => $projectRoot . '/TASKS/IN PROGRESS',
         'done' => $projectRoot . '/TASKS/DONE',
-        'attachments' => $projectRoot . '/TASKS/ATTACHMENTS',
+        'attachments' => taskAttachmentRoot($projectRoot),
+        'legacy_attachments' => taskLegacyAttachmentRoot($projectRoot),
         'allow_implicit_ownership' => true,
     ]];
 
@@ -120,13 +268,24 @@ function taskStorageContexts(array $configuration, ?array $project): array
                 'todo' => $legacyRoot . '/TASKS/TODO',
                 'in_progress' => $legacyRoot . '/TASKS/IN PROGRESS',
                 'done' => $legacyRoot . '/TASKS/DONE',
-                'attachments' => $legacyRoot . '/TASKS/ATTACHMENTS',
+                'attachments' => taskAttachmentRoot($legacyRoot),
+                'legacy_attachments' => taskLegacyAttachmentRoot($legacyRoot),
                 'allow_implicit_ownership' => true,
             ];
         }
     }
 
     return $contexts;
+}
+
+function taskAttachmentRoot(string $projectRoot): string
+{
+    return rtrim($projectRoot, '/') . '/TASKS/attachments';
+}
+
+function taskLegacyAttachmentRoot(string $projectRoot): string
+{
+    return rtrim($projectRoot, '/') . '/TASKS/ATTACHMENTS';
 }
 
 function taskContextForSource(array $contexts, string $source): ?array
@@ -204,6 +363,7 @@ function taskFileEntriesForContext(array $context, string $projectId): array
             }
             $relativePath = relativePath((string)$context['root'], $path);
             $markdownMetadata = taskMarkdownMetadata($body);
+            $systemMetadata = taskSystemMetadata($body);
             $taskId = 'TASK-' . $matches[1];
             $commit = preg_match('/^[0-9a-f]{7,40}$/i', $markdownMetadata['commit'])
                 ? $markdownMetadata['commit']
@@ -225,6 +385,8 @@ function taskFileEntriesForContext(array $context, string $projectId): array
                 'tag' => $tag,
                 'notes' => $markdownMetadata['notes'],
                 'commit' => $commit,
+                'metadata' => $systemMetadata,
+                'attachments' => is_array($systemMetadata['attachments'] ?? null) ? $systemMetadata['attachments'] : [],
             ];
         }
     }
@@ -371,6 +533,7 @@ function findTaskForView(array $contexts, string $projectId, string $filename, s
                 'root' => (string)$context['root'],
                 'project_id' => $projectId,
                 'body' => $body,
+                'metadata' => taskSystemMetadata($body),
             ];
         }
     }
@@ -408,31 +571,144 @@ function uniqueUploadPath(string $directory, string $filename): string
     throw new RuntimeException('Unable to create a unique attachment filename.');
 }
 
-function attachmentFilesForTask(array $contexts, string $projectId, string $taskId, string $source): array
+function taskNormalizeAttachmentRecord($record): ?array
 {
-    if (!isTaskId($taskId)) {
+    if (!is_array($record)) {
+        return null;
+    }
+    $name = sanitizeUploadName((string)($record['name'] ?? basename((string)($record['path'] ?? ''))));
+    $path = str_replace('\\', '/', trim((string)($record['path'] ?? '')));
+    $mime = trim((string)($record['mime'] ?? 'application/octet-stream'));
+    $size = max(0, (int)($record['size'] ?? 0));
+    if ($path === '' || str_starts_with($path, '/') || str_contains($path, '..')) {
+        return null;
+    }
+
+    return [
+        'name' => $name,
+        'path' => $path,
+        'mime' => $mime === '' ? 'application/octet-stream' : $mime,
+        'size' => $size,
+    ];
+}
+
+function taskAttachmentMime(string $path): string
+{
+    if (function_exists('finfo_open')) {
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        if ($finfo !== false) {
+            $mime = finfo_file($finfo, $path);
+            finfo_close($finfo);
+            if (is_string($mime) && $mime !== '') {
+                return $mime;
+            }
+        }
+    }
+
+    return 'application/octet-stream';
+}
+
+function taskAttachmentRecordFromFile(string $root, string $absolutePath): array
+{
+    return [
+        'name' => basename($absolutePath),
+        'path' => relativePath($root . '/TASKS', $absolutePath),
+        'mime' => taskAttachmentMime($absolutePath),
+        'size' => filesize($absolutePath) ?: 0,
+    ];
+}
+
+function taskAttachmentAbsolutePath(array $context, array $record): string
+{
+    return rtrim((string)$context['root'], '/') . '/TASKS/' . ltrim((string)$record['path'], '/');
+}
+
+function taskAttachmentRecordsForTask(array $contexts, string $projectId, string $taskId, string $source): array
+{
+    $task = findTaskForView($contexts, $projectId, $taskId . '.md', $source);
+    if ($task === null) {
         return [];
     }
     $context = taskContextForSource($contexts, $source);
     if ($context === null) {
         return [];
     }
-    if (findTaskForView($contexts, $projectId, $taskId . '.md', $source) === null) {
-        return [];
+    $metadata = taskSystemMetadata((string)$task['body']);
+    $records = is_array($metadata['attachments'] ?? null) ? array_values(array_filter(array_map('taskNormalizeAttachmentRecord', $metadata['attachments']))) : [];
+    $seen = [];
+    $validRecords = [];
+    foreach ($records as $record) {
+        $absolutePath = taskAttachmentAbsolutePath($context, $record);
+        if (!is_file($absolutePath)) {
+            continue;
+        }
+        $record['size'] = filesize($absolutePath) ?: (int)$record['size'];
+        $record['mime'] = taskAttachmentMime($absolutePath);
+        $seen[(string)$record['path']] = true;
+        $validRecords[] = $record;
     }
 
-    $directory = (string)$context['attachments'] . '/' . $taskId;
-
-    if (!is_dir($directory)) {
-        return [];
+    foreach ([(string)$context['attachments'], (string)($context['legacy_attachments'] ?? '')] as $directoryRoot) {
+        if ($directoryRoot === '') {
+            continue;
+        }
+        $directory = rtrim($directoryRoot, '/') . '/' . $taskId;
+        if (!is_dir($directory)) {
+            continue;
+        }
+        foreach (scandir($directory) ?: [] as $entry) {
+            if ($entry === '.' || $entry === '..' || !is_file($directory . '/' . $entry)) {
+                continue;
+            }
+            $record = taskAttachmentRecordFromFile((string)$context['root'], $directory . '/' . $entry);
+            if (!isset($seen[$record['path']])) {
+                $validRecords[] = $record;
+                $seen[$record['path']] = true;
+            }
+        }
     }
 
-    $files = array_values(array_filter(scandir($directory) ?: [], function (string $entry) use ($directory): bool {
-        return $entry !== '.' && $entry !== '..' && is_file($directory . '/' . $entry);
-    }));
-    sort($files, SORT_NATURAL | SORT_FLAG_CASE);
+    usort($validRecords, static fn(array $left, array $right): int => strnatcasecmp((string)$left['name'], (string)$right['name']));
+    return $validRecords;
+}
 
-    return $files;
+function taskAttachmentRecordByName(array $contexts, string $projectId, string $taskId, string $source, string $name): ?array
+{
+    foreach (taskAttachmentRecordsForTask($contexts, $projectId, $taskId, $source) as $record) {
+        if ((string)$record['name'] === $name) {
+            return $record;
+        }
+    }
+
+    return null;
+}
+
+function taskCanRemoveAttachments(array $task, string $runsDir): bool
+{
+    $status = (string)($task['status'] ?? '');
+    if ($status !== 'TODO') {
+        return false;
+    }
+    $runStatus = codexRunStatus($runsDir, (string)$task['task_id'], (string)($task['source'] ?? 'project'));
+
+    return !in_array($runStatus, ['queued', 'running', 'completed'], true);
+}
+
+function formatTaskAttachmentSize(int $bytes): string
+{
+    if ($bytes >= 1048576) {
+        return rtrim(rtrim(number_format($bytes / 1048576, 1), '0'), '.') . ' MB';
+    }
+    if ($bytes >= 1024) {
+        return rtrim(rtrim(number_format($bytes / 1024, 1), '0'), '.') . ' KB';
+    }
+
+    return $bytes . ' B';
+}
+
+function attachmentFilesForTask(array $contexts, string $projectId, string $taskId, string $source): array
+{
+    return array_map(static fn(array $record): string => (string)$record['name'], taskAttachmentRecordsForTask($contexts, $projectId, $taskId, $source));
 }
 
 function uploadedAttachments(): array
@@ -466,14 +742,14 @@ function uploadedAttachments(): array
 
 function attachmentPromptText(array $contexts, string $projectId, string $taskId, string $source): string
 {
-    $files = attachmentFilesForTask($contexts, $projectId, $taskId, $source);
-    if (empty($files)) {
+    $records = taskAttachmentRecordsForTask($contexts, $projectId, $taskId, $source);
+    if (empty($records)) {
         return '';
     }
 
-    $paths = array_map(static fn(string $file): string => "TASKS/ATTACHMENTS/{$taskId}/{$file}", $files);
+    $paths = array_map(static fn(array $record): string => 'TASKS/' . (string)$record['path'], $records);
 
-    return "The following attachments are available inside this Project repository:\n\n- " . implode("\n- ", $paths) . "\n\nUse them where appropriate.";
+    return "The following read-only task attachments are available inside this Project repository:\n\n- " . implode("\n- ", $paths) . "\n\nUse them where appropriate, but do not modify files under TASKS/.";
 }
 
 function isTaskId(string $taskId): bool
@@ -552,7 +828,12 @@ Instructions:
 - Do not deploy Preview or Production.
 - Do not use sudo.
 - Do not modify system services.
+- Task lifecycle is managed exclusively by IOVON Dev Console.
+- Treat TASKS/ and its attachments as read-only input.
+- Do not edit, move, rename, delete, stage, or update status/metadata of files under TASKS/.
+- Do not mark the task done; Dev Console will move it to DONE after validation, commit, and push.
 - Complete the requested development task.
+- Modify only project/source files required by the task.
 - Run appropriate validation.
 - Report what changed.";
 

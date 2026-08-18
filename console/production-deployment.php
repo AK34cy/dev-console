@@ -37,17 +37,54 @@ function productionDeploymentWriteOperation(array $state): void
     $path = productionDeploymentOperationPath((string)($state['id'] ?? ''), 'json');
     $state['updated_at'] = date('c');
     $json = json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-    if ($json === false || @file_put_contents($path, $json . "\n", LOCK_EX) === false) {
+    if ($json === false) {
         throw new RuntimeException('Unable to write Production deployment operation state.');
+    }
+    $directory = dirname($path);
+    $tmpPath = $directory . '/.' . basename($path) . '.tmp.' . bin2hex(random_bytes(8));
+    $handle = @fopen($tmpPath, 'xb');
+    if ($handle === false) {
+        throw new RuntimeException('Unable to write Production deployment operation state.');
+    }
+    try {
+        if (@fwrite($handle, $json . "\n") === false || !@fflush($handle)) {
+            throw new RuntimeException('Unable to write Production deployment operation state.');
+        }
+        if (!@fclose($handle)) {
+            $handle = null;
+            throw new RuntimeException('Unable to write Production deployment operation state.');
+        }
+        $handle = null;
+        @chmod($tmpPath, 0600);
+        if (!@rename($tmpPath, $path)) {
+            throw new RuntimeException('Unable to write Production deployment operation state.');
+        }
+    } finally {
+        if (is_resource($handle)) {
+            @fclose($handle);
+        }
+        if (is_file($tmpPath)) {
+            @unlink($tmpPath);
+        }
     }
 }
 
 function productionDeploymentReadOperation(string $operationId): array
 {
     $path = productionDeploymentOperationPath($operationId, 'json');
-    $decoded = is_file($path) ? json_decode((string)@file_get_contents($path), true) : null;
+    if (!is_file($path)) {
+        return [];
+    }
+    $contents = @file_get_contents($path);
+    if ($contents === false) {
+        throw new RuntimeException('Production deployment operation state file exists but could not be read.');
+    }
+    $decoded = json_decode($contents, true);
+    if (!is_array($decoded)) {
+        throw new RuntimeException('Production deployment operation state file exists but could not be decoded.');
+    }
 
-    return is_array($decoded) ? $decoded : [];
+    return $decoded;
 }
 
 function productionDeploymentAppendLog(string $operationId, string $message): void
@@ -437,8 +474,13 @@ function productionDeploymentStart(array $configuration, string $projectId): arr
         productionDeploymentFailOperation($operationId, 'Unable to start Production deployment worker.');
         throw new RuntimeException('Unable to start Production deployment worker.');
     }
-    $state['pid'] = $pid;
-    productionDeploymentWriteOperation($state);
+    $latestState = productionDeploymentReadOperation($operationId);
+    if (empty($latestState)) {
+        productionDeploymentFailOperation($operationId, 'Production deployment operation state disappeared after worker start.');
+        throw new RuntimeException('Production deployment operation state disappeared after worker start.');
+    }
+    $latestState['pid'] = $pid;
+    productionDeploymentWriteOperation($latestState);
 
     return productionDeploymentReadOperation($operationId);
 }

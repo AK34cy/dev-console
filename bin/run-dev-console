@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+console_dir="$repository_root/console"
+runtime_config="$console_dir/config/runtime.json"
+php_bin="${DEV_CONSOLE_PHP_BIN:-/usr/bin/php}"
+attachment_limit_mb="25"
+request_limit_mb="50"
+
+if [[ -r "$runtime_config" ]]; then
+  limits="$("$php_bin" -r '
+    $path = $argv[1];
+    $defaults = ["attachment_limit_mb" => 25, "request_limit_mb" => 50];
+    $settings = json_decode((string)@file_get_contents($path), true);
+    if (!is_array($settings)) $settings = [];
+    $attachment = (int)($settings["attachment_limit_mb"] ?? $defaults["attachment_limit_mb"]);
+    $request = (int)($settings["request_limit_mb"] ?? $defaults["request_limit_mb"]);
+    if ($attachment < 1 || $attachment > 100) $attachment = $defaults["attachment_limit_mb"];
+    if ($request < 1 || $request > 200 || $request < $attachment) $request = max($attachment, $defaults["request_limit_mb"]);
+    printf("%d %d\n", $attachment, $request);
+  ' "$runtime_config")"
+  read -r attachment_limit_mb request_limit_mb <<< "$limits"
+fi
+
+exec "$php_bin" \
+  -d "upload_max_filesize=${attachment_limit_mb}M" \
+  -d "post_max_size=${request_limit_mb}M" \
+  -S 127.0.0.1:8090 \
+  -t "$console_dir" \
+  "$console_dir/index.php"

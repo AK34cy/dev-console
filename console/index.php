@@ -10,7 +10,9 @@ require __DIR__ . '/apache.php';
 require __DIR__ . '/projects.php';
 require __DIR__ . '/git.php';
 require __DIR__ . '/tasks.php';
+require __DIR__ . '/task-lifecycle.php';
 require __DIR__ . '/documentation.php';
+require __DIR__ . '/runtime.php';
 
 const DEV_CONSOLE_VERSION = '0.1';
 
@@ -122,11 +124,16 @@ deploymentSetProject($activeProject);
 $githubConfiguration = devConsoleLoadGithubConfiguration();
 $githubConfigured = devConsoleGithubConfigured($githubConfiguration);
 $githubCliInstalled = gitGhInstalled();
+$runtimeSettings = runtimeLoadSettings();
+$runtimeEffectiveLimits = runtimeEffectiveLimits();
+$runtimeRestartRequired = runtimeRestartRequired($runtimeSettings, $runtimeEffectiveLimits);
+$runtimeServiceUsesWrapper = runtimeServiceUsesWrapper();
+$runtimeApplyInstruction = runtimeApplyInstruction();
 $legacyRepoRoot = dirname(__DIR__, 2);
 $repoRoot = devConsoleProjectTaskRoot($projectConfiguration, $activeProject);
 $todoDir = $repoRoot . '/TASKS/TODO';
 $doneDir = $repoRoot . '/TASKS/DONE';
-$attachmentsRoot = $repoRoot . '/TASKS/ATTACHMENTS';
+$attachmentsRoot = taskAttachmentRoot($repoRoot);
 $runsDir = devConsoleProjectRunsDir($activeProject);
 $legacyTaskRoot = dirname(devConsoleRepositoryRoot());
 
@@ -341,12 +348,16 @@ if ($viewTask !== null) {
 $createdTaskId = '';
 $createdTaskPath = '';
 $attachmentPaths = [];
+$createdTaskAttachments = [];
 $commitHash = '';
 $prompt = '';
 $error = '';
+$taskSaveMessage = '';
+$taskAttachmentMessage = '';
 $apacheActionResult = null;
 $projectActionResult = null;
 $githubActionResult = null;
+$runtimeActionResult = null;
 $serverDiagnosticsResult = null;
 $managedServerActionResult = null;
 $managedServerFormErrors = [];
@@ -372,6 +383,43 @@ $codexCliReady = codexCliInstalled();
 $codexAuthReady = $codexCliReady && codexCliAuthenticated();
 $requestMethod = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $action = (string)($_GET['action'] ?? $_POST['action'] ?? '');
+$postLimitExceeded = runtimePostLimitExceeded($runtimeEffectiveLimits);
+if ($postLimitExceeded && $action === '') {
+    $error = runtimePostLimitExceededMessage($runtimeEffectiveLimits);
+}
+
+if ($action === 'new_task') {
+    if ($activeProjectId !== '') {
+        clearCurrentTaskSelection($activeProjectId);
+    }
+    header('Location: /?tab=dashboard#dashboardTaskEditor');
+    exit;
+}
+
+if ($action === 'task_attachment') {
+    $taskId = is_scalar($_GET['task_id'] ?? null) ? (string)$_GET['task_id'] : '';
+    $source = is_scalar($_GET['task_source'] ?? null) ? (string)$_GET['task_source'] : 'project';
+    $name = is_scalar($_GET['name'] ?? null) ? (string)$_GET['name'] : '';
+    $mode = (string)($_GET['mode'] ?? 'open');
+    $context = taskContextForSource($taskContexts, $source);
+    $record = $activeProjectId === '' ? null : taskAttachmentRecordByName($taskContexts, $activeProjectId, $taskId, $source, $name);
+    if ($context === null || $record === null || !in_array($mode, ['open', 'download'], true)) {
+        http_response_code(404);
+        exit('Attachment not found.');
+    }
+    $path = taskAttachmentAbsolutePath($context, $record);
+    $realRoot = realpath((string)$context['root'] . '/TASKS');
+    $realPath = realpath($path);
+    if ($realRoot === false || $realPath === false || !str_starts_with($realPath, $realRoot . '/') || !is_file($realPath)) {
+        http_response_code(404);
+        exit('Attachment not found.');
+    }
+    header('Content-Type: ' . (string)$record['mime']);
+    header('Content-Length: ' . (string)filesize($realPath));
+    header('Content-Disposition: ' . ($mode === 'download' ? 'attachment' : 'inline') . '; filename="' . addcslashes((string)$record['name'], "\"\\") . '"');
+    readfile($realPath);
+    exit;
+}
 
 if ($action === 'codex-status') {
     $taskId = (string)($_GET['task'] ?? '');
@@ -583,6 +631,30 @@ if ($action === 'run-codex' && $requestMethod === 'POST') {
     exit;
 }
 
+if ($action === 'recover_codex_lifecycle' && $requestMethod === 'POST') {
+    $taskId = (string)($_POST['task'] ?? '');
+    $taskSource = (string)($_POST['task_source'] ?? 'project');
+    try {
+        if (!hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+            throw new RuntimeException('Invalid lifecycle recovery request.');
+        }
+        if ($activeProject === null || $activeProjectId === '') {
+            throw new RuntimeException('Select a Project before recovering task lifecycle.');
+        }
+        if (!isTaskId($taskId) || findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', $taskSource) === null) {
+            throw new RuntimeException('Task does not belong to the active Project.');
+        }
+        recoverCodexLifecycle($activeProject, $repoRoot, $runsDir, $taskId, $taskSource);
+        saveCurrentTaskSelection($activeProjectId, $taskId, 'project');
+        header('Location: /?tab=dashboard&task=' . rawurlencode($taskId . '.md') . '&task_source=project#codexRunPanel');
+        exit;
+    } catch (Throwable $exception) {
+        $_SESSION['codex_recovery_error'] = $exception->getMessage();
+        header('Location: /?tab=dashboard&task=' . rawurlencode($taskId . '.md') . '&task_source=' . rawurlencode($taskSource) . '#codexRunPanel');
+        exit;
+    }
+}
+
 if ($action === 'refresh_server_diagnostics') {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $serverDiagnosticsResult = [
@@ -678,6 +750,27 @@ if ($action === 'select_active_project') {
     $targetCandidate = (string)($_POST['target_tab'] ?? 'projects');
     $targetTab = in_array($targetCandidate, ['dashboard', 'projects', 'settings'], true) ? $targetCandidate : 'projects';
     header('Location: /?tab=' . $targetTab);
+    exit;
+}
+
+if ($action === 'save_runtime_settings') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $runtimeActionResult = ['success' => false, 'message' => 'Invalid runtime settings request.'];
+    } else {
+        $validation = runtimeValidateSettingsInput($_POST);
+        if (empty($validation['valid'])) {
+            $runtimeActionResult = ['success' => false, 'message' => implode(' ', $validation['errors'])];
+        } elseif (!runtimeSaveSettings($validation['settings'])) {
+            $runtimeActionResult = ['success' => false, 'message' => 'Unable to save Dev Console runtime settings.'];
+        } else {
+            $runtimeActionResult = [
+                'success' => true,
+                'message' => 'Runtime settings saved. ' . runtimeApplyInstruction(),
+            ];
+        }
+    }
+    $_SESSION['runtime_action_result'] = $runtimeActionResult;
+    header('Location: /?tab=settings#runtime');
     exit;
 }
 
@@ -857,8 +950,122 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
     exit;
 }
 
+if ($requestMethod === 'POST' && $action === 'save_task') {
+    try {
+        if (!hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+            throw new RuntimeException('Invalid task save request.');
+        }
+        $taskId = is_scalar($_POST['task_id'] ?? null) ? (string)$_POST['task_id'] : '';
+        $source = is_scalar($_POST['task_source'] ?? null) ? (string)$_POST['task_source'] : 'project';
+        $body = trim((string)($_POST['task_body'] ?? ''));
+        if ($body === '') {
+            throw new RuntimeException('Task markdown body is required.');
+        }
+        if ($source !== 'project') {
+            throw new RuntimeException('Legacy task files cannot be edited here.');
+        }
+        $task = $activeProjectId === '' ? null : findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', $source);
+        if ($task === null) {
+            throw new RuntimeException('Task not found.');
+        }
+        if (!taskCanRemoveAttachments($task, $runsDir)) {
+            throw new RuntimeException('Only TODO tasks can be edited before execution.');
+        }
+        $attachments = taskAttachmentRecordsForTask($taskContexts, $activeProjectId, $taskId, $source);
+        $metadata = is_array($task['metadata'] ?? null) ? $task['metadata'] : taskSystemMetadata((string)$task['body']);
+        $updatedBody = taskBodyWithProjectMetadata($body, $activeProjectId, $taskId, (string)$task['status'], $attachments, $metadata);
+        if (@file_put_contents((string)$task['path'], $updatedBody . "\n", LOCK_EX) === false) {
+            throw new RuntimeException('Unable to save task file.');
+        }
+        $relativeTaskPath = relativePath($repoRoot, (string)$task['path']);
+        $results[] = taskGitCommand(['add', $relativeTaskPath], $repoRoot);
+        if (end($results)['exit_code'] !== 0) {
+            throw new RuntimeException('git add failed.');
+        }
+        $results[] = taskGitCommand(['commit', '-m', 'Update ' . $taskId], $repoRoot);
+        if (end($results)['exit_code'] !== 0) {
+            throw new RuntimeException('git commit failed.');
+        }
+        $results[] = taskGitAuthenticatedCommand(['push', 'origin', 'main'], $repoRoot, $githubConfiguration);
+        if (end($results)['exit_code'] !== 0) {
+            $taskSaveMessage = 'Task "' . $taskId . '" saved and committed locally, but GitHub synchronization failed. Use Push in Projects to retry.';
+        } else {
+            $taskSaveMessage = 'Task "' . $taskId . '" saved and synchronized with GitHub.';
+        }
+        $viewTask = findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', $source);
+        saveCurrentTaskSelection($activeProjectId, $taskId, $source);
+    } catch (Throwable $exception) {
+        $error = $exception->getMessage();
+    }
+}
+
+if ($requestMethod === 'POST' && $action === 'remove_task_attachment') {
+    try {
+        if (!hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+            throw new RuntimeException('Invalid attachment removal request.');
+        }
+        $taskId = is_scalar($_POST['task_id'] ?? null) ? (string)$_POST['task_id'] : '';
+        $source = is_scalar($_POST['task_source'] ?? null) ? (string)$_POST['task_source'] : 'project';
+        $name = is_scalar($_POST['attachment_name'] ?? null) ? (string)$_POST['attachment_name'] : '';
+        if ($source !== 'project') {
+            throw new RuntimeException('Legacy task attachments cannot be removed here.');
+        }
+        $task = $activeProjectId === '' ? null : findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', $source);
+        $context = taskContextForSource($taskContexts, $source);
+        $record = $activeProjectId === '' ? null : taskAttachmentRecordByName($taskContexts, $activeProjectId, $taskId, $source, $name);
+        if ($task === null || $context === null || $record === null) {
+            throw new RuntimeException('Attachment not found.');
+        }
+        if (!taskCanRemoveAttachments($task, $runsDir)) {
+            throw new RuntimeException('Attachments can be removed only before task execution.');
+        }
+        $path = taskAttachmentAbsolutePath($context, $record);
+        $realRoot = realpath((string)$context['root'] . '/TASKS');
+        $realPath = realpath($path);
+        if ($realRoot === false || $realPath === false || !str_starts_with($realPath, $realRoot . '/') || !is_file($realPath)) {
+            throw new RuntimeException('Attachment not found.');
+        }
+        if (!@unlink($realPath)) {
+            throw new RuntimeException('Unable to remove attachment.');
+        }
+        $attachments = array_values(array_filter(taskAttachmentRecordsForTask($taskContexts, $activeProjectId, $taskId, $source), static fn(array $attachment): bool => (string)$attachment['name'] !== $name));
+        $metadata = is_array($task['metadata'] ?? null) ? $task['metadata'] : taskSystemMetadata((string)$task['body']);
+        $updatedBody = taskBodyWithProjectMetadata(taskEditableBody((string)$task['body']), $activeProjectId, $taskId, (string)$task['status'], $attachments, $metadata);
+        if (@file_put_contents((string)$task['path'], $updatedBody . "\n", LOCK_EX) === false) {
+            throw new RuntimeException('Unable to update task attachment metadata.');
+        }
+        $relativeTaskPath = relativePath($repoRoot, (string)$task['path']);
+        $relativeAttachmentPath = relativePath($repoRoot, $path);
+        $results[] = taskGitCommand(['add', $relativeTaskPath], $repoRoot);
+        if (end($results)['exit_code'] !== 0) {
+            throw new RuntimeException('git add failed.');
+        }
+        $results[] = taskGitCommand(['add', '-u', $relativeAttachmentPath], $repoRoot);
+        if (end($results)['exit_code'] !== 0) {
+            throw new RuntimeException('git add failed.');
+        }
+        $results[] = taskGitCommand(['commit', '-m', 'Remove attachment from ' . $taskId], $repoRoot);
+        if (end($results)['exit_code'] !== 0) {
+            throw new RuntimeException('git commit failed.');
+        }
+        $results[] = taskGitAuthenticatedCommand(['push', 'origin', 'main'], $repoRoot, $githubConfiguration);
+        if (end($results)['exit_code'] !== 0) {
+            $taskAttachmentMessage = 'Attachment removed and committed locally, but GitHub synchronization failed. Use Push in Projects to retry.';
+        } else {
+            $taskAttachmentMessage = 'Attachment removed and synchronized with GitHub.';
+        }
+        $viewTask = findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', $source);
+        saveCurrentTaskSelection($activeProjectId, $taskId, $source);
+    } catch (Throwable $exception) {
+        $error = $exception->getMessage();
+    }
+}
+
 if ($requestMethod === 'POST' && $action === 'create_task') {
     try {
+        if ($postLimitExceeded) {
+            throw new RuntimeException(runtimePostLimitExceededMessage($runtimeEffectiveLimits));
+        }
         if (!hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
             throw new RuntimeException('Invalid task request: CSRF token is missing or invalid.');
         }
@@ -885,7 +1092,7 @@ if ($requestMethod === 'POST' && $action === 'create_task') {
 
         foreach ($uploads as $upload) {
             if ($upload['error'] !== UPLOAD_ERR_OK) {
-                throw new RuntimeException('Attachment upload failed with code ' . (string)$upload['error'] . '.');
+                throw new RuntimeException(runtimeUploadErrorMessage((int)$upload['error'], (string)$upload['name'], $runtimeEffectiveLimits));
             }
         }
 
@@ -898,11 +1105,32 @@ if ($requestMethod === 'POST' && $action === 'create_task') {
             throw new RuntimeException($taskId . ' already exists.');
         }
 
+        $attachmentRecords = [];
+        if (!empty($uploads)) {
+            $taskAttachmentDir = $attachmentsRoot . '/' . $taskId;
+            if (!is_dir($taskAttachmentDir) && !mkdir($taskAttachmentDir, 0755, true)) {
+                throw new RuntimeException('Unable to create task attachment directory.');
+            }
+
+            foreach ($uploads as $upload) {
+                $safeFilename = sanitizeUploadName($upload['name']);
+                $uploadPath = uniqueUploadPath($taskAttachmentDir, $safeFilename);
+
+                if (!move_uploaded_file($upload['tmp_name'], $uploadPath)) {
+                    throw new RuntimeException('Unable to save uploaded attachment.');
+                }
+
+                $attachmentPaths[] = relativePath($repoRoot, $uploadPath);
+                $attachmentRecords[] = taskAttachmentRecordFromFile($repoRoot, $uploadPath);
+            }
+            $createdTaskAttachments = $attachmentRecords;
+        }
+
         $handle = @fopen($taskPath, 'x');
         if (!$handle) {
             throw new RuntimeException('Unable to create task file without overwriting.');
         }
-        $taskBody = taskBodyWithProjectMetadata($body, $activeProjectId);
+        $taskBody = taskBodyWithProjectMetadata($body, $activeProjectId, $taskId, 'TODO', $attachmentRecords);
         fwrite($handle, $taskBody . "\n");
         fclose($handle);
 
@@ -919,22 +1147,6 @@ if ($requestMethod === 'POST' && $action === 'create_task') {
         }
 
         if (!empty($uploads)) {
-            $taskAttachmentDir = $attachmentsRoot . '/' . $taskId;
-            if (!is_dir($taskAttachmentDir) && !mkdir($taskAttachmentDir, 0755, true)) {
-                throw new RuntimeException('Unable to create task attachment directory.');
-            }
-
-            foreach ($uploads as $upload) {
-                $safeFilename = sanitizeUploadName($upload['name']);
-                $uploadPath = uniqueUploadPath($taskAttachmentDir, $safeFilename);
-
-                if (!move_uploaded_file($upload['tmp_name'], $uploadPath)) {
-                    throw new RuntimeException('Unable to save uploaded attachment.');
-                }
-
-                $attachmentPaths[] = relativePath($repoRoot, $uploadPath);
-            }
-
             $pathsToAdd[] = relativePath($repoRoot, $taskAttachmentDir);
         }
 
@@ -1025,6 +1237,11 @@ if ($createdTaskId !== '' && $error === '') {
 }
 $activeRunStatus = $activeTaskId === '' ? 'not_started' : codexRunStatus($runsDir, $activeTaskId, $activeTaskSource === '' ? 'project' : $activeTaskSource);
 $activeCodexResult = $activeTaskId === '' ? [] : codexRunResult($runsDir, $activeTaskId, $activeTaskSource === '' ? 'project' : $activeTaskSource);
+$codexLifecycleRecovery = $activeTaskId === '' || $activeProject === null || $activeRunStatus !== 'failed' || $activeTaskSource !== 'project'
+    ? ['recoverable' => false, 'reason' => 'No recoverable failed Project task run is selected.']
+    : codexLifecycleRecoveryState($activeProject, $repoRoot, $runsDir, $activeTaskId, $activeTaskSource === '' ? 'project' : $activeTaskSource);
+$codexRecoveryError = is_scalar($_SESSION['codex_recovery_error'] ?? null) ? (string)$_SESSION['codex_recovery_error'] : '';
+unset($_SESSION['codex_recovery_error']);
 $projectCodexRunActive = codexProjectHasActiveRun($runsDir);
 $activeTaskRunnable = in_array($activeTaskStatus, ['TODO', 'IN PROGRESS'], true) && !in_array($activeRunStatus, ['queued', 'running', 'completed'], true);
 $codexRetryWithPreservedChanges = $activeTaskStatus === 'IN PROGRESS'
@@ -1036,7 +1253,23 @@ $taskGitPushed = $activeTaskId !== '' && $taskPushWarning === '';
 $editorTaskId = $viewTask ? pathinfo($viewTask['filename'], PATHINFO_FILENAME) : '';
 $editorBody = ($createdTaskId === '' && $viewTask) ? taskEditableBody((string)$viewTask['body']) : '';
 $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $editorTaskId;
-$taskMetadataPreview = $activeProjectId === '' ? '' : taskMetadataBlock($activeProjectId);
+$editorAttachments = $viewTask ? taskAttachmentRecordsForTask($taskContexts, $activeProjectId, $editorTaskId, (string)$viewTask['source']) : $createdTaskAttachments;
+$editorCanSave = $viewTask !== null && taskCanRemoveAttachments($viewTask, $runsDir) && (string)$viewTask['source'] === 'project';
+$editorMetadata = $viewTask ? taskSystemMetadata((string)$viewTask['body']) : [];
+if ($viewTask) {
+    $editorMetadata = array_merge($editorMetadata, [
+        'task_id' => $editorTaskId,
+        'project_id' => $activeProjectId,
+        'title' => (string)($editorMetadata['title'] ?? taskTitleFromBody($editorBody)),
+        'status' => (string)$viewTask['status'],
+        'attachments' => $editorAttachments,
+    ]);
+}
+$taskMetadataPreview = $activeProjectId === ''
+    ? ''
+    : ($viewTask
+        ? taskMetadataBlockFromArray($editorMetadata)
+        : taskMetadataBlock($activeProjectId, taskNumber($nextNumber), '', 'TODO'));
 $taskDefaultTemplate = taskDefaultTemplate(taskNumber($nextNumber));
 $previewDeploymentOverview = deploymentOverview('preview');
 $productionDeploymentOverview = deploymentOverview('production');
@@ -1060,6 +1293,8 @@ $apacheActionResult = is_array($_SESSION['apache_action_result'] ?? null) ? $_SE
 unset($_SESSION['apache_action_result']);
 $githubActionResult = is_array($_SESSION['github_action_result'] ?? null) ? $_SESSION['github_action_result'] : $githubActionResult;
 unset($_SESSION['github_action_result']);
+$runtimeActionResult = is_array($_SESSION['runtime_action_result'] ?? null) ? $_SESSION['runtime_action_result'] : $runtimeActionResult;
+unset($_SESSION['runtime_action_result']);
 $managedServerActionResult = is_array($_SESSION['managed_server_result'] ?? null) ? $_SESSION['managed_server_result'] : $managedServerActionResult;
 unset($_SESSION['managed_server_result']);
 $serverDiagnosticsResult = is_array($_SESSION['server_diagnostics_result'] ?? null) ? $_SESSION['server_diagnostics_result'] : $serverDiagnosticsResult;
@@ -1194,7 +1429,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .attachment-list { color: var(--muted); margin: 12px 0 0; }
     .attachment-list strong { color: var(--blue); display: block; margin-bottom: 6px; }
     .attachment-list ul { list-style: none; margin: 0; padding: 0; }
-    .attachment-list li { margin-top: 4px; }
+    .attachment-list li { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+    .inline-form { display: inline; margin: 0; }
+    .link-button { background: none; border: 0; color: var(--blue); cursor: pointer; font: inherit; padding: 0; text-decoration: underline; }
     .task-list-scroll { max-height: 620px; overflow-y: auto; padding-right: 6px; }
     .task-group { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
     .task-group:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
@@ -1345,7 +1582,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .documentation-content blockquote { border-left: 4px solid var(--line); color: var(--muted); margin: 14px 0; padding: 2px 0 2px 14px; }
     .tool-status { white-space: nowrap; }
     .site-path, .path-value { overflow-wrap: anywhere; word-break: normal; }
-    #projects, #github, #apache { scroll-margin-top: 18px; }
+    #projects, #github, #apache, #runtime { scroll-margin-top: 18px; }
     #createProject { scroll-margin-top: 18px; }
     #createProject button[type="submit"] { width: 100%; }
     .subsection { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
@@ -1525,32 +1762,48 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   <div class="dashboard-columns">
   <div class="dashboard-column dashboard-column-left">
   <section class="panel" id="create-task">
-    <h2 id="editorHeading"><?= h($editorHeading) ?></h2>
+    <div class="dashboard-header" id="dashboardTaskEditor">
+      <h2 id="editorHeading"><?= h($editorHeading) ?></h2>
+      <a class="button-link secondary" id="newTaskAction" href="/?tab=dashboard&action=new_task#dashboardTaskEditor">New Task</a>
+    </div>
     <?php if ($editorTaskId !== ''): ?>
-      <p class="meta" id="viewingTaskNote">Viewing existing task. Editing here will not update the saved task.</p>
+      <p class="meta" id="viewingTaskNote">Viewing existing task. TODO tasks can be edited and saved before execution.</p>
     <?php endif; ?>
     <?php if (!$taskCreationReady): ?>
       <p class="error"><?= h($taskCreationUnavailableReason === '' ? 'Repository is not ready for task creation. Review Git status in Projects.' : $taskCreationUnavailableReason) ?></p>
     <?php endif; ?>
     <?php if ($taskPushWarning !== ''): ?>
       <p class="success-message"><?= h($taskPushWarning) ?></p>
+    <?php elseif ($taskSaveMessage !== ''): ?>
+      <p class="success-message"><?= h($taskSaveMessage) ?></p>
+    <?php elseif ($taskAttachmentMessage !== ''): ?>
+      <p class="success-message"><?= h($taskAttachmentMessage) ?></p>
     <?php elseif ($createdTaskId !== '' && $error === ''): ?>
       <p class="success-message">Task "<?= h($createdTaskId) ?>" created, committed locally, and synchronized with GitHub for Project "<?= h(projectMessageName($activeProject, $activeProjectId)) ?>".</p>
     <?php endif; ?>
     <p id="nextTaskNumber"><strong>Next task number:</strong> <?= h(taskNumber($nextNumber)) ?></p>
     <form method="post" enctype="multipart/form-data" id="taskForm" data-created="<?= h($createdTaskPath !== '' && $error === '' ? '1' : '0') ?>">
-      <input type="hidden" name="action" value="create_task">
+      <input type="hidden" name="action" value="<?= h($editorTaskId === '' ? 'create_task' : 'save_task') ?>">
       <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+      <?php if ($editorTaskId !== '' && $viewTask): ?>
+        <input type="hidden" name="task_id" value="<?= h($editorTaskId) ?>">
+        <input type="hidden" name="task_source" value="<?= h((string)$viewTask['source']) ?>">
+      <?php endif; ?>
       <label for="task_metadata">Task metadata</label>
-      <textarea id="task_metadata" class="metadata-preview" readonly rows="3" aria-readonly="true" tabindex="-1"><?= h($taskMetadataPreview) ?></textarea>
+      <textarea id="task_metadata" class="metadata-preview" readonly rows="9" aria-readonly="true" tabindex="-1"><?= h($taskMetadataPreview) ?></textarea>
       <label for="task_body">Task markdown body</label>
-      <textarea id="task_body" name="task_body" required spellcheck="false" data-default-template="<?= h($taskDefaultTemplate) ?>" placeholder="# TASK-<?= h(sprintf('%03d', $nextNumber)) ?>&#10;&#10;## Title&#10;&#10;..."><?= h($editorBody) ?></textarea>
-      <div class="form-actions">
-        <button type="button" class="secondary" id="clearDraft">Clear draft</button>
-        <span class="hint" id="draftStatus">Draft autosaves in this browser.</span>
-      </div>
+      <textarea id="task_body" name="task_body" required spellcheck="false" data-default-template="<?= h($taskDefaultTemplate) ?>" placeholder="# TASK-<?= h(sprintf('%03d', $nextNumber)) ?>&#10;&#10;## Title&#10;&#10;..."<?= ($editorTaskId !== '' && !$editorCanSave) ? ' readonly aria-readonly="true"' : '' ?>><?= h($editorBody) ?></textarea>
+      <?php if ($editorTaskId === ''): ?>
+        <div class="form-actions">
+          <button type="button" class="secondary" id="clearDraft">Clear draft</button>
+          <span class="hint" id="draftStatus">Draft autosaves in this browser.</span>
+        </div>
+      <?php else: ?>
+        <p class="field-help" id="draftStatus">Existing task content is loaded from the Project repository.</p>
+      <?php endif; ?>
 
       <label for="attachment">Optional attachments</label>
+      <p class="field-help">Maximum file size: <?= h((string)$runtimeEffectiveLimits['attachment_limit_mb']) ?> MB. Maximum total request size: <?= h((string)$runtimeEffectiveLimits['request_limit_mb']) ?> MB.<?= $runtimeRestartRequired ? ' Configured limits are pending a Dev Console restart.' : '' ?></p>
       <label class="upload-zone" id="uploadZone" for="attachment">
         <input id="attachment" name="attachments[]" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.svg,.md,.txt,.docx,application/pdf,image/png,image/jpeg,image/svg+xml,text/markdown,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
         <strong>Drop files here</strong>
@@ -1558,7 +1811,37 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         <div class="selected-files" id="selectedFiles">No files selected.</div>
       </label>
 
-      <button type="submit"<?= $taskCreationReady ? '' : ' disabled title="' . h($taskCreationUnavailableReason === '' ? 'Review Git status in Projects before creating tasks.' : $taskCreationUnavailableReason) . '"' ?>>Create Task</button>
+      <?php if (!empty($editorAttachments)): ?>
+        <section class="attachment-list">
+          <strong>Attachments</strong>
+          <ul>
+            <?php foreach ($editorAttachments as $attachment): ?>
+              <?php
+                $attachmentName = (string)$attachment['name'];
+                $attachmentUrl = '?action=task_attachment&task_id=' . rawurlencode($editorTaskId !== '' ? $editorTaskId : $createdTaskId) . '&task_source=' . rawurlencode($viewTask ? (string)$viewTask['source'] : 'project') . '&name=' . rawurlencode($attachmentName);
+                $canRemoveAttachment = $viewTask !== null && taskCanRemoveAttachments($viewTask, $runsDir) && (string)$viewTask['source'] === 'project';
+              ?>
+              <li>
+                <span>Done: <?= h($attachmentName) ?> (<?= h(formatTaskAttachmentSize((int)$attachment['size'])) ?>)</span>
+                <a href="<?= h($attachmentUrl . '&mode=open') ?>" target="_blank" rel="noopener noreferrer">Open</a>
+                <a href="<?= h($attachmentUrl . '&mode=download') ?>">Download</a>
+                <?php if ($canRemoveAttachment): ?>
+                  <form method="post" class="inline-form" action="/?tab=dashboard&task=<?= h(rawurlencode($editorTaskId . '.md')) ?>&task_source=<?= h(rawurlencode((string)$viewTask['source'])) ?>" data-confirm-message="<?= h('Remove attachment ' . $attachmentName . ' from ' . $editorTaskId . '?') ?>" onsubmit="return confirm(this.dataset.confirmMessage);">
+                    <input type="hidden" name="action" value="remove_task_attachment">
+                    <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                    <input type="hidden" name="task_id" value="<?= h($editorTaskId) ?>">
+                    <input type="hidden" name="task_source" value="<?= h((string)$viewTask['source']) ?>">
+                    <input type="hidden" name="attachment_name" value="<?= h($attachmentName) ?>">
+                    <button type="submit" class="link-button">Remove</button>
+                  </form>
+                <?php endif; ?>
+              </li>
+            <?php endforeach; ?>
+          </ul>
+        </section>
+      <?php endif; ?>
+
+      <button type="submit"<?= $editorTaskId === '' ? ($taskCreationReady ? '' : ' disabled title="' . h($taskCreationUnavailableReason === '' ? 'Review Git status in Projects before creating tasks.' : $taskCreationUnavailableReason) . '"') : ($editorCanSave ? '' : ' disabled title="Only TODO Project tasks can be edited before execution."') ?>><?= h($editorTaskId === '' ? 'Create Task' : 'Save Task') ?></button>
     </form>
   </section>
 
@@ -1601,12 +1884,24 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
               <button type="button" disabled title="<?= h($runCodexDisabledReason) ?>">Run Codex</button>
             <?php endif; ?>
             <a class="button-link" href="?tab=dashboard&task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>" target="_blank" rel="noopener">Open TASK</a>
+            <?php if (!empty($codexLifecycleRecovery['recoverable'])): ?>
+              <form method="post" class="inline-form" action="/?tab=dashboard&task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>#codexRunPanel">
+                <input type="hidden" name="action" value="recover_codex_lifecycle">
+                <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                <input type="hidden" name="task" value="<?= h($activeTaskId) ?>">
+                <input type="hidden" name="task_source" value="<?= h($activeTaskSource) ?>">
+                <button type="submit" class="secondary" title="Complete task lifecycle synchronization without running Codex again.">Recover Task Lifecycle</button>
+              </form>
+            <?php endif; ?>
             <?php if ($activeTaskRunnable && !$codexCliReady): ?>
               <span class="hint">Codex CLI is not installed on this server.</span>
             <?php elseif ($activeTaskRunnable && !$codexAuthReady): ?>
               <span class="hint">Codex CLI is not authenticated for the Dev Console service user.</span>
             <?php elseif ($projectCodexRunActive && !in_array($activeRunStatus, ['queued', 'running'], true)): ?>
               <span class="hint">Codex is already running for this Project.</span>
+            <?php endif; ?>
+            <?php if ($codexRecoveryError !== ''): ?>
+              <span class="hint">Lifecycle recovery failed: <?= h($codexRecoveryError) ?></span>
             <?php endif; ?>
           </div>
           <?php if (!empty($attachmentPaths)): ?>
@@ -2564,6 +2859,44 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 
   <section id="settingsTab" data-tab-panel="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
     <div class="settings-layout">
+      <section class="panel" id="runtime">
+        <h2>Dev Console Runtime</h2>
+        <?php if ($runtimeActionResult !== null): ?>
+          <section class="result-block <?= !empty($runtimeActionResult['success']) ? '' : 'error' ?>">
+            <h2><?= !empty($runtimeActionResult['success']) ? 'Runtime settings saved' : 'Runtime settings failed' ?></h2>
+            <p><?= h((string)$runtimeActionResult['message']) ?></p>
+          </section>
+        <?php endif; ?>
+        <dl class="apache-summary-grid">
+          <div><dt>Configured attachment limit</dt><dd><?= h((string)$runtimeSettings['attachment_limit_mb']) ?> MB</dd></div>
+          <div><dt>Configured request limit</dt><dd><?= h((string)$runtimeSettings['request_limit_mb']) ?> MB</dd></div>
+          <div><dt>Effective attachment limit</dt><dd><?= h((string)$runtimeEffectiveLimits['attachment_limit_mb']) ?> MB <span class="meta">(<?= h((string)$runtimeEffectiveLimits['attachment_ini']) ?>)</span></dd></div>
+          <div><dt>Effective request limit</dt><dd><?= h((string)$runtimeEffectiveLimits['request_limit_mb']) ?> MB <span class="meta">(<?= h((string)$runtimeEffectiveLimits['request_ini']) ?>)</span></dd></div>
+          <div><dt>Maximum files</dt><dd><?= h((string)$runtimeEffectiveLimits['max_file_uploads']) ?></dd></div>
+          <div><dt>Runtime unit</dt><dd><?= $runtimeServiceUsesWrapper ? 'Managed wrapper installed' : 'Unit update required' ?></dd></div>
+          <div><dt>Restart</dt><dd><?= ($runtimeRestartRequired || !$runtimeServiceUsesWrapper) ? 'Required' : 'Not required' ?></dd></div>
+        </dl>
+        <?php if ($runtimeRestartRequired || !$runtimeServiceUsesWrapper): ?>
+          <p class="field-help">Configured values are saved, but the current PHP runtime still uses the effective values above. <?= h($runtimeApplyInstruction) ?></p>
+        <?php else: ?>
+          <p class="field-help">These limits apply only to the Dev Console PHP runtime on this host.</p>
+        <?php endif; ?>
+        <form method="post" class="project-form subsection" action="/?tab=settings#runtime" data-preserve-settings-scroll="1">
+          <input type="hidden" name="action" value="save_runtime_settings">
+          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+          <fieldset>
+            <legend>Attachment limits</legend>
+            <label for="attachment_limit_mb">Maximum attachment size</label>
+            <input id="attachment_limit_mb" name="attachment_limit_mb" type="number" min="1" max="100" step="1" required value="<?= h((string)$runtimeSettings['attachment_limit_mb']) ?>">
+            <p class="field-help">MB, allowed range 1-100.</p>
+            <label for="request_limit_mb">Maximum request size</label>
+            <input id="request_limit_mb" name="request_limit_mb" type="number" min="1" max="200" step="1" required value="<?= h((string)$runtimeSettings['request_limit_mb']) ?>">
+            <p class="field-help">MB, allowed range 1-200. Must be greater than or equal to the attachment limit.</p>
+          </fieldset>
+          <button type="submit">Apply Settings</button>
+        </form>
+        <p class="field-help">Applying settings saves Dev Console runtime configuration. Effective values change only after the service uses the managed wrapper and the PHP process restarts. Current service permissions do not provide a safe in-app restart.</p>
+      </section>
       <div class="settings-service-row">
       <section class="panel" id="github">
         <h2>GitHub</h2>
@@ -2945,10 +3278,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 <script>
 (() => {
   const textarea = document.getElementById('task_body');
+  const newTaskAction = document.getElementById('newTaskAction');
   const clearDraft = document.getElementById('clearDraft');
   const draftStatus = document.getElementById('draftStatus');
-  const editorHeading = document.getElementById('editorHeading');
-  const viewingTaskNote = document.getElementById('viewingTaskNote');
   const form = document.getElementById('taskForm');
   const uploadZone = document.getElementById('uploadZone');
   const fileInput = document.getElementById('attachment');
@@ -2963,9 +3295,11 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const copyCodexMessage = document.getElementById('copyCodexMessage');
   const csrfToken = <?= json_encode($csrfToken, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const activeProjectId = <?= json_encode($activeProjectId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const editorTaskId = <?= json_encode($editorTaskId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const nextTaskId = <?= json_encode(taskNumber($nextNumber), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const activeManagedServerLabel = <?= json_encode(devConsoleManagedServerLabel($activeManagedServer, (string)($activeProject['managed_server_id'] ?? '')), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const activeManagedServerStatus = <?= json_encode(devConsoleManagedServerStatusLabel($activeManagedServer), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
-  const draftKey = `dev-console-task-draft-${activeProjectId || 'none'}`;
+  const draftKey = `dev-console-task-draft-${activeProjectId || 'none'}-${editorTaskId || `new-${nextTaskId || 'none'}`}`;
   const environmentDashboard = document.getElementById('environmentDashboard');
   const dashboardUpdated = document.getElementById('dashboardUpdated');
   const activeTask = <?= json_encode($activeTaskId === '' ? 'None' : $activeTaskId, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
@@ -3532,11 +3866,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     if (draftStatus) {
       draftStatus.textContent = 'Draft cleared.';
     }
-    if (editorHeading) {
-      editorHeading.textContent = 'Create New Task';
-    }
-    viewingTaskNote?.remove();
-    window.history.replaceState(null, '', `${window.location.pathname}?tab=dashboard`);
+  });
+
+  newTaskAction?.addEventListener('click', () => {
+    localStorage.removeItem(draftKey);
   });
 
   document.querySelectorAll('[data-project-card], [data-server-card]').forEach((card) => {

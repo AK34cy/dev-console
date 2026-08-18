@@ -651,7 +651,7 @@ Internal operations:
 - Prepends YAML metadata.
 - Writes `TASKS/TODO/<task-id>.md`.
 - Ensures `TASKS/README.md` exists without overwriting it.
-- Stores attachments under `TASKS/ATTACHMENTS/<task-id>`.
+- Stores attachments under `TASKS/attachments/<task-id>`.
 - Commits and pushes the task addition.
 - Selects the task for current workflow.
 
@@ -703,6 +703,8 @@ Internal operations:
 - Validates project repository and task metadata.
 - Moves TODO task to IN PROGRESS, unless retrying an existing IN PROGRESS task.
 - Runs Codex in the project repository with a generated prompt.
+- Treats `TASKS/` as Dev Console-owned protected state.
+- Restores the pre-Codex `TASKS/` state if Codex edits task metadata, moves task files, deletes attachments, or changes unrelated task files.
 - Parses Git porcelain output without trimming status columns.
 - Commits implementation changes outside `TASKS/`.
 - Moves the task to DONE.
