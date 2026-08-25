@@ -4,9 +4,9 @@ This document describes the workflows implemented in the current source code.
 
 ## Page Responsibilities
 
-- Settings: Dev Console configuration, GitHub configuration, local Dev Console host environment, local Apache management, runtime limits, and Dev Console host tool diagnostics/actions.
-- Servers: Managed Server registration, SSH onboarding, Add/Edit/Remove, Test Connection, reachability, and compact PHP/Composer diagnostics.
-- Server Management: selector, diagnostics refresh, runtime prerequisite status, and operational Composer installation for one configured Managed Server. It does not show the local Dev Console host as the managed server.
+- Settings: Dev Console configuration, GitHub configuration, local Dev Console host environment, runtime limits, and required Dev Console host tool diagnostics/actions for Git, PHP, and Codex CLI.
+- Servers: Managed Server registration, SSH onboarding, Add/Edit/Remove, Test Connection, reachability, and connection details.
+- Server Management: selected Managed Server overview, remote runtime/development tool inventory for PHP, Composer, Node.js, and npm, remote Apache diagnostics, operational Composer installation, and projects assigned to that server. It does not show the local Dev Console host as the managed server.
 - Projects: Project lifecycle, repository state, infrastructure setup, and deployment configuration.
 
 ## Create Managed Server
@@ -121,7 +121,7 @@ Internal operations:
 - `index.php` starts `managedServerStartConnectionTest`.
 - A runtime operation is written under `console/runtime/managed-server-operations`.
 - `console/run-managed-server.php` executes the SSH test asynchronously.
-- The fixed remote diagnostic command collects marker, hostname, kernel, working directory, user, optional OS release data, and sudo readiness.
+- The fixed remote diagnostic command collects marker, hostname, kernel, working directory, user, optional OS release data, sudo readiness, PHP/Composer/Node.js/npm diagnostics, Apache state, and Apache virtual host inventory.
 
 Files modified:
 
@@ -131,12 +131,12 @@ Files modified:
 
 Remote operations:
 
-- SSH command executes only read-only diagnostics plus `sudo -n true` for privilege checking.
+- SSH command executes read-only diagnostics plus `sudo -n true` for privilege checking.
 
 Result:
 
 - Server status becomes Reachable or Unreachable.
-- Last checked, response time, hostname, OS, kernel, remote user, working directory, and passwordless sudo state are persisted when available.
+- Last checked, response time, hostname, OS, kernel, remote user, working directory, passwordless sudo state, remote tool diagnostics, Apache state, and Apache site inventory are persisted when available.
 
 Possible failures:
 
@@ -256,8 +256,9 @@ Internal operations:
 - Paths are generated server-side:
   - `/var/www/projects/<project-id>/production`
   - `/var/www/projects/<project-id>/preview`
-  - `/var/www/git/<project-id>`
+  - `/var/www/git/<project-id>` on the Dev Console host
 - Duplicate project IDs, domains, paths, and repository paths are rejected.
+- No local Git repository or GitHub repository is created by this workflow.
 
 Files modified:
 
@@ -321,7 +322,7 @@ Recovery:
 
 ## Initialize Repository
 
-Purpose: create the project GitHub repository and local Git working copy.
+Purpose: create the project GitHub repository and local Git working copy on the Dev Console host.
 
 Prerequisites:
 
@@ -342,7 +343,7 @@ Internal operations:
 - GitHub is tested with `GH_TOKEN=<saved token> gh api user`.
 - The preferred GitHub repository is checked.
 - A private GitHub repository is created through `gh`.
-- A local repository is created in `/var/www/git/<project-id>`.
+- A local repository is created on the Dev Console host in `/var/www/git/<project-id>`.
 - Initial files are written and committed.
 - Origin is set to the account-level SSH alias.
 - `main` is pushed and fetched.
@@ -350,7 +351,7 @@ Internal operations:
 
 Files modified:
 
-- `/var/www/git/<project-id>`
+- `/var/www/git/<project-id>` on the Dev Console host
 - `config/projects.json`
 
 Remote operations:
@@ -424,7 +425,7 @@ Prerequisites:
 
 - Project repository is connected.
 - Working tree is clean.
-- Current branch matches configured branch.
+- Current branch matches the expected branch. Dev Console v1 stores `branch` metadata, defaults it to `main`, and does not expose branch selection in the UI.
 
 User actions:
 
@@ -433,7 +434,7 @@ User actions:
 Internal operations:
 
 - Fetches origin.
-- Runs `git pull --ff-only origin <branch>`.
+- Runs a fast-forward pull from origin. Current v1 operations are `main`-oriented in several code paths.
 - Updates `last_fetch_at` and `last_pull_at`.
 
 Files modified:
@@ -474,7 +475,7 @@ User actions:
 Internal operations:
 
 - Ensures origin.
-- Pushes configured branch to origin.
+- Pushes the expected branch to origin. Current v1 operations are `main`-oriented in several code paths.
 - Fetches/verifies remote state.
 - Updates Git metadata.
 
@@ -822,7 +823,7 @@ Recovery:
 
 ## Deploy Preview
 
-Purpose: deploy the selected GitHub branch to the managed server Preview path.
+Purpose: deploy the selected Project Git state from the Dev Console host to the managed server Preview path.
 
 Prerequisites:
 
@@ -839,8 +840,8 @@ User actions:
 Internal operations:
 
 - Starts an asynchronous Preview deployment.
-- Fetches the configured branch.
-- Resolves `origin/<branch>`.
+- Fetches origin for the Project branch metadata. The stored branch defaults to `main`, no branch selector is currently exposed, and some v1 workflows remain `main`-specific.
+- Resolves the remote branch commit.
 - Creates a Git archive of that remote commit.
 - Extracts the archive into a temporary source directory.
 - Detects Composer projects by `composer.json`.
@@ -855,6 +856,7 @@ Internal operations:
 Files modified:
 
 - `config/projects.json`
+- Temporary source files under `/tmp/dev-console-preview-deployments`
 - Runtime files under `console/runtime/preview-deployments`
 
 Remote Preview `.env` note:
@@ -863,13 +865,13 @@ Remote Preview `.env` note:
 - If the deployment source does not contain root `.env`, Dev Console preserves an existing `<preview_path>/.env` as server-local runtime configuration and does not create one.
 - Dev Console does not create, edit, inspect, or manage server-local `.env` contents.
 - `.env.example` and other committed source files continue to deploy normally.
-- Temporary files under `/tmp/dev-console-preview-deployments`
 
 Remote operations:
 
 - SSH directory checks.
 - Remote file synchronization with rsync.
 - Remote PHP/Composer checks and Composer install for Composer projects.
+- No Git commands run on the Managed Server for Preview deployment.
 
 Result:
 
@@ -924,6 +926,7 @@ Files modified:
 Remote operations:
 
 - SSH checks and remote rsync.
+- No Git commands run on the Managed Server for Production deployment.
 
 Result:
 
@@ -1096,7 +1099,7 @@ Internal operations:
 
 - Disables/removes managed Apache vhosts.
 - Removes managed generated environment directories.
-- Preserves `/var/www/git/<project-id>` and GitHub repositories.
+- Preserves `/var/www/git/<project-id>` on the Dev Console host and GitHub repositories.
 
 Files modified:
 
@@ -1121,7 +1124,7 @@ Recovery:
 
 - Inspect and clean manually.
 
-## Server Management Tool Installation
+## Dev Console Host Tool Operation
 
 Purpose: install or update local Dev Console host tools.
 
@@ -1132,7 +1135,7 @@ Prerequisites:
 
 User actions:
 
-1. Open Server Management.
+1. Open Settings.
 2. Press Install, Update, Reinstall, or Refresh for supported tools.
 
 Internal operations:
@@ -1147,7 +1150,7 @@ Files modified:
 - Runtime operation files under `console/runtime/server-tool-operations`.
 - System package/tool locations depending on action.
 
-Remote operations:
+External operations:
 
 - Network package downloads may occur for installs or updates.
 

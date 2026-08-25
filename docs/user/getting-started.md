@@ -26,6 +26,8 @@ The normal v1 workflow is:
 - GitHub CLI installed on the Dev Console host.
 - Codex CLI installed and authenticated before running Codex tasks.
 
+Managed Servers do not need Git for Dev Console operation. Dev Console keeps Project repositories on the Dev Console host and sends deployment files to Managed Servers over SSH/rsync.
+
 Root SSH is not required. Dev Console v1 expects the configured SSH user to have passwordless sudo after running the generated server setup command.
 
 ## Practical First Run

@@ -13,12 +13,12 @@ Preview is the remote environment used to review the current Project version bef
 
 ## Deploy Preview
 
-Deploy Preview uses the GitHub version of the configured branch.
+Deploy Preview uses the Project Git state prepared on the Dev Console host. Dev Console v1 stores branch metadata, defaults it to `main`, and currently exposes no branch selector in the UI.
 
 The current implementation:
 
-1. fetches the configured branch
-2. resolves `origin/<branch>`
+1. fetches origin for the stored Project branch
+2. resolves the remote branch commit
 3. creates a Git archive for that commit
 4. extracts it to a temporary source directory
 5. detects Composer dependencies when `composer.json` exists
@@ -29,6 +29,8 @@ The current implementation:
 10. verifies `vendor/autoload.php` for Composer projects
 11. verifies the remote Preview directory exists, is readable, and contains files
 12. saves Preview deployment metadata
+
+No Git commands run on the Managed Server during Preview deployment.
 
 Dev Console excludes only:
 

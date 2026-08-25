@@ -7,7 +7,7 @@ Tasks live inside the current Project repository under `TASKS/`.
 - `TASKS/TODO`: tasks waiting to run.
 - `TASKS/IN PROGRESS`: tasks currently being worked on or retryable after failure.
 - `TASKS/DONE`: completed tasks.
-- `TASKS/DROPPED`: explicitly abandoned failed tasks.
+- `TASKS/DROPPED`: explicitly abandoned TODO tasks or failed IN PROGRESS tasks.
 - `TASKS/attachments`: task-scoped attachments. Older `TASKS/ATTACHMENTS` directories remain readable.
 
 Each task contains generated YAML Front Matter with task metadata. Users edit the task body, not the metadata.

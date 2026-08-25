@@ -1,15 +1,15 @@
 # Projects
 
-A Project connects a name, domains, generated directories, Git repository, and Managed Server assignment.
+A Project connects a name, domains, generated directories, a Dev Console host Git repository path, and Managed Server assignment.
 
 ## Create Project
 
-Create Project records project configuration only. It does not clone code, create Apache configuration, or deploy files.
+Create Project records project configuration only. It does not initialize Git, create a GitHub repository, clone code, create Apache configuration, or deploy files.
 
 Dev Console generates:
 
 - Project ID
-- local repository path
+- local repository path on the Dev Console host
 - Production directory
 - Preview directory
 - Preview domain from the Production domain

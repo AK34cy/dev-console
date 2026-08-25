@@ -51,8 +51,8 @@ Fields:
 - `id`: generated project slug.
 - `name`: display name.
 - `managed_server_id`: ID of the assigned managed server.
-- `repository_path`: local Git working copy path. New projects use `/var/www/git/<project-id>`.
-- `branch`: configured branch, currently defaulting to `main`.
+- `repository_path`: local Git working copy path on the Dev Console host. New projects use `/var/www/git/<project-id>`.
+- `branch`: stored Project branch metadata. It currently defaults to `main`; branch selection is not exposed in the UI, and several v1 operational workflows are `main`-specific.
 - `production.domain`: Production domain.
 - `production.path`: generated Production directory.
 - `preview.domain`: generated Preview domain.
@@ -110,7 +110,7 @@ Fields:
 - `last_fetch_at`: last successful fetch timestamp.
 - `last_pull_at`: last successful pull timestamp.
 
-Repository readiness is not supposed to depend only on these historical fields. Current Git facts such as `.git`, origin, branch, HEAD, and `origin/<branch>` are used by the readiness helper.
+Repository readiness is not supposed to depend only on these historical fields. Current Git facts such as `.git`, origin, expected branch, HEAD, and the matching origin branch are used by the readiness helper.
 
 ## Preview Deployment Metadata
 
@@ -253,7 +253,7 @@ Top-level structure:
   {
     "id": "server-id",
     "name": "Server Name",
-    "host": "203.0.113.10",
+    "host": "10.0.0.1",
     "port": 22,
     "user": "deploy",
     "auth_method": "ssh_key",
@@ -269,6 +269,27 @@ Top-level structure:
     "remote_working_directory": "",
     "remote_user": "",
     "passwordless_sudo": "unknown",
+    "php_installed": false,
+    "php_version": "",
+    "php_path": "",
+    "node_installed": false,
+    "node_version": "",
+    "node_path": "",
+    "npm_installed": false,
+    "npm_version": "",
+    "npm_path": "",
+    "composer_installed": false,
+    "composer_version": "",
+    "composer_path": "",
+    "apache": {
+      "installed": false,
+      "running": null,
+      "enabled": null,
+      "version": "",
+      "binary_path": "",
+      "diagnostic_error": ""
+    },
+    "apache_sites": [],
     "last_error": ""
   }
 ]
@@ -294,6 +315,25 @@ Fields:
 - `remote_working_directory`: remote `pwd`.
 - `remote_user`: remote `whoami`.
 - `passwordless_sudo`: `unknown`, `ready`, `setup_required`, or `root`.
+- `php_installed`: whether remote PHP is detected.
+- `php_version`: remote PHP version when detected.
+- `php_path`: remote PHP executable path when detected.
+- `node_installed`: whether remote Node.js is detected.
+- `node_version`: remote Node.js version when detected.
+- `node_path`: remote Node.js executable path when detected.
+- `npm_installed`: whether remote npm is detected.
+- `npm_version`: remote npm version when detected.
+- `npm_path`: remote npm executable path when detected.
+- `composer_installed`: whether remote Composer is detected.
+- `composer_version`: remote Composer version when detected.
+- `composer_path`: remote Composer executable path when detected.
+- `apache.installed`: whether Apache is detected on the managed server.
+- `apache.running`: whether Apache is running, or `null` when unknown.
+- `apache.enabled`: whether Apache is enabled at boot, or `null` when unknown.
+- `apache.version`: Apache version string when detected.
+- `apache.binary_path`: Apache executable path when detected.
+- `apache.diagnostic_error`: Apache-specific diagnostic error when detection fails.
+- `apache_sites`: remote Apache virtual host inventory collected from the managed server.
 - `last_error`: last human-readable diagnostic error.
 
 ## Server Tool Operation State
@@ -348,11 +388,21 @@ The operation result includes promoted commit, source Preview metadata, deployed
 
 ## Task Files
 
-Project tasks are Markdown files with YAML metadata:
+Project tasks are Markdown files with YAML Front Matter. The parser preserves room for additional fields.
 
 ```yaml
 ---
+task_id: TASK-001
 project_id: <project-id>
+title: Example task
+status: TODO
+created_at: 2026-08-14T00:00:00+00:00
+updated_at: 2026-08-14T00:00:00+00:00
+attachments:
+  - name: logo.png
+    path: attachments/TASK-001/logo.png
+    mime: image/png
+    size: 11264
 ---
 
 # TASK-001
@@ -372,8 +422,10 @@ Task file location defines task state:
 Attachments are stored under:
 
 ```text
-TASKS/ATTACHMENTS/<task-id>/
+TASKS/attachments/<task-id>/
 ```
+
+Older `TASKS/ATTACHMENTS/<task-id>/` directories remain readable for compatibility.
 
 `TASKS/README.md` is generated for project repositories and is not overwritten if it already exists.
 
@@ -394,3 +446,5 @@ Discovery reads:
 - `/etc/apache2/sites-enabled`
 
 It does not execute shell commands and returns an empty list if directories are unavailable.
+
+Managed Server Apache inventory uses a similar read-only model but is collected remotely over SSH and persisted on the server record as `apache_sites`. Remote site entries may also include Dev Console ownership marker data, project ID, environment, and parse status when detectable. Managed ownership is conservative; unrelated Apache configuration is not treated as Dev Console-managed.

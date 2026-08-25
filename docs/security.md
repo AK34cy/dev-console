@@ -67,6 +67,8 @@ GitHub configuration is stored in:
 config/github.json
 ```
 
+Dev Console has one global GitHub configuration. Project repositories use that global account and authentication; there are no per-Project GitHub credentials in the current implementation.
+
 The Personal Access Token is passed to GitHub CLI commands using:
 
 ```text
@@ -83,7 +85,7 @@ GitHub CLI is used for:
 - private repository creation
 - optional exact repository deletion
 
-Normal Git repository remotes use the account-level SSH alias. Dev Console also contains an askpass helper path for authenticated Git commands using token environment variables. Current implementation does not clearly define which credential path Git ultimately uses when the configured remote is SSH.
+Normal Project Git repository remotes currently use the configured account-level SSH alias. Dev Console also contains an askpass helper path for authenticated Git commands using token environment variables, but this does not create per-Project credentials.
 
 ## SSH Authentication
 

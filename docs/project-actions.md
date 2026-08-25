@@ -88,7 +88,7 @@ When to use: after project registration and before task work.
 
 Safe to repeat: No for a completed initialization; repeated use becomes verification/retry behavior only when current state permits it.
 
-Changes local filesystem: Yes, creates `/var/www/git/<project-id>` and initial files.
+Changes local filesystem: Yes, creates `/var/www/git/<project-id>` on the Dev Console host and initial files.
 
 Changes remote server: No.
 
@@ -206,7 +206,7 @@ Requires sudo: No.
 
 Operation log: Yes.
 
-Success conditions: working tree is clean and `git pull --ff-only origin <branch>` succeeds.
+Success conditions: working tree is clean and the fast-forward pull from origin succeeds. Current v1 behavior stores `branch` metadata but has no UI branch selector and remains `main`-oriented in several workflows.
 
 Failure conditions: dirty working tree, branch mismatch, non-fast-forward state, authentication failure, or pull failure.
 
@@ -314,11 +314,9 @@ Success conditions: current environment directories and Apache vhosts match Proj
 
 Failure conditions: unreachable server, missing passwordless sudo, missing Apache tools, conflicting Apache config, configtest failure, or filesystem permission failure.
 
-Failure conditions: unsafe placeholder, Apache configtest failure, HTTP mismatch, or config write failure.
-
 ## Deploy Preview
 
-Purpose: deploy the configured GitHub branch to the managed server Preview directory.
+Purpose: deploy the selected Project Git state from the Dev Console host to the managed server Preview directory.
 
 When to use: after project setup and successful repository synchronization.
 
@@ -328,7 +326,7 @@ Changes local filesystem: Yes, runtime logs/state and temporary archive/source f
 
 Changes remote server: Yes, replaces Preview directory contents. For Composer projects it also creates/updates `vendor/` in Preview by running Composer remotely.
 
-Changes Git: Local fetch/read-only archive operations.
+Changes Git: Local fetch/read-only archive operations on the Dev Console host.
 
 Changes GitHub: No.
 

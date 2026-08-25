@@ -14,10 +14,14 @@ For lower-level service details, see [docs/DEV_CONSOLE.md](docs/DEV_CONSOLE.md).
 ## Features
 
 - Token-protected web console for internal use.
+- Managed Server registration, SSH onboarding, and connection testing.
 - Task creation with optional attachments.
 - Codex run queueing and activity display.
+- Project repository initialization with GitHub.
 - Preview and production deployment controls.
-- Environment and deployment status dashboard.
+- Remote Server Management diagnostics for runtime tools, Apache, and assigned projects.
+- Project, workflow, and deployment status dashboard.
+- Built-in Documentation section.
 - Unauthenticated JSON health endpoint at `/health`.
 - Portable bootstrap script for systemd installation.
 
@@ -130,12 +134,11 @@ If Git metadata is unavailable, `git_commit` is returned as `null`.
 
 ## Server Management
 
-Server Management uses a fixed allowlist for tool diagnostics: Codex CLI,
-Node.js, npm, Composer, Git, and PHP. Results reflect whether each tool is
-available to the Dev Console service user. Git and PHP remain read-only
-diagnostics. Node.js, Composer, and Codex CLI can be installed or updated from
-the Server Management tab through predefined POST actions with CSRF protection;
-npm is installed together with Node.js.
+Settings shows Dev Console host prerequisites such as Git, PHP, Codex CLI, and
+GitHub configuration. Server Management is scoped to one selected Managed
+Server and shows remote PHP, Composer, Node.js, npm, Apache status, Apache site
+inventory, and projects assigned to that server. Composer can be installed from
+Server Management through a predefined POST action with CSRF protection.
 
 ## Updating
 

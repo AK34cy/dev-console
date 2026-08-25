@@ -1339,15 +1339,7 @@ $productionDeploymentOverview = deploymentOverview('production');
 $projectConfiguration = devConsoleLoadProjectConfiguration();
 $projects = devConsoleProjects($projectConfiguration);
 $apacheSites = devConsoleApacheSites();
-$registeredProjectIds = array_flip(array_map(static fn(array $project): string => (string)($project['id'] ?? ''), $projects));
 $orphanedApacheInfrastructure = projectOrphanedApacheInfrastructure($projectConfiguration, $apacheSites);
-$managedApacheSites = array_values(array_filter($apacheSites, static function (array $site) use ($registeredProjectIds): bool {
-    $name = (string)($site['name'] ?? '');
-    return preg_match('/^dev-console-([a-z0-9]+(?:-[a-z0-9]+)*)-(production|preview)\.conf$/', $name, $matches) === 1
-        && isset($registeredProjectIds[$matches[1]]);
-}));
-$otherApacheSites = array_values(array_filter($apacheSites, fn(array $site): bool => !str_starts_with((string)($site['name'] ?? ''), 'dev-console-')));
-$apacheState = apacheState();
 $projectFlash = (string)($_SESSION['project_flash'] ?? '');
 unset($_SESSION['project_flash']);
 $projectActionResult = is_array($_SESSION['project_action_result'] ?? null) ? $_SESSION['project_action_result'] : $projectActionResult;
@@ -1552,9 +1544,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .page-context { color: var(--muted); min-width: 220px; text-align: right; }
     .page-context strong { color: var(--ink); display: block; font-size: 16px; }
     .page-context span { font-size: 13px; }
-    .tab-nav { display: flex; gap: 8px; margin-top: 18px; }
-    .tab-button { background: #e8f4f8; color: var(--blue); margin: 0; padding: 9px 14px; }
-    .tab-button.active { background: var(--blue); color: #fff; }
+    .tab-nav { align-items: flex-end; border-bottom: 1px solid #9fbfcb; display: flex; flex-wrap: wrap; gap: 2px; margin-top: 18px; max-width: 100%; padding: 0 2px; }
+    .tab-button { background: #edf4f7; border: 1px solid #9fbfcb; border-radius: 5px 5px 0 0; color: var(--blue); flex: 0 0 auto; font-size: 14px; margin: 0 0 -1px; padding: 8px 14px 10px; white-space: nowrap; }
+    .tab-button:hover { background: #f5fbfd; }
+    .tab-button.active { background: #fff; border-color: #5f8ea3; color: var(--ink); font-weight: 800; }
     .deployment-panel.production { border: 2px solid #8a1f1f; }
     .deployment-details { display: grid; gap: 10px 24px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 16px 0; }
     .deployment-details dt { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
@@ -1612,6 +1605,35 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
     .compact-table th { color: var(--muted); width: 45%; }
 	    .settings-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr); }
+    #dev-console-tools { grid-column: 1 / -1; }
+    #github { grid-column: 1 / -1; }
+    .runtime-settings-form { margin-top: 8px; }
+    .runtime-settings-form .field-help { margin-bottom: 0; }
+    .runtime-note { margin: 7px 0 0; }
+    .runtime-limit-row { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .runtime-limit-row label { margin-top: 0; }
+    .apache-summary-grid.host-summary-grid { grid-template-columns: 1fr; }
+    .apache-summary-grid.host-summary-grid div { grid-template-columns: minmax(70px, 78px) minmax(0, 1fr); }
+    .apache-summary-grid.host-summary-grid dt { font-size: 12px; }
+    .apache-summary-grid.host-summary-grid dd { font-size: 14px; }
+    .host-tools-table { table-layout: fixed; }
+    .host-tools-table th:nth-child(1), .host-tools-table td:nth-child(1) { width: 14%; }
+    .host-tools-table th:nth-child(2), .host-tools-table td:nth-child(2) { width: 10%; }
+    .host-tools-table th:nth-child(3), .host-tools-table td:nth-child(3) { width: 12%; }
+    .host-tools-table th:nth-child(4), .host-tools-table td:nth-child(4) { width: 12%; }
+    .host-tools-table th:nth-child(5), .host-tools-table td:nth-child(5) { width: 14%; }
+    .host-tools-table th:nth-child(6), .host-tools-table td:nth-child(6) { width: 30%; }
+    .host-tools-table th:nth-child(7), .host-tools-table td:nth-child(7) { width: 8%; }
+    .host-tools-table td:last-child .project-actions { gap: 5px; }
+    .host-tools-table td:last-child button { padding: 7px 9px; }
+    .server-management-selector { align-items: end; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 8px 0 14px; padding-bottom: 10px; }
+    .server-management-selector form { align-items: end; display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+    .server-management-selector label { margin: 0; }
+    .server-management-selector select { min-width: 240px; }
+    .server-management-selector .field-help { margin: 0; }
+    .github-config-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .github-config-grid label { margin-top: 0; }
+    .github-submit { width: 100%; }
 	    .projects-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 2fr) minmax(320px, .95fr); }
 	    .project-sidebar { display: grid; gap: 14px; min-width: 0; }
 	    .server-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 2fr) minmax(300px, .95fr); }
@@ -1635,8 +1657,6 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 	    .copy-row pre { margin: 0; }
 	    .copy-row button { margin-top: 0; white-space: nowrap; }
 	    .server-sidebar .field-help { line-height: 1.45; }
-    .settings-service-row { align-items: start; display: grid; gap: 14px; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .settings-service-row > .panel { margin-top: 0; }
     .settings-table { border-collapse: collapse; font-size: 12px; width: 100%; }
     .settings-table th, .settings-table td { border-top: 1px solid var(--line); padding: 7px 6px; text-align: left; vertical-align: top; }
     .settings-table th { color: var(--muted); font-size: 11px; text-transform: uppercase; }
@@ -1644,6 +1664,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .table-scroll { overflow-x: auto; width: 100%; }
     .table-scroll .settings-table { min-width: 680px; }
     .table-scroll .settings-table.compact-sites { min-width: 560px; }
+    .table-scroll .host-tools-table { min-width: 920px; }
     .documentation-layout { align-items: start; display: grid; gap: 18px; grid-template-columns: 260px minmax(0, 1fr); }
     .documentation-nav { position: sticky; top: 14px; }
     .documentation-nav h3 { color: var(--blue); font-size: 13px; margin: 14px 0 8px; }
@@ -1704,7 +1725,6 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .apache-summary { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr) auto; }
     .apache-summary-grid { display: grid; gap: 6px 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; }
     .apache-summary .form-actions { align-self: start; margin: 0; }
-    .settings-service-row .apache-summary, .settings-service-row .apache-summary-grid { grid-template-columns: 1fr; }
     .apache-sites { display: grid; gap: 12px; margin-top: 16px; }
     .local-hosts { background: #edf7fb; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; padding: 8px; }
     .hosts-copy-row { align-items: stretch; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; margin-top: 8px; }
@@ -1718,13 +1738,13 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       .dashboard-columns { display: block; }
       .workflow-stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .workflow-stage:nth-child(2)::after { content: ""; }
-	      .settings-layout, .settings-service-row, .server-layout, .projects-layout, .documentation-layout { grid-template-columns: 1fr; }
+	      .settings-layout, .server-layout, .projects-layout, .documentation-layout { grid-template-columns: 1fr; }
 	      .documentation-nav { position: static; }
 	      .project-item[data-project-card] > .project-summary { grid-template-columns: minmax(0, 1fr); }
 	      .project-detail-grid { grid-template-columns: 1fr; }
 	      .server-compact-summary { grid-template-columns: minmax(0, 1fr); }
 	      .server-detail-grid { grid-template-columns: 1fr; }
-      .apache-summary { grid-template-columns: 1fr; }
+      .apache-summary, .runtime-limit-row, .github-config-grid { grid-template-columns: 1fr; }
       .page-header { display: block; }
       .page-context { margin-top: 12px; text-align: left; }
       main { margin-top: 18px; }
@@ -1741,13 +1761,13 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     <div>
       <h1>IOVON Dev Console</h1>
       <p class="meta">Internal task creator. Run only on <code>127.0.0.1:8090</code>.</p>
-      <nav class="tab-nav" aria-label="Primary">
-        <button type="button" class="tab-button <?= $initialTab === 'dashboard' ? 'active' : '' ?>" data-tab-target="dashboard">Dashboard</button>
-        <button type="button" class="tab-button <?= $initialTab === 'projects' ? 'active' : '' ?>" data-tab-target="projects">Projects</button>
-        <button type="button" class="tab-button <?= $initialTab === 'servers' ? 'active' : '' ?>" data-tab-target="servers">Servers</button>
-        <button type="button" class="tab-button <?= $initialTab === 'server-management' ? 'active' : '' ?>" data-tab-target="server-management">Server Management</button>
-        <button type="button" class="tab-button <?= $initialTab === 'documentation' ? 'active' : '' ?>" data-tab-target="documentation">Documentation</button>
-        <button type="button" class="tab-button <?= $initialTab === 'settings' ? 'active' : '' ?>" data-tab-target="settings">Settings</button>
+      <nav class="tab-nav" role="tablist" aria-label="Primary">
+        <button type="button" role="tab" aria-selected="<?= $initialTab === 'dashboard' ? 'true' : 'false' ?>" class="tab-button <?= $initialTab === 'dashboard' ? 'active' : '' ?>" data-tab-target="dashboard">Dashboard</button>
+        <button type="button" role="tab" aria-selected="<?= $initialTab === 'projects' ? 'true' : 'false' ?>" class="tab-button <?= $initialTab === 'projects' ? 'active' : '' ?>" data-tab-target="projects">Projects</button>
+        <button type="button" role="tab" aria-selected="<?= $initialTab === 'servers' ? 'true' : 'false' ?>" class="tab-button <?= $initialTab === 'servers' ? 'active' : '' ?>" data-tab-target="servers">Servers</button>
+        <button type="button" role="tab" aria-selected="<?= $initialTab === 'server-management' ? 'true' : 'false' ?>" class="tab-button <?= $initialTab === 'server-management' ? 'active' : '' ?>" data-tab-target="server-management">Server Management</button>
+        <button type="button" role="tab" aria-selected="<?= $initialTab === 'documentation' ? 'true' : 'false' ?>" class="tab-button <?= $initialTab === 'documentation' ? 'active' : '' ?>" data-tab-target="documentation">Documentation</button>
+        <button type="button" role="tab" aria-selected="<?= $initialTab === 'settings' ? 'true' : 'false' ?>" class="tab-button <?= $initialTab === 'settings' ? 'active' : '' ?>" data-tab-target="settings">Settings</button>
       </nav>
     </div>
     <div class="page-context" aria-live="polite">
@@ -2868,11 +2888,11 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 	            <label for="server_name">Display name</label>
 	            <input id="server_name" name="server_name" type="text" required maxlength="120" placeholder="My Server" value="<?= h((string)$managedServerFormValues['name']) ?>">
 	            <label for="server_host">Hostname / IP</label>
-	            <input id="server_host" name="server_host" type="text" required maxlength="253" placeholder="203.0.113.10" value="<?= h((string)$managedServerFormValues['host']) ?>">
+	            <input id="server_host" name="server_host" type="text" required maxlength="253" placeholder="10.0.0.1" value="<?= h((string)$managedServerFormValues['host']) ?>">
             <label for="server_port">SSH port</label>
             <input id="server_port" name="server_port" type="text" required inputmode="numeric" value="<?= h((string)($managedServerFormValues['port'] ?: 22)) ?>">
             <label for="server_user">SSH username</label>
-	            <input id="server_user" name="server_user" type="text" required maxlength="64" placeholder="cla" value="<?= h((string)$managedServerFormValues['user']) ?>">
+	            <input id="server_user" name="server_user" type="text" required maxlength="64" placeholder="deploy" value="<?= h((string)$managedServerFormValues['user']) ?>">
 	            <label>SSH Key</label>
 	            <p><strong>Dev Console Server Key</strong></p>
 	          </fieldset>
@@ -2970,33 +2990,35 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <div><dt>Runtime unit</dt><dd><?= $runtimeServiceUsesWrapper ? 'Managed wrapper installed' : 'Unit update required' ?></dd></div>
           <div><dt>Restart</dt><dd><?= ($runtimeRestartRequired || !$runtimeServiceUsesWrapper) ? 'Required' : 'Not required' ?></dd></div>
         </dl>
-        <?php if ($runtimeRestartRequired || !$runtimeServiceUsesWrapper): ?>
-          <p class="field-help">Configured values are saved, but the current PHP runtime still uses the effective values above. <?= h($runtimeApplyInstruction) ?></p>
-        <?php else: ?>
-          <p class="field-help">These limits apply only to the Dev Console PHP runtime on this host.</p>
-        <?php endif; ?>
-        <form method="post" class="project-form subsection" action="/?tab=settings#runtime" data-preserve-settings-scroll="1">
+        <form method="post" class="project-form runtime-settings-form" action="/?tab=settings#runtime" data-preserve-settings-scroll="1">
           <input type="hidden" name="action" value="save_runtime_settings">
           <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-          <fieldset>
-            <legend>Attachment limits</legend>
-            <label for="attachment_limit_mb">Maximum attachment size</label>
-            <input id="attachment_limit_mb" name="attachment_limit_mb" type="number" min="1" max="100" step="1" required value="<?= h((string)$runtimeSettings['attachment_limit_mb']) ?>">
-            <p class="field-help">MB, allowed range 1-100.</p>
-            <label for="request_limit_mb">Maximum request size</label>
-            <input id="request_limit_mb" name="request_limit_mb" type="number" min="1" max="200" step="1" required value="<?= h((string)$runtimeSettings['request_limit_mb']) ?>">
-            <p class="field-help">MB, allowed range 1-200. Must be greater than or equal to the attachment limit.</p>
-          </fieldset>
+          <div class="runtime-limit-row">
+            <div>
+              <label for="attachment_limit_mb">Maximum attachment size</label>
+              <input id="attachment_limit_mb" name="attachment_limit_mb" type="number" min="1" max="100" step="1" required value="<?= h((string)$runtimeSettings['attachment_limit_mb']) ?>">
+              <p class="field-help">MB, allowed range 1-100.</p>
+            </div>
+            <div>
+              <label for="request_limit_mb">Maximum request size</label>
+              <input id="request_limit_mb" name="request_limit_mb" type="number" min="1" max="200" step="1" required value="<?= h((string)$runtimeSettings['request_limit_mb']) ?>">
+              <p class="field-help">MB, allowed range 1-200. Must be greater than or equal to the attachment limit.</p>
+            </div>
+          </div>
           <button type="submit">Apply Settings</button>
         </form>
-        <p class="field-help">Applying settings saves Dev Console runtime configuration. Effective values change only after the service uses the managed wrapper and the PHP process restarts. Current service permissions do not provide a safe in-app restart.</p>
+        <?php if ($runtimeRestartRequired || !$runtimeServiceUsesWrapper): ?>
+          <p class="field-help runtime-note">Saved values apply after the Dev Console PHP runtime restarts. <?= h($runtimeApplyInstruction) ?></p>
+        <?php else: ?>
+          <p class="field-help runtime-note">These limits apply only to the Dev Console PHP runtime on this host.</p>
+        <?php endif; ?>
       </section>
       <section class="panel" id="dev-console-host">
         <div class="dashboard-header">
           <h2>Dev Console Host</h2>
           <span class="meta">The host where this console runs</span>
         </div>
-        <dl class="apache-summary-grid">
+        <dl class="apache-summary-grid host-summary-grid">
           <div><dt>Service</dt><dd><?= h(configuredDisplayValue($serverContext['service_name'] ?? '')) ?></dd></div>
           <div><dt>User</dt><dd><?= h(configuredDisplayValue($serverContext['user'] ?? '')) ?></dd></div>
           <div><dt>Group</dt><dd><?= h(configuredDisplayValue($serverContext['group'] ?? '')) ?></dd></div>
@@ -3036,11 +3058,11 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           </div>
           <pre id="serverToolLiveLog" class="tool-operation-log">Waiting for operation log...</pre>
         </section>
-        <?php foreach (['required' => ['Dev Console prerequisites', true], 'optional' => ['Available development tools', false]] as $toolGroup => [$toolGroupLabel, $toolGroupOpen]): ?>
-          <details class="compact-details"<?= $toolGroupOpen ? ' open' : '' ?>>
+        <?php foreach (['required' => ['Dev Console prerequisites', true]] as $toolGroup => [$toolGroupLabel, $toolGroupOpen]): ?>
+          <details class="compact-details" open>
             <summary><?= h($toolGroupLabel) ?></summary>
             <div class="table-scroll">
-              <table class="settings-table compact-sites">
+              <table class="settings-table compact-sites host-tools-table">
                 <thead>
                   <tr>
                     <th>Tool</th>
@@ -3087,9 +3109,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                             </form>
                           <?php endforeach; ?>
                         </div>
-                        <?php if ((string)$toolId === 'npm'): ?>
-                          <p class="field-help">npm is installed and updated with Node.js.</p>
-                        <?php elseif (in_array((string)$toolId, ['git', 'php'], true)): ?>
+                        <?php if (in_array((string)$toolId, ['git', 'php'], true)): ?>
                           <p class="field-help">Diagnostics only.</p>
                         <?php endif; ?>
                       </td>
@@ -3101,7 +3121,6 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           </details>
         <?php endforeach; ?>
       </section>
-      <div class="settings-service-row">
       <section class="panel" id="github">
         <h2>GitHub</h2>
         <?php if ($githubActionResult !== null): ?>
@@ -3161,17 +3180,23 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
           <fieldset>
             <legend><?= $githubConfigured ? 'Update configuration' : 'Configure GitHub' ?></legend>
-            <label for="github_account">Account or organization</label>
-            <input id="github_account" name="github_account" type="text" required maxlength="39" placeholder="account-or-organization" value="<?= h($githubConfigured ? (string)$githubConfiguration['account'] : '') ?>">
-            <p class="field-help">GitHub owner where Dev Console will create repositories.</p>
+            <div class="github-config-grid">
+              <div>
+                <label for="github_account">Account or organization</label>
+                <input id="github_account" name="github_account" type="text" required maxlength="39" placeholder="account-or-organization" value="<?= h($githubConfigured ? (string)$githubConfiguration['account'] : '') ?>">
+                <p class="field-help">GitHub owner where Dev Console will create repositories.</p>
+              </div>
 
-            <label for="github_token">Personal Access Token</label>
-            <input id="github_token" name="github_token" type="password" maxlength="4096" placeholder="github_pat_..." autocomplete="new-password" spellcheck="false" autocorrect="off" autocapitalize="off"<?= $githubConfigured ? '' : ' required' ?>>
-            <p class="field-help">Stored only in the server's local configuration. Leave empty to keep the current token.</p>
-            <p class="field-help">Recommended token: Classic Personal Access Token with repo scope.</p>
-            <p class="field-help"><a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer">Create GitHub Personal Access Token</a></p>
+              <div>
+                <label for="github_token">Personal Access Token</label>
+                <input id="github_token" name="github_token" type="password" maxlength="4096" placeholder="github_pat_..." autocomplete="new-password" spellcheck="false" autocorrect="off" autocapitalize="off"<?= $githubConfigured ? '' : ' required' ?>>
+                <p class="field-help">Stored only in the server's local configuration. Leave empty to keep the current token.</p>
+                <p class="field-help">Recommended token: Classic Personal Access Token with repo scope.</p>
+                <p class="field-help"><a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer">Create GitHub Personal Access Token</a></p>
+              </div>
+            </div>
           </fieldset>
-          <button type="submit"><?= $githubConfigured ? 'Update configuration' : 'Save and test' ?></button>
+          <button type="submit" class="github-submit"><?= $githubConfigured ? 'Update configuration' : 'Save and test' ?></button>
         </form>
 
         <?php if ($githubConfigured): ?>
@@ -3189,193 +3214,23 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           </div>
         <?php endif; ?>
       </section>
-
-      <section class="panel" id="apache">
-        <h2>Dev Console host Apache</h2>
-        <?php if ($projectActionResult !== null && (string)($projectActionResult['action'] ?? '') === 'cleanup_orphaned_project'): ?>
-          <?php
-            $projectAction = (string)($projectActionResult['action'] ?? '');
-            $projectActionTitle = !empty($projectActionResult['success']) ? 'Orphaned infrastructure cleaned up' : 'Orphaned cleanup failed';
-            $operationSteps = operationSummarySteps($projectAction, $projectActionResult);
-            $operationLogId = 'orphanCleanupOperationLog';
-            $operationLog = (string)($projectActionResult['output'] ?? '');
-            $hasOperationLog = trim($operationLog) !== '';
-          ?>
-          <section class="result-block <?= !empty($projectActionResult['success']) ? '' : 'error' ?>">
-            <h2><?= h($projectActionTitle) ?></h2>
-            <p><?= h((string)$projectActionResult['message']) ?></p>
-            <?php if (!empty($operationSteps)): ?>
-              <ul class="operation-summary">
-                <?php foreach ($operationSteps as $step): ?>
-                  <li>Done: <?= h($step) ?></li>
-                <?php endforeach; ?>
-              </ul>
-            <?php endif; ?>
-            <?php if ($hasOperationLog): ?>
-              <details<?= !empty($projectActionResult['success']) ? '' : ' open' ?>>
-                <summary>Show operation log</summary>
-                <div class="result-actions">
-                  <button type="button" class="secondary" data-copy-log="<?= h($operationLogId) ?>">Copy Log</button>
-                  <button type="button" class="secondary" data-download-log="<?= h($operationLogId) ?>" data-download-name="orphan-cleanup.log">Download Log</button>
-                  <span class="hint" data-log-message="<?= h($operationLogId) ?>" aria-live="polite"></span>
-                </div>
-                <pre id="<?= h($operationLogId) ?>"><?= h($operationLog) ?></pre>
-              </details>
-            <?php endif; ?>
-          </section>
-        <?php endif; ?>
-        <div class="apache-summary">
-          <dl class="apache-summary-grid">
-            <div><dt>Status</dt><dd><?= h(apacheStatusLabel($apacheState)) ?></dd></div>
-            <div><dt>Version</dt><dd><?= h(configuredDisplayValue($apacheState['version'] ?? '')) ?></dd></div>
-            <div><dt>Service enabled</dt><dd><?= h(apacheEnabledLabel($apacheState)) ?></dd></div>
-            <div><dt>Binary path</dt><dd><?= h(configuredDisplayValue($apacheState['binary_path'] ?? '')) ?></dd></div>
-          </dl>
-          <form method="post" class="form-actions" action="/?tab=settings#apache" data-preserve-settings-scroll="1">
-            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-            <?php if (empty($apacheState['installed'])): ?>
-              <input type="hidden" name="action" value="install_apache">
-              <button type="submit">Install Apache</button>
-            <?php elseif (empty($apacheState['running'])): ?>
-              <input type="hidden" name="action" value="start_apache">
-              <button type="submit">Start Apache</button>
-            <?php else: ?>
-              <input type="hidden" name="action" value="restart_apache">
-              <button type="submit">Restart Apache</button>
-            <?php endif; ?>
-          </form>
-        </div>
-        <?php if ($apacheActionResult !== null): ?>
-          <section class="result-block <?= !empty($apacheActionResult['success']) ? '' : 'error' ?>">
-            <h2><?= !empty($apacheActionResult['success']) ? 'Apache action completed' : 'Apache action failed' ?></h2>
-            <p><?= h((string)$apacheActionResult['message']) ?></p>
-            <details<?= !empty($apacheActionResult['success']) ? '' : ' open' ?>>
-              <summary>Show command output</summary>
-              <pre><?= h((string)($apacheActionResult['output'] ?? '')) ?></pre>
-            </details>
-          </section>
-        <?php endif; ?>
-
-        <details class="apache-sites compact-details" open>
-        <summary>Managed Sites (<?= h((string)count($managedApacheSites)) ?>)</summary>
-        <?php if (empty($apacheSites)): ?>
-          <p class="meta">No Apache site configurations detected.</p>
-        <?php elseif (empty($managedApacheSites)): ?>
-          <p class="meta">No managed Apache sites found.</p>
-        <?php else: ?>
-          <div class="table-scroll">
-          <table class="settings-table compact-sites">
-            <thead>
-              <tr>
-                <th>Site</th>
-                <th>Status</th>
-                <th>ServerName</th>
-                <th>DocumentRoot</th>
-              </tr>
-            </thead>
-            <tbody>
-              <?php foreach ($managedApacheSites as $site): ?>
-                <tr>
-                  <td>
-                    <strong><?= h(configuredDisplayValue($site['name'] ?? '')) ?></strong><br>
-                    <span class="meta site-path"><?= h(configuredDisplayValue($site['path'] ?? '')) ?></span>
-                  </td>
-                  <td><span class="status-pill <?= !empty($site['enabled']) ? 'healthy' : 'warning' ?>"><?= !empty($site['enabled']) ? 'Enabled' : 'Disabled' ?></span></td>
-                  <td><?= h(configuredDisplayValue($site['server_name'] ?? '')) ?></td>
-                  <td class="path-value"><?= h(configuredDisplayValue($site['document_root'] ?? '')) ?></td>
-                </tr>
-              <?php endforeach; ?>
-            </tbody>
-          </table>
-          </div>
-        <?php endif; ?>
-        </details>
-        <details class="apache-sites compact-details"<?= !empty($orphanedApacheInfrastructure) ? ' open' : '' ?>>
-          <summary>Orphaned Dev Console Infrastructure (<?= h((string)count($orphanedApacheInfrastructure)) ?>)</summary>
-          <?php if (empty($orphanedApacheInfrastructure)): ?>
-            <p class="meta">No orphaned Dev Console infrastructure detected.</p>
-          <?php else: ?>
-            <p class="field-help">These Dev Console Apache configurations no longer belong to a registered Project. Clean Up preserves local Git repositories and GitHub repositories.</p>
-            <?php foreach ($orphanedApacheInfrastructure as $orphan): ?>
-              <details class="project-item"<?= count($orphanedApacheInfrastructure) === 1 ? ' open' : '' ?>>
-                <summary class="project-summary">
-                  <span>
-                    <strong><?= h((string)$orphan['project_id']) ?></strong>
-                    <span class="meta">Former Project infrastructure</span>
-                  </span>
-                  <span>Production config: <?= empty($orphan['production']) ? 'No' : 'Yes' ?></span>
-                  <span>Preview config: <?= empty($orphan['preview']) ? 'No' : 'Yes' ?></span>
-                  <span>Dirs: <?= is_dir((string)$orphan['production_path']) || is_dir((string)$orphan['preview_path']) ? 'Present' : 'Not present' ?></span>
-                  <span>Git: <?= is_dir((string)$orphan['git_repository_path']) ? 'Present' : 'Not present' ?></span>
-                </summary>
-                <table class="compact-table">
-                  <tbody>
-                    <tr><th>Production config</th><td><?= h(configuredDisplayValue($orphan['production']['name'] ?? '')) ?></td></tr>
-                    <tr><th>Preview config</th><td><?= h(configuredDisplayValue($orphan['preview']['name'] ?? '')) ?></td></tr>
-                    <tr><th>Production directory</th><td><?= is_dir((string)$orphan['production_path']) ? h((string)$orphan['production_path']) : 'Not present' ?></td></tr>
-                    <tr><th>Preview directory</th><td><?= is_dir((string)$orphan['preview_path']) ? h((string)$orphan['preview_path']) : 'Not present' ?></td></tr>
-                    <tr><th>Local Git repository</th><td><?= is_dir((string)$orphan['git_repository_path']) ? h((string)$orphan['git_repository_path']) . ' (preserved)' : 'Not present' ?></td></tr>
-                  </tbody>
-                </table>
-                <p class="action-note">Clean Up removes orphaned Dev Console Apache configuration and matching Production/Preview directories only. Local Git and GitHub repositories are preserved.</p>
-                <form method="post" class="project-actions" action="/?tab=settings#apache" data-preserve-settings-scroll="1" onsubmit="return confirm('Clean up orphaned Dev Console infrastructure for <?= h((string)$orphan['project_id']) ?>? Local Git and GitHub repositories will be preserved.');">
-                  <input type="hidden" name="action" value="cleanup_orphaned_project">
-                  <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                  <input type="hidden" name="project_id" value="<?= h((string)$orphan['project_id']) ?>">
-                  <button type="submit" class="danger">Clean Up</button>
-                </form>
-              </details>
-            <?php endforeach; ?>
-          <?php endif; ?>
-        </details>
-        <?php if (!empty($otherApacheSites)): ?>
-          <details class="apache-sites compact-details">
-            <summary>Other Apache Sites (<?= h((string)count($otherApacheSites)) ?>)</summary>
-            <div class="table-scroll">
-            <table class="settings-table compact-sites">
-              <thead>
-                <tr>
-                  <th>Site</th>
-                  <th>Status</th>
-                  <th>ServerName</th>
-                  <th>DocumentRoot</th>
-                </tr>
-              </thead>
-              <tbody>
-                <?php foreach ($otherApacheSites as $site): ?>
-                  <tr>
-                    <td>
-                      <strong><?= h(configuredDisplayValue($site['name'] ?? '')) ?></strong><br>
-                      <span class="meta site-path"><?= h(configuredDisplayValue($site['path'] ?? '')) ?></span>
-                    </td>
-                    <td><span class="status-pill <?= !empty($site['enabled']) ? 'healthy' : 'warning' ?>"><?= !empty($site['enabled']) ? 'Enabled' : 'Disabled' ?></span></td>
-                    <td><?= h(configuredDisplayValue($site['server_name'] ?? '')) ?></td>
-                    <td class="path-value"><?= h(configuredDisplayValue($site['document_root'] ?? '')) ?></td>
-                  </tr>
-                <?php endforeach; ?>
-              </tbody>
-            </table>
-            </div>
-          </details>
-        <?php endif; ?>
-      </section>
-      </div>
     </div>
   </section>
 
   <section id="serverManagementTab" data-tab-panel="server-management"<?= $initialTab === 'server-management' ? '' : ' hidden' ?>>
-    <section class="panel">
-      <div class="dashboard-header">
-        <h2>Server Management</h2>
-        <span class="meta">Runtime and operational management of a selected Managed Server</span>
-      </div>
-      <?php if (empty($managedServers)): ?>
+    <div class="dashboard-header">
+      <h2>Server Management</h2>
+      <span class="meta">Runtime and operational management of one selected Managed Server</span>
+    </div>
+    <?php if (empty($managedServers)): ?>
+      <section class="panel">
         <p class="meta">No Managed Servers configured.</p>
-        <p class="field-help">Add a server in the Servers section first.</p>
-      <?php else: ?>
-        <form method="get" class="project-selector" action="/">
+      </section>
+    <?php else: ?>
+      <div class="server-management-selector">
+        <form method="get" class="project-selector compact-selector" action="/">
           <input type="hidden" name="tab" value="server-management">
-          <label for="server_management_server_id">Server</label>
+          <label for="server_management_server_id">Managed Server</label>
           <select id="server_management_server_id" name="managed_server_id" onchange="this.form.submit()">
             <?php foreach ($managedServers as $server): ?>
               <?php $optionId = (string)($server['id'] ?? ''); ?>
@@ -3384,116 +3239,307 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           </select>
         </form>
         <?php if ($serverManagementSelectedServer !== null): ?>
-          <?php
-            $selectedServerId = (string)($serverManagementSelectedServer['id'] ?? '');
-            $selectedServerSudoState = (string)($serverManagementSelectedServer['passwordless_sudo'] ?? 'unknown');
-            $selectedServerSudoLabel = match ($selectedServerSudoState) {
-                'ready', 'root' => 'Ready',
-                'setup_required' => 'Not available',
-                default => 'Unknown',
-            };
-            $selectedServerPhpInstalled = !empty($serverManagementSelectedServer['php_installed']);
-            $selectedServerComposerInstalled = !empty($serverManagementSelectedServer['composer_installed']);
-            $selectedServerComposerInstallDisabledReason = (string)($serverManagementSelectedServer['status'] ?? '') !== 'reachable'
-                ? 'Refresh diagnostics successfully before installing Composer.'
-                : (!in_array($selectedServerSudoState, ['ready', 'root'], true)
-                    ? 'Passwordless sudo is required before installing Composer.'
-                    : '');
-          ?>
-          <section class="result-block tool-operation-panel" data-managed-server-operation-panel="server-management" hidden>
-            <h2 data-managed-server-field="title">Managed server operation</h2>
-            <p data-managed-server-field="message">Starting...</p>
-            <dl class="tool-operation-grid">
-              <div><dt>Server</dt><dd data-managed-server-field="server">-</dd></div>
-              <div><dt>Status</dt><dd data-managed-server-field="status">Starting</dd></div>
-              <div><dt>Stage</dt><dd data-managed-server-field="stage">Starting</dd></div>
-              <div><dt>Elapsed</dt><dd data-managed-server-field="elapsed">0s</dd></div>
-            </dl>
-            <dl class="apache-summary-grid" data-managed-server-field="details" hidden>
-              <div><dt>SSH access</dt><dd data-managed-server-field="ssh_access">-</dd></div>
-              <div><dt>Passwordless sudo</dt><dd data-managed-server-field="sudo">-</dd></div>
-              <div><dt>Hostname</dt><dd data-managed-server-field="hostname">-</dd></div>
-              <div><dt>OS</dt><dd data-managed-server-field="os">-</dd></div>
-              <div><dt>Kernel</dt><dd data-managed-server-field="kernel">-</dd></div>
-              <div><dt>Current user</dt><dd data-managed-server-field="user">-</dd></div>
-              <div><dt>Working directory</dt><dd data-managed-server-field="working_directory">-</dd></div>
-              <div><dt>Round-trip time</dt><dd data-managed-server-field="rtt">-</dd></div>
-            </dl>
-            <div class="result-actions">
-              <button type="button" class="secondary" data-copy-log="serverManagementLiveLog">Copy Log</button>
-              <button type="button" class="secondary" data-download-log="serverManagementLiveLog" data-download-name="managed-server-operation.log">Download Log</button>
-              <span class="hint" data-log-message="serverManagementLiveLog" aria-live="polite"></span>
-            </div>
-            <pre id="serverManagementLiveLog" class="tool-operation-log" data-managed-server-field="log">Waiting for operation log...</pre>
-          </section>
-          <section class="project-item">
-            <div class="project-summary">
-              <span>
-                <strong><?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?></strong>
-                <span class="project-summary-line">
-                  <span>ID: <?= h(configuredDisplayValue($serverManagementSelectedServer['id'] ?? '')) ?></span>
-                  <span>Host: <?= h(configuredDisplayValue($serverManagementSelectedServer['host'] ?? '')) ?></span>
-                  <span>User: <?= h(configuredDisplayValue($serverManagementSelectedServer['user'] ?? '')) ?></span>
-                </span>
-              </span>
-              <span class="status-pill <?= h(managedServersStatusClass($serverManagementSelectedServer)) ?>"><?= h(managedServersStatusLabel($serverManagementSelectedServer)) ?></span>
-            </div>
-            <dl class="project-detail-grid">
-              <div><dt>Server ID</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['id'] ?? '')) ?></dd></div>
-              <div><dt>Display name</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?></dd></div>
-              <div><dt>Host / IP</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['host'] ?? '')) ?></dd></div>
-              <div><dt>SSH user</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['user'] ?? '')) ?></dd></div>
-              <div><dt>SSH port</dt><dd><?= h((string)((int)($serverManagementSelectedServer['port'] ?? 22))) ?></dd></div>
-              <div><dt>Reachability</dt><dd data-selected-server-detail="reachability"><?= h(managedServersStatusLabel($serverManagementSelectedServer)) ?></dd></div>
-              <div><dt>Last checked</dt><dd data-selected-server-detail="last_checked"><?= h(configuredDisplayValue($serverManagementSelectedServer['last_connection_test_at'] ?? '')) ?></dd></div>
-              <div><dt>Response time</dt><dd data-selected-server-detail="response"><?= h(($serverManagementSelectedServer['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$serverManagementSelectedServer['response_time_ms'] . ' ms')) ?></dd></div>
-              <div><dt>Remote hostname</dt><dd data-selected-server-detail="hostname"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_hostname'] ?? '')) ?></dd></div>
-              <div><dt>Remote OS</dt><dd data-selected-server-detail="os"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_os'] ?? $serverManagementSelectedServer['os'] ?? '')) ?></dd></div>
-              <div><dt>Kernel</dt><dd data-selected-server-detail="kernel"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_kernel'] ?? $serverManagementSelectedServer['kernel'] ?? $serverManagementSelectedServer['uname'] ?? '')) ?></dd></div>
-              <div><dt>Remote user</dt><dd data-selected-server-detail="remote_user"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_user'] ?? '')) ?></dd></div>
-              <div><dt>PHP</dt><dd data-selected-server-detail="php"><?= $selectedServerPhpInstalled ? h(configuredDisplayValue($serverManagementSelectedServer['php_version'] ?? 'Installed')) : 'Missing' ?></dd></div>
-              <div><dt>Composer</dt><dd data-selected-server-detail="composer"><?= $selectedServerComposerInstalled ? h(configuredDisplayValue($serverManagementSelectedServer['composer_version'] ?? 'Installed')) : 'Missing' ?></dd></div>
-              <div><dt>Passwordless sudo</dt><dd data-selected-server-detail="sudo"><?= h($selectedServerSudoLabel) ?></dd></div>
-            </dl>
-            <div class="project-actions">
-              <form method="post" action="/?tab=server-management&managed_server_id=<?= rawurlencode($selectedServerId) ?>#server-management-tools" data-managed-server-test-form="1" data-operation-target="server-management" data-server-id="<?= h($selectedServerId) ?>" data-server-name="<?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?>">
-                <input type="hidden" name="action" value="test_managed_server">
-                <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                <input type="hidden" name="server_id" value="<?= h($selectedServerId) ?>">
-                <button type="submit">Refresh Diagnostics</button>
-              </form>
-            </div>
-          </section>
-
-          <section class="panel" id="server-management-tools">
-            <div class="dashboard-header">
-              <h2>Managed Server tools</h2>
-              <span class="meta">Prerequisites for Preview and Production operations</span>
-            </div>
-            <dl class="project-detail-grid">
-              <div><dt>PHP</dt><dd data-selected-server-detail="tool_php"><?= $selectedServerPhpInstalled ? 'Installed' . ((string)($serverManagementSelectedServer['php_version'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$serverManagementSelectedServer['php_version']) . '</span>' : '') : 'Missing' ?></dd></div>
-              <div><dt>Composer</dt><dd data-selected-server-detail="tool_composer"><?= $selectedServerComposerInstalled ? 'Installed' . ((string)($serverManagementSelectedServer['composer_version'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$serverManagementSelectedServer['composer_version']) . '</span>' : '') : 'Missing' ?></dd></div>
-              <div><dt>Passwordless sudo</dt><dd data-selected-server-detail="tool_sudo"><?= h($selectedServerSudoLabel) ?></dd></div>
-            </dl>
-            <div class="project-actions">
-              <?php if (!$selectedServerComposerInstalled): ?>
-                <form method="post" action="/?tab=server-management&managed_server_id=<?= rawurlencode($selectedServerId) ?>#server-management-tools" data-managed-server-test-form="1" data-operation-target="server-management" data-server-id="<?= h($selectedServerId) ?>" data-server-name="<?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?>">
-                  <input type="hidden" name="action" value="install_managed_server_composer">
-                  <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                  <input type="hidden" name="server_id" value="<?= h($selectedServerId) ?>">
-                  <button type="submit"<?= $selectedServerComposerInstallDisabledReason === '' ? ' onclick="return confirm(\'Install Composer on this managed server using apt-get?\');"' : ' disabled title="' . h($selectedServerComposerInstallDisabledReason) . '"' ?>>Install Composer</button>
-                </form>
-              <?php endif; ?>
-            </div>
-            <p class="field-help">PHP is diagnostic-only in this release. Composer installation uses the existing fixed Ubuntu/Debian command path and requires passwordless sudo or root SSH.</p>
-          </section>
-          <section class="panel">
-            <h2>Server registry</h2>
-            <p class="field-help">Use the Servers page to add, edit, remove, test SSH onboarding, and manage SSH setup for Managed Servers.</p>
-          </section>
+          <p class="field-help">
+            Selected: <strong><?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? $serverManagementSelectedId)) ?></strong>
+            <span class="status-pill <?= h(managedServersStatusClass($serverManagementSelectedServer)) ?>" data-selected-server-detail="reachability"><?= h(managedServersStatusLabel($serverManagementSelectedServer)) ?></span>
+          </p>
         <?php endif; ?>
+      </div>
+      <?php if ($serverManagementSelectedServer !== null): ?>
+        <?php
+          $selectedServerId = (string)($serverManagementSelectedServer['id'] ?? '');
+          $selectedServerSudoState = (string)($serverManagementSelectedServer['passwordless_sudo'] ?? 'unknown');
+          $selectedServerSudoLabel = match ($selectedServerSudoState) {
+              'ready', 'root' => 'Ready',
+              'setup_required' => 'Not available',
+              default => 'Unknown',
+          };
+          $selectedServerPhpInstalled = !empty($serverManagementSelectedServer['php_installed']);
+          $selectedServerNodeInstalled = !empty($serverManagementSelectedServer['node_installed']);
+          $selectedServerNpmInstalled = !empty($serverManagementSelectedServer['npm_installed']);
+          $selectedServerComposerInstalled = !empty($serverManagementSelectedServer['composer_installed']);
+          $selectedServerComposerInstallDisabledReason = (string)($serverManagementSelectedServer['status'] ?? '') !== 'reachable'
+              ? 'Refresh diagnostics successfully before installing Composer.'
+              : (!in_array($selectedServerSudoState, ['ready', 'root'], true)
+                  ? 'Passwordless sudo is required before installing Composer.'
+                  : '');
+          $projectsOnSelectedServer = array_values(array_filter($projects, static fn(array $project): bool => (string)($project['managed_server_id'] ?? '') === $selectedServerId));
+          $selectedServerApache = is_array($serverManagementSelectedServer['apache'] ?? null)
+              ? array_merge(['installed' => false, 'running' => null, 'enabled' => null, 'version' => '', 'binary_path' => '', 'diagnostic_error' => ''], $serverManagementSelectedServer['apache'])
+              : ['installed' => false, 'running' => null, 'enabled' => null, 'version' => '', 'binary_path' => '', 'diagnostic_error' => ''];
+          $selectedServerApacheSites = is_array($serverManagementSelectedServer['apache_sites'] ?? null) ? $serverManagementSelectedServer['apache_sites'] : [];
+          $selectedServerManagedSiteKeys = [];
+          foreach ($projectsOnSelectedServer as $projectOnSelectedServer) {
+              $projectKey = (string)($projectOnSelectedServer['id'] ?? '');
+              if ($projectKey !== '') {
+                  $selectedServerManagedSiteKeys[$projectKey . '|preview'] = true;
+                  $selectedServerManagedSiteKeys[$projectKey . '|production'] = true;
+              }
+          }
+          $selectedServerApacheDetected = !empty($selectedServerApache['installed'])
+              || (string)($selectedServerApache['binary_path'] ?? '') !== ''
+              || (string)($selectedServerApache['version'] ?? '') !== ''
+              || ($selectedServerApache['running'] ?? null) === true
+              || ($selectedServerApache['enabled'] ?? null) === true;
+          $selectedServerApacheKnownNotInstalled = !$selectedServerApacheDetected
+              && (string)($serverManagementSelectedServer['status'] ?? '') === 'reachable'
+              && ($serverManagementSelectedServer['last_connection_test_at'] ?? null) !== null;
+          $selectedServerApacheStatus = $selectedServerApacheDetected
+              ? (($selectedServerApache['running'] ?? null) === true ? 'Running' : (($selectedServerApache['running'] ?? null) === false ? 'Installed, stopped' : 'Installed'))
+              : ($selectedServerApacheKnownNotInstalled ? 'Not installed' : 'Unknown');
+          $selectedServerApacheEnabled = ($selectedServerApache['enabled'] ?? null) === true
+              ? 'Yes'
+              : (($selectedServerApache['enabled'] ?? null) === false ? 'No' : 'Unknown');
+          $serverManagementTools = [
+              [
+                  'id' => 'php',
+                  'name' => 'PHP',
+                  'status' => $selectedServerPhpInstalled ? 'Installed' : 'Missing',
+                  'version' => (string)($serverManagementSelectedServer['php_version'] ?? ''),
+                  'latest' => '',
+                  'executable' => (string)($serverManagementSelectedServer['php_path'] ?? ''),
+                  'source' => 'Detected by Managed Server SSH diagnostics.',
+                  'actions' => [],
+              ],
+              [
+                  'id' => 'composer',
+                  'name' => 'Composer',
+                  'status' => $selectedServerComposerInstalled ? 'Installed' : 'Missing',
+                  'version' => (string)($serverManagementSelectedServer['composer_version'] ?? ''),
+                  'latest' => '',
+                  'executable' => (string)($serverManagementSelectedServer['composer_path'] ?? ''),
+                  'source' => 'Detected by Managed Server SSH diagnostics. Installation uses the existing fixed apt-get command path.',
+                  'actions' => $selectedServerComposerInstalled ? [] : ['install_composer'],
+              ],
+              [
+                  'id' => 'node',
+                  'name' => 'Node.js',
+                  'status' => $selectedServerNodeInstalled ? 'Installed' : 'Missing',
+                  'version' => (string)($serverManagementSelectedServer['node_version'] ?? ''),
+                  'latest' => '',
+                  'executable' => (string)($serverManagementSelectedServer['node_path'] ?? ''),
+                  'source' => 'Detected by Managed Server SSH diagnostics.',
+                  'actions' => [],
+              ],
+              [
+                  'id' => 'npm',
+                  'name' => 'npm',
+                  'status' => $selectedServerNpmInstalled ? 'Installed' : 'Missing',
+                  'version' => (string)($serverManagementSelectedServer['npm_version'] ?? ''),
+                  'latest' => '',
+                  'executable' => (string)($serverManagementSelectedServer['npm_path'] ?? ''),
+                  'source' => 'Detected by Managed Server SSH diagnostics.',
+                  'actions' => [],
+              ],
+          ];
+        ?>
+        <section class="result-block tool-operation-panel" data-managed-server-operation-panel="server-management" hidden>
+          <h2 data-managed-server-field="title">Managed server operation</h2>
+          <p data-managed-server-field="message">Starting...</p>
+          <dl class="tool-operation-grid">
+            <div><dt>Server</dt><dd data-managed-server-field="server">-</dd></div>
+            <div><dt>Status</dt><dd data-managed-server-field="status">Starting</dd></div>
+            <div><dt>Stage</dt><dd data-managed-server-field="stage">Starting</dd></div>
+            <div><dt>Elapsed</dt><dd data-managed-server-field="elapsed">0s</dd></div>
+          </dl>
+          <dl class="apache-summary-grid" data-managed-server-field="details" hidden>
+            <div><dt>SSH access</dt><dd data-managed-server-field="ssh_access">-</dd></div>
+            <div><dt>Passwordless sudo</dt><dd data-managed-server-field="sudo">-</dd></div>
+            <div><dt>Hostname</dt><dd data-managed-server-field="hostname">-</dd></div>
+            <div><dt>OS</dt><dd data-managed-server-field="os">-</dd></div>
+            <div><dt>Kernel</dt><dd data-managed-server-field="kernel">-</dd></div>
+            <div><dt>Current user</dt><dd data-managed-server-field="user">-</dd></div>
+            <div><dt>Working directory</dt><dd data-managed-server-field="working_directory">-</dd></div>
+            <div><dt>Round-trip time</dt><dd data-managed-server-field="rtt">-</dd></div>
+          </dl>
+          <div class="result-actions">
+            <button type="button" class="secondary" data-copy-log="serverManagementLiveLog">Copy Log</button>
+            <button type="button" class="secondary" data-download-log="serverManagementLiveLog" data-download-name="managed-server-operation.log">Download Log</button>
+            <span class="hint" data-log-message="serverManagementLiveLog" aria-live="polite"></span>
+          </div>
+          <pre id="serverManagementLiveLog" class="tool-operation-log" data-managed-server-field="log">Waiting for operation log...</pre>
+        </section>
+
+        <section class="panel">
+          <div class="dashboard-header">
+            <h2>Server Overview</h2>
+            <span class="meta">Selected Managed Server connection summary</span>
+          </div>
+          <dl class="project-detail-grid">
+            <div><dt>Display name</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?></dd></div>
+            <div><dt>Host / IP</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['host'] ?? '')) ?></dd></div>
+            <div><dt>SSH user</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['user'] ?? '')) ?></dd></div>
+            <div><dt>SSH port</dt><dd><?= h((string)((int)($serverManagementSelectedServer['port'] ?? 22))) ?></dd></div>
+            <div><dt>Last checked</dt><dd data-selected-server-detail="last_checked"><?= h(configuredDisplayValue($serverManagementSelectedServer['last_connection_test_at'] ?? '')) ?></dd></div>
+            <div><dt>Remote hostname</dt><dd data-selected-server-detail="hostname"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_hostname'] ?? '')) ?></dd></div>
+            <div><dt>Remote OS</dt><dd data-selected-server-detail="os"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_os'] ?? $serverManagementSelectedServer['os'] ?? '')) ?></dd></div>
+            <div><dt>Passwordless sudo</dt><dd data-selected-server-detail="sudo"><?= h($selectedServerSudoLabel) ?></dd></div>
+          </dl>
+          <div class="project-actions">
+            <form method="post" action="/?tab=server-management&managed_server_id=<?= rawurlencode($selectedServerId) ?>#server-management-tools" data-managed-server-test-form="1" data-operation-target="server-management" data-server-id="<?= h($selectedServerId) ?>" data-server-name="<?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?>">
+              <input type="hidden" name="action" value="test_managed_server">
+              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+              <input type="hidden" name="server_id" value="<?= h($selectedServerId) ?>">
+              <button type="submit">Refresh Diagnostics</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="panel" id="server-management-tools">
+          <div class="dashboard-header">
+            <h2>Runtime &amp; Development Tools</h2>
+            <span class="meta">Software inventory for the selected Managed Server</span>
+          </div>
+          <div class="table-scroll">
+            <table class="settings-table compact-sites host-tools-table">
+              <thead>
+                <tr>
+                  <th>Tool</th>
+                  <th>Status</th>
+                  <th>Installed version</th>
+                  <th>Latest available</th>
+                  <th>Executable</th>
+                  <th>Installation source</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <?php foreach ($serverManagementTools as $tool): ?>
+                  <?php
+                    $toolStatus = (string)$tool['status'];
+                    $toolStatusClass = $toolStatus === 'Installed' ? 'healthy' : ($toolStatus === 'Missing' ? 'warning' : '');
+                  ?>
+                  <tr>
+                    <td><strong><?= h((string)$tool['name']) ?></strong></td>
+                    <td><span class="status-pill <?= h($toolStatusClass) ?>" data-selected-server-detail="<?= h('tool_' . (string)$tool['id']) ?>"><?= h($toolStatus) ?></span></td>
+                    <td data-selected-server-detail="<?= h('tool_' . (string)$tool['id'] . '_version') ?>"><?= h(configuredDisplayValue($tool['version'])) ?></td>
+                    <td><?= h(configuredDisplayValue($tool['latest'])) ?></td>
+                    <td class="path-value" data-selected-server-detail="<?= h('tool_' . (string)$tool['id'] . '_path') ?>"><?= h(configuredDisplayValue($tool['executable'])) ?></td>
+                    <td><?= h(configuredDisplayValue($tool['source'])) ?></td>
+                    <td>
+                      <div class="project-actions">
+                        <?php foreach ($tool['actions'] as $toolAction): ?>
+                          <?php if ($toolAction === 'install_composer'): ?>
+                            <form method="post" action="/?tab=server-management&managed_server_id=<?= rawurlencode($selectedServerId) ?>#server-management-tools" data-managed-server-test-form="1" data-operation-target="server-management" data-server-id="<?= h($selectedServerId) ?>" data-server-name="<?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?>">
+                              <input type="hidden" name="action" value="install_managed_server_composer">
+                              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                              <input type="hidden" name="server_id" value="<?= h($selectedServerId) ?>">
+                              <button type="submit"<?= $selectedServerComposerInstallDisabledReason === '' ? ' onclick="return confirm(\'Install Composer on this managed server using apt-get?\');"' : ' disabled title="' . h($selectedServerComposerInstallDisabledReason) . '"' ?>>Install</button>
+                            </form>
+                          <?php endif; ?>
+                        <?php endforeach; ?>
+                      </div>
+                    </td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="dashboard-header">
+            <h2>Web Server</h2>
+            <span class="meta">Apache state for the selected Managed Server</span>
+          </div>
+          <dl class="project-detail-grid">
+            <div><dt>Status</dt><dd data-selected-server-detail="apache_status"><?= h($selectedServerApacheStatus) ?></dd></div>
+            <div><dt>Service enabled</dt><dd data-selected-server-detail="apache_enabled"><?= h($selectedServerApacheEnabled) ?></dd></div>
+            <div><dt>Version</dt><dd data-selected-server-detail="apache_version"><?= h(configuredDisplayValue($selectedServerApache['version'] ?? '')) ?></dd></div>
+            <div><dt>Binary path</dt><dd class="path-value" data-selected-server-detail="apache_path"><?= h(configuredDisplayValue($selectedServerApache['binary_path'] ?? '')) ?></dd></div>
+          </dl>
+          <?php if ($selectedServerApacheKnownNotInstalled): ?>
+            <p class="meta">Apache is not installed on this Managed Server.</p>
+          <?php elseif (!$selectedServerApacheDetected): ?>
+            <p class="meta">Apache diagnostics have not been refreshed successfully for this Managed Server.</p>
+          <?php elseif (empty($selectedServerApacheSites)): ?>
+            <p class="meta">No Apache virtual host configurations detected.</p>
+          <?php else: ?>
+            <div class="table-scroll">
+              <table class="settings-table compact-sites">
+                <thead>
+                  <tr>
+                    <th>Site/config</th>
+                    <th>Status</th>
+                    <th>ServerName</th>
+                    <th>DocumentRoot</th>
+                    <th>Managed by Dev Console</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($selectedServerApacheSites as $site): ?>
+                    <?php
+                      $siteProjectKey = (string)($site['project_id'] ?? '') . '|' . (string)($site['environment'] ?? '');
+                      $siteManaged = !empty($site['managed_marker']) && isset($selectedServerManagedSiteKeys[$siteProjectKey]);
+                      $siteEnabled = $site['enabled'] ?? null;
+                      $siteStatus = $siteEnabled === true ? 'Enabled' : ($siteEnabled === false ? 'Disabled' : 'Unknown');
+                    ?>
+                    <tr>
+                      <td>
+                        <strong><?= h(configuredDisplayValue($site['name'] ?? '')) ?></strong><br>
+                        <span class="meta path-value"><?= h(configuredDisplayValue($site['path'] ?? '')) ?></span>
+                      </td>
+                      <td><?= h($siteStatus) ?></td>
+                      <td><?= h(configuredDisplayValue($site['server_name'] ?? '')) ?></td>
+                      <td class="path-value"><?= h(configuredDisplayValue($site['document_root'] ?? '')) ?></td>
+                      <td><?= $siteManaged ? 'Yes' : 'No' ?></td>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          <?php endif; ?>
+        </section>
+
+        <section class="panel">
+          <div class="dashboard-header">
+            <h2>Projects on this Server</h2>
+            <span class="meta"><?= h((string)count($projectsOnSelectedServer)) ?> assigned</span>
+          </div>
+          <?php if (empty($projectsOnSelectedServer)): ?>
+            <p class="meta">No Dev Console projects are assigned to this server.</p>
+          <?php else: ?>
+            <div class="table-scroll">
+              <table class="settings-table compact-sites">
+                <thead>
+                  <tr>
+                    <th>Project</th>
+                    <th>Preview</th>
+                    <th>Production</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($projectsOnSelectedServer as $project): ?>
+                    <?php
+                      $previewDomain = (string)($project['preview']['domain'] ?? '');
+                      $previewPath = (string)($project['preview']['path'] ?? '');
+                      $productionDomain = (string)($project['production']['domain'] ?? '');
+                      $productionPath = (string)($project['production']['path'] ?? '');
+                    ?>
+                    <tr>
+                      <td>
+                        <strong><?= h(configuredDisplayValue($project['name'] ?? '')) ?></strong><br>
+                        <span class="meta"><?= h(configuredDisplayValue($project['id'] ?? '')) ?></span>
+                      </td>
+                      <td>
+                        <?= h($previewDomain !== '' || $previewPath !== '' ? 'Configured' : 'Not configured') ?><br>
+                        <span class="meta"><?= h(configuredDisplayValue($previewDomain)) ?></span><br>
+                        <span class="meta path-value"><?= h(configuredDisplayValue($previewPath)) ?></span>
+                      </td>
+                      <td>
+                        <?= h($productionDomain !== '' || $productionPath !== '' ? 'Configured' : 'Not configured') ?><br>
+                        <span class="meta"><?= h(configuredDisplayValue($productionDomain)) ?></span><br>
+                        <span class="meta path-value"><?= h(configuredDisplayValue($productionPath)) ?></span>
+                      </td>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          <?php endif; ?>
+        </section>
       <?php endif; ?>
-    </section>
+    <?php endif; ?>
   </section>
 
 </main>
@@ -3534,7 +3580,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const selectedTab = () => tabButtons.find((button) => button.classList.contains('active'))?.dataset.tabTarget || 'dashboard';
   const activateTab = (target) => {
     tabButtons.forEach((button) => {
-      button.classList.toggle('active', button.dataset.tabTarget === target);
+      const active = button.dataset.tabTarget === target;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', active ? 'true' : 'false');
     });
     tabPanels.forEach((panel) => {
       panel.hidden = panel.dataset.tabPanel !== target;
@@ -3902,30 +3950,41 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     };
     if (operation.operation_action === 'connection_test') {
       const checkedAt = operation.finished_at || new Date().toISOString();
-      const response = result.round_trip_ms ? `${result.round_trip_ms} ms` : 'Not configured';
       setDetail('reachability', completed ? 'Reachable' : 'Unreachable');
+      document.querySelectorAll('[data-selected-server-detail="reachability"]').forEach((node) => {
+        node.classList.toggle('healthy', completed);
+        node.classList.toggle('error', !completed);
+        node.classList.remove('warning');
+      });
       setDetail('last_checked', checkedAt);
-      setDetail('response', response);
       setDetail('hostname', result.hostname || '');
       setDetail('os', result.os || '');
-      setDetail('kernel', result.kernel || '');
-      setDetail('remote_user', result.remote_user || '');
       setDetail('sudo', sudoLabel);
       setDetail('tool_sudo', sudoLabel);
     }
-    const phpText = Object.prototype.hasOwnProperty.call(result, 'php_installed')
-      ? (result.php_installed ? `Installed${result.php_version ? ` ${result.php_version}` : ''}` : 'Missing')
-      : '';
-    const composerText = Object.prototype.hasOwnProperty.call(result, 'composer_installed')
-      ? (result.composer_installed ? `Installed${result.composer_version ? ` ${result.composer_version}` : ''}` : 'Missing')
-      : '';
-    if (phpText) {
-      setDetail('php', phpText);
-      setDetail('tool_php', phpText);
-    }
-    if (composerText) {
-      setDetail('composer', composerText);
-      setDetail('tool_composer', composerText);
+    ['php', 'composer', 'node', 'npm'].forEach((tool) => {
+      const installedKey = `${tool}_installed`;
+      if (!Object.prototype.hasOwnProperty.call(result, installedKey)) return;
+      const installed = Boolean(result[installedKey]);
+      setDetail(`tool_${tool}`, installed ? 'Installed' : 'Missing');
+      document.querySelectorAll(`[data-selected-server-detail="tool_${tool}"]`).forEach((node) => {
+        node.classList.toggle('healthy', installed);
+        node.classList.toggle('warning', !installed);
+      });
+      setDetail(`tool_${tool}_version`, result[`${tool}_version`] || '');
+      setDetail(`tool_${tool}_path`, result[`${tool}_path`] || '');
+    });
+    if (result.apache && typeof result.apache === 'object') {
+      const apache = result.apache;
+      const detected = Boolean(apache.installed || apache.binary_path || apache.version || apache.running === true || apache.enabled === true);
+      const status = !detected
+        ? (completed ? 'Not installed' : 'Unknown')
+        : (apache.running === true ? 'Running' : (apache.running === false ? 'Installed, stopped' : 'Installed'));
+      const enabled = apache.enabled === true ? 'Yes' : (apache.enabled === false ? 'No' : 'Unknown');
+      setDetail('apache_status', status);
+      setDetail('apache_enabled', enabled);
+      setDetail('apache_version', apache.version || '');
+      setDetail('apache_path', apache.binary_path || '');
     }
   };
 	  const showManagedServerOperation = (operation, target = 'servers') => {

@@ -42,5 +42,5 @@ The usual development loop is:
 - Project creation does not create remote infrastructure.
 - Repository initialization does not deploy anything.
 - Set up prepares directories and Apache configuration.
-- Preview deployment uses the GitHub version of the configured branch.
+- Preview deployment prepares the Project Git state on the Dev Console host and transfers files to the Managed Server with SSH/rsync. Current v1 behavior defaults to `main` and does not expose branch selection in the UI.
 - Production deployment promotes the current Preview contents.

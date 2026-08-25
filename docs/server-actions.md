@@ -4,9 +4,9 @@ Managed Servers are registered in `console/config/servers.json` and operated thr
 
 Page responsibilities:
 
-- Settings: Dev Console host/runtime/configuration and local host tool management.
-- Servers: managed server registry, SSH onboarding, Add/Edit/Remove, Test Connection, and compact runtime diagnostics.
-- Server Management: selected Managed Server summary and future remote operations.
+- Settings: Dev Console host/runtime/configuration and required local host tool diagnostics for Git, PHP, and Codex CLI.
+- Servers: managed server registry, SSH onboarding, Add/Edit/Remove, Test Connection, and connection details.
+- Server Management: selected Managed Server overview, remote PHP/Composer/Node.js/npm diagnostics, remote Apache status and site inventory, Composer installation, and assigned projects.
 
 ## Add Server
 
@@ -73,6 +73,9 @@ The fixed SSH diagnostic command collects:
 - passwordless sudo status
 - PHP path/version when available
 - Composer path/version when available
+- Node.js path/version when available
+- npm path/version when available
+- Apache state, binary, version, enabled status, and virtual host inventory when available
 
 The command set is fixed by the backend. The browser does not provide shell commands.
 
@@ -83,7 +86,7 @@ Success result:
 - Response time is saved.
 - Hostname, OS, kernel, remote user, and remote working directory are saved when available.
 - Passwordless sudo state is saved.
-- PHP and Composer diagnostic values are saved when available.
+- PHP, Composer, Node.js, npm, and Apache diagnostic values are saved when available.
 
 Failure result:
 
@@ -143,6 +146,23 @@ Failure conditions:
 - Passwordless sudo is not configured.
 - Package manager failure.
 - Composer verification failure.
+
+## Server Management
+
+Purpose: inspect and operate the currently selected Managed Server.
+
+The Server Management page is scoped to one selected server. It does not manage the local Dev Console host.
+
+Current sections:
+
+- Server Overview: compact remote identity, reachability, SSH user/port, last check, remote hostname/OS, and passwordless sudo readiness.
+- Runtime & Development Tools: remote PHP, Composer, Node.js, and npm status, version, executable path, and installation source.
+- Web Server: remote Apache status, version, enabled state, executable path, and discovered virtual hosts.
+- Projects on this Server: projects assigned to the selected server.
+
+Git is intentionally absent from Server Management. Project Git repositories, GitHub authentication, Codex commits, and deployment source preparation are Dev Console host responsibilities.
+
+The current remote tool action implemented from this page is Composer installation. PHP, Node.js, npm, and Apache are diagnostic-only in this page unless source code later adds explicit actions.
 
 ## Generate SSH Key
 
@@ -237,11 +257,11 @@ The internal status values are:
 - `reachable`
 - `unreachable`
 
-Additional diagnostic fields include last connection timestamp, response time, hostname, OS, kernel, remote user, remote working directory, passwordless sudo state, and last error.
+Additional diagnostic fields include last connection timestamp, response time, hostname, OS, kernel, remote user, remote working directory, passwordless sudo state, PHP/Composer/Node.js/npm executable and version data, Apache state, Apache virtual host inventory, and last error. Git and GitHub operations are performed by the Dev Console host, so Git is not currently a Managed Server prerequisite.
 
-## Details
+## Server Card Details
 
-Show details expands compact server information. The current implementation exposes:
+On the Servers page, Show details expands compact server registration and connection information. The current implementation exposes:
 
 - Server ID
 - Display name

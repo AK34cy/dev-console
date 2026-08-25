@@ -22,7 +22,7 @@ flowchart TD
     Index --> Production["console/production-deployment.php"]
 
     Git --> GitHub["GitHub CLI gh + Git"]
-    Projects --> ApacheHost["Local or remote Apache"]
+    Projects --> ApacheHost["Project Apache setup"]
     Servers --> SSH["Managed Server SSH"]
     Preview --> RemotePreview["Managed Server Preview path"]
     Production --> RemoteProduction["Managed Server Production path"]
@@ -31,7 +31,7 @@ flowchart TD
 
 The main entry point is `console/index.php`. It loads the helper modules, performs authentication and CSRF validation, routes POST actions, renders the tabbed UI, and exposes JSON polling endpoints.
 
-The current top-level UI sections are Dashboard, Projects, Servers, Server Management, and Settings.
+The current top-level UI sections are Dashboard, Projects, Servers, Server Management, Documentation, and Settings.
 
 ## Data Flow
 
@@ -112,17 +112,17 @@ Managed servers are stored in `console/config/servers.json`. A server record con
 
 The current server onboarding model uses one shared Dev Console SSH key. The generated setup command is intended to be run on the managed server as the deployment user. It installs the public key into that user's `authorized_keys`, configures passwordless sudo through `/etc/sudoers.d/dev-console-<user>` for non-root users, validates sudoers with `visudo`, and prepares `/var/www/projects`.
 
-Server connection tests run asynchronously through `console/run-managed-server.php` and execute a fixed SSH diagnostic command that collects hostname, kernel, working directory, remote user, optional OS release data, and sudo readiness.
+Server connection tests run asynchronously through `console/run-managed-server.php` and execute a fixed SSH diagnostic command that collects hostname, kernel, working directory, remote user, optional OS release data, sudo readiness, remote PHP/Composer/Node.js/npm diagnostics, Apache service state, and Apache virtual host inventory. Managed servers are deployment targets; Git and GitHub operations remain Dev Console host responsibilities.
 
 ## Git Lifecycle
 
-Project repositories live under `/var/www/git/<project-id>`. Dev Console expects project remotes to use the account-level SSH alias:
+Project repositories live on the Dev Console host under `/var/www/git/<project-id>`. Dev Console expects project remotes to use the account-level SSH alias:
 
 ```text
 git@github.com-dev-console-account:<account>/<repository>.git
 ```
 
-GitHub-specific operations use `gh` with the saved Personal Access Token passed through the `GH_TOKEN` child-process environment. Normal Git operations remain Git commands and use the configured remote.
+Dev Console has one global GitHub configuration in Settings. Projects use that global account/authentication; they do not have separate GitHub credentials. GitHub-specific operations use `gh` with the saved Personal Access Token passed through the `GH_TOKEN` child-process environment. Normal Git operations remain Git commands and use the configured remote.
 
 Repository initialization:
 
@@ -150,22 +150,30 @@ TASKS/
   IN PROGRESS/
   DONE/
   DROPPED/
-  ATTACHMENTS/
+  attachments/
 ```
 
-Each task file starts with visible generated YAML metadata:
+Older `TASKS/ATTACHMENTS/` directories remain readable for compatibility.
+
+Each task file starts with visible generated YAML Front Matter:
 
 ```yaml
 ---
+task_id: TASK-001
 project_id: <project-id>
+title: Example task
+status: TODO
+created_at: 2026-08-14T00:00:00+00:00
+updated_at: 2026-08-14T00:00:00+00:00
+attachments: []
 ---
 ```
 
-Task numbers are project-specific. Task lists are grouped as TODO, IN PROGRESS, DONE, and DROPPED. Attachments are scoped by project and task ID.
+Task numbers are project-specific. Task lists are grouped as TODO, IN PROGRESS, DONE, and DROPPED. Attachments are stored under `TASKS/attachments/<task-id>/` and referenced from YAML metadata.
 
 When Codex runs a task, Dev Console moves the task from TODO to IN PROGRESS, runs Codex inside the project repository, commits implementation changes outside `TASKS/`, then moves the task to DONE and commits the task lifecycle update separately.
 
-If an IN PROGRESS task has a failed Codex run, the user can retry it or explicitly drop it. Dropping moves the task to DROPPED and commits only the lifecycle change; the failed Codex run status remains separate.
+TODO tasks remain editable and can be dropped before execution. If an IN PROGRESS task has a failed Codex run, the user can retry it or explicitly drop it. Dropping moves the task to DROPPED and commits only the lifecycle change; failed Codex run status remains separate from task lifecycle status.
 
 ## Deployment Architecture
 
@@ -175,12 +183,14 @@ Preview deployment uses this architecture:
 
 ```mermaid
 flowchart LR
-    Repo["/var/www/git/<project-id>"] --> Fetch["git fetch origin <branch>"]
-    Fetch --> Archive["git archive origin/<branch>"]
+    Repo["Dev Console host /var/www/git/<project-id>"] --> Fetch["git fetch origin"]
+    Fetch --> Archive["git archive remote branch commit"]
     Archive --> Temp["Temporary source directory"]
     Temp --> Rsync["rsync --delete"]
     Rsync --> RemotePreview["Managed server Preview path"]
 ```
+
+Managed servers receive files through SSH/rsync. They are not expected to clone repositories or run Git for Dev Console Preview or Production deployment.
 
 Preview deploys GitHub repository content as-is except for Dev Console operational metadata exclusions:
 
@@ -204,7 +214,9 @@ Production deployment requires a successful Preview deployment first. Production
 
 Apache diagnostics are in `console/apache.php`. Detection checks known binaries such as `/usr/sbin/apache2` and `/usr/sbin/httpd`, then uses fixed `systemctl` commands where available.
 
-The Settings page can install, start, and restart Apache locally with fixed Debian/Ubuntu commands. Project setup writes managed Apache virtual host files with Dev Console ownership markers and refuses to overwrite unrelated existing files.
+Apache is not shown as a Dev Console host Setting in the current UI. Settings is scoped to Dev Console runtime/configuration and local host prerequisites such as Git, PHP, Codex CLI, and GitHub configuration.
+
+Project setup writes managed Apache virtual host files with Dev Console ownership markers and refuses to overwrite unrelated existing files. Server Management displays Apache status, version, binary path, enabled state, and virtual host inventory for the selected managed server from remote SSH diagnostics.
 
 The local managed ServerName config is:
 
@@ -254,6 +266,7 @@ Connection tests use a fixed command set:
 - `whoami`
 - optional read-only OS release inspection
 - `sudo -n true` capability check for non-root users
+- remote PHP, Composer, Node.js, npm, and Apache detection commands
 
 SSH command lines shown to the user are sanitized and do not include private key contents.
 

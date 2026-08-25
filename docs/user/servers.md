@@ -49,6 +49,9 @@ Test Connection verifies SSH access and records:
 - passwordless sudo readiness
 - PHP availability and version
 - Composer availability and version
+- Node.js availability and version
+- npm availability and version
+- Apache status, version, and site inventory
 
 ## Composer
 
@@ -62,11 +65,11 @@ Remove deletes only the server registration from Dev Console. It does not delete
 
 ## Server Management
 
-Server Management is scoped to one selected Managed Server. In the current implementation it shows the selected server identity, host, SSH user, reachability, last check, response time, remote OS/kernel values when available, passwordless sudo status, and PHP/Composer diagnostic values.
+Server Management is scoped to one selected Managed Server. It shows Server Overview, Runtime & Development Tools, Web Server, and Projects on this Server. Remote PHP, Composer, Node.js, npm, Apache state, and Apache virtual host inventory come from Managed Server SSH diagnostics. Git and GitHub operations run on the Dev Console host; Git is not currently a Managed Server prerequisite.
 
 Server Management provides explicit operational actions for the selected server:
 
 - Refresh Diagnostics
 - Install Composer when Composer is missing and the existing safety prerequisites are met
 
-It does not manage the local Dev Console host. Dev Console host prerequisites and local tool actions are shown in Settings.
+It does not manage the local Dev Console host. Dev Console host prerequisites for Git, PHP, Codex CLI, and runtime limits are shown in Settings. Web-server and Apache operations belong to Server Management for the selected Managed Server.

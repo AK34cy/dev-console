@@ -40,9 +40,24 @@ function managedServersEmptyServer(): array
         'php_installed' => false,
         'php_version' => '',
         'php_path' => '',
+        'node_installed' => false,
+        'node_version' => '',
+        'node_path' => '',
+        'npm_installed' => false,
+        'npm_version' => '',
+        'npm_path' => '',
         'composer_installed' => false,
         'composer_version' => '',
         'composer_path' => '',
+        'apache' => [
+            'installed' => false,
+            'running' => null,
+            'enabled' => null,
+            'version' => '',
+            'binary_path' => '',
+            'diagnostic_error' => '',
+        ],
+        'apache_sites' => [],
         'last_error' => '',
     ];
 }
@@ -64,14 +79,59 @@ function managedServersNormalize(array $input): array
             continue;
         }
         $server = managedServersEmptyServer();
-        foreach (['id', 'name', 'host', 'user', 'auth_method', 'key', 'key_fingerprint', 'description', 'status', 'remote_hostname', 'remote_os', 'remote_kernel', 'remote_working_directory', 'remote_user', 'passwordless_sudo', 'php_version', 'php_path', 'composer_version', 'composer_path', 'last_error'] as $field) {
+        foreach (['id', 'name', 'host', 'user', 'auth_method', 'key', 'key_fingerprint', 'description', 'status', 'remote_hostname', 'remote_os', 'remote_kernel', 'remote_working_directory', 'remote_user', 'passwordless_sudo', 'php_version', 'php_path', 'node_version', 'node_path', 'npm_version', 'npm_path', 'composer_version', 'composer_path', 'last_error'] as $field) {
             if (isset($serverInput[$field]) && is_scalar($serverInput[$field])) {
                 $server[$field] = trim((string)$serverInput[$field]);
             }
         }
-        foreach (['php_installed', 'composer_installed'] as $field) {
+        foreach (['php_installed', 'node_installed', 'npm_installed', 'composer_installed'] as $field) {
             if (array_key_exists($field, $serverInput)) {
                 $server[$field] = filter_var($serverInput[$field], FILTER_VALIDATE_BOOLEAN);
+            }
+        }
+        if (is_array($serverInput['apache'] ?? null)) {
+            $apacheInput = $serverInput['apache'];
+            $server['apache']['installed'] = filter_var($apacheInput['installed'] ?? false, FILTER_VALIDATE_BOOLEAN);
+            foreach (['running', 'enabled'] as $field) {
+                $server['apache'][$field] = array_key_exists($field, $apacheInput)
+                    ? (filter_var($apacheInput[$field], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE))
+                    : null;
+            }
+            foreach (['version', 'binary_path', 'diagnostic_error'] as $field) {
+                if (isset($apacheInput[$field]) && is_scalar($apacheInput[$field])) {
+                    $server['apache'][$field] = trim((string)$apacheInput[$field]);
+                }
+            }
+        }
+        if (is_array($serverInput['apache_sites'] ?? null)) {
+            foreach ($serverInput['apache_sites'] as $siteInput) {
+                if (!is_array($siteInput)) {
+                    continue;
+                }
+                $site = [
+                    'name' => '',
+                    'path' => '',
+                    'enabled' => null,
+                    'server_name' => '',
+                    'document_root' => '',
+                    'managed_marker' => false,
+                    'project_id' => '',
+                    'environment' => '',
+                ];
+                foreach (['name', 'path', 'server_name', 'document_root', 'project_id', 'environment'] as $field) {
+                    if (isset($siteInput[$field]) && is_scalar($siteInput[$field])) {
+                        $site[$field] = trim((string)$siteInput[$field]);
+                    }
+                }
+                if (array_key_exists('enabled', $siteInput)) {
+                    $site['enabled'] = filter_var($siteInput['enabled'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+                }
+                if (array_key_exists('managed_marker', $siteInput)) {
+                    $site['managed_marker'] = filter_var($siteInput['managed_marker'], FILTER_VALIDATE_BOOLEAN);
+                }
+                if ($site['name'] !== '') {
+                    $server['apache_sites'][] = $site;
+                }
             }
         }
         $server['id'] = managedServersNormalizeId($server['id']);
@@ -458,9 +518,17 @@ function managedServersUpsert(array $servers, array $server, string $existingId 
         'php_installed',
         'php_version',
         'php_path',
+        'node_installed',
+        'node_version',
+        'node_path',
+        'npm_installed',
+        'npm_version',
+        'npm_path',
         'composer_installed',
         'composer_version',
         'composer_path',
+        'apache',
+        'apache_sites',
         'last_error',
     ];
     $connectionFields = ['host', 'port', 'user', 'key', 'key_fingerprint'];
@@ -491,9 +559,17 @@ function managedServersUpsert(array $servers, array $server, string $existingId 
                     $server['php_installed'] = false;
                     $server['php_version'] = '';
                     $server['php_path'] = '';
+                    $server['node_installed'] = false;
+                    $server['node_version'] = '';
+                    $server['node_path'] = '';
+                    $server['npm_installed'] = false;
+                    $server['npm_version'] = '';
+                    $server['npm_path'] = '';
                     $server['composer_installed'] = false;
                     $server['composer_version'] = '';
                     $server['composer_path'] = '';
+                    $server['apache'] = managedServersEmptyServer()['apache'];
+                    $server['apache_sites'] = [];
                     $server['last_error'] = '';
                 }
                 $replaced = true;
@@ -553,9 +629,21 @@ function managedServersUpdateConnectionResult(string $serverId, array $result): 
         $servers[$index]['php_installed'] = $success && !empty($result['php_installed']);
         $servers[$index]['php_version'] = $success ? (string)($result['php_version'] ?? '') : '';
         $servers[$index]['php_path'] = $success ? (string)($result['php_path'] ?? '') : '';
+        $servers[$index]['node_installed'] = $success && !empty($result['node_installed']);
+        $servers[$index]['node_version'] = $success ? (string)($result['node_version'] ?? '') : '';
+        $servers[$index]['node_path'] = $success ? (string)($result['node_path'] ?? '') : '';
+        $servers[$index]['npm_installed'] = $success && !empty($result['npm_installed']);
+        $servers[$index]['npm_version'] = $success ? (string)($result['npm_version'] ?? '') : '';
+        $servers[$index]['npm_path'] = $success ? (string)($result['npm_path'] ?? '') : '';
         $servers[$index]['composer_installed'] = $success && !empty($result['composer_installed']);
         $servers[$index]['composer_version'] = $success ? (string)($result['composer_version'] ?? '') : '';
         $servers[$index]['composer_path'] = $success ? (string)($result['composer_path'] ?? '') : '';
+        $servers[$index]['apache'] = $success && is_array($result['apache'] ?? null)
+            ? array_merge(managedServersEmptyServer()['apache'], $result['apache'])
+            : managedServersEmptyServer()['apache'];
+        $servers[$index]['apache_sites'] = $success && is_array($result['apache_sites'] ?? null)
+            ? $result['apache_sites']
+            : [];
         $servers[$index]['last_error'] = $success ? '' : (string)($result['message'] ?? 'SSH connection failed');
         $servers[$index]['key_fingerprint'] = managedServersKeyFingerprint((string)($server['key'] ?? ''));
         managedServersSave($servers);
@@ -684,10 +772,25 @@ function managedServerParseConnectionOutput(string $stdout): array
         'php_installed' => false,
         'php_path' => '',
         'php_version' => '',
+        'node_installed' => false,
+        'node_path' => '',
+        'node_version' => '',
+        'npm_installed' => false,
+        'npm_path' => '',
+        'npm_version' => '',
         'composer_installed' => false,
         'composer_path' => '',
         'composer_version' => '',
     ];
+    $apache = [
+        'installed' => false,
+        'running' => null,
+        'enabled' => null,
+        'version' => '',
+        'binary_path' => '',
+        'diagnostic_error' => '',
+    ];
+    $apacheSites = [];
     $filtered = [];
     foreach ($lines as $line) {
         if (str_starts_with($line, '__DEV_CONSOLE_SUDO__=')) {
@@ -698,6 +801,10 @@ function managedServerParseConnectionOutput(string $stdout): array
         foreach ([
             '__DEV_CONSOLE_PHP_PATH__=' => 'php_path',
             '__DEV_CONSOLE_PHP_VERSION__=' => 'php_version',
+            '__DEV_CONSOLE_NODE_PATH__=' => 'node_path',
+            '__DEV_CONSOLE_NODE_VERSION__=' => 'node_version',
+            '__DEV_CONSOLE_NPM_PATH__=' => 'npm_path',
+            '__DEV_CONSOLE_NPM_VERSION__=' => 'npm_version',
             '__DEV_CONSOLE_COMPOSER_PATH__=' => 'composer_path',
             '__DEV_CONSOLE_COMPOSER_VERSION__=' => 'composer_version',
         ] as $prefix => $field) {
@@ -706,10 +813,53 @@ function managedServerParseConnectionOutput(string $stdout): array
                 continue 2;
             }
         }
+        foreach ([
+            '__DEV_CONSOLE_APACHE_VERSION__=' => 'version',
+            '__DEV_CONSOLE_APACHE_PATH__=' => 'binary_path',
+            '__DEV_CONSOLE_APACHE_ERROR__=' => 'diagnostic_error',
+        ] as $prefix => $field) {
+            if (str_starts_with($line, $prefix)) {
+                $apache[$field] = substr($line, strlen($prefix));
+                continue 2;
+            }
+        }
+        foreach ([
+            '__DEV_CONSOLE_APACHE_INSTALLED__=' => 'installed',
+            '__DEV_CONSOLE_APACHE_RUNNING__=' => 'running',
+            '__DEV_CONSOLE_APACHE_ENABLED__=' => 'enabled',
+        ] as $prefix => $field) {
+            if (str_starts_with($line, $prefix)) {
+                $value = substr($line, strlen($prefix));
+                $apache[$field] = $value === 'unknown' ? null : $value === '1';
+                continue 2;
+            }
+        }
+        if (str_starts_with($line, '__DEV_CONSOLE_APACHE_SITE__=')) {
+            $value = substr($line, strlen('__DEV_CONSOLE_APACHE_SITE__='));
+            $parts = array_pad(explode("\t", $value), 7, '');
+            $projectEnvironment = explode('|', (string)($parts[6] ?? ''), 2);
+            $enabledValue = (string)($parts[2] ?? '');
+            $site = [
+                'name' => (string)($parts[0] ?? ''),
+                'path' => (string)($parts[1] ?? ''),
+                'enabled' => in_array($enabledValue, ['0', '1'], true) ? $enabledValue === '1' : null,
+                'server_name' => (string)($parts[3] ?? ''),
+                'document_root' => (string)($parts[4] ?? ''),
+                'managed_marker' => (string)($parts[5] ?? '') === '1',
+                'project_id' => (string)($projectEnvironment[0] ?? ''),
+                'environment' => (string)($projectEnvironment[1] ?? ''),
+            ];
+            if ($site['name'] !== '') {
+                $apacheSites[] = $site;
+            }
+            continue;
+        }
         $filtered[] = $line;
     }
     $lines = $filtered;
     $runtime['php_installed'] = $runtime['php_path'] !== '';
+    $runtime['node_installed'] = $runtime['node_path'] !== '';
+    $runtime['npm_installed'] = $runtime['npm_path'] !== '';
     $runtime['composer_installed'] = $runtime['composer_path'] !== '';
 
     return array_merge([
@@ -720,6 +870,8 @@ function managedServerParseConnectionOutput(string $stdout): array
         'remote_user' => (string)($lines[3] ?? ''),
         'os' => (string)($lines[4] ?? ''),
         'passwordless_sudo' => $passwordlessSudo,
+        'apache' => $apache,
+        'apache_sites' => $apacheSites,
     ], $runtime);
 }
 
@@ -788,7 +940,18 @@ function managedServerRunConnectionTestById(string $operationId): void
 
 function managedServerDiagnosticCommand(): string
 {
-    return 'printf "__DEV_CONSOLE_CONNECTED__\n"; hostname; uname -a; pwd; whoami; if [ -r /etc/os-release ]; then . /etc/os-release; printf "%s\n" "${PRETTY_NAME:-${NAME:-}}"; fi; if [ "$(id -u)" = 0 ]; then printf "__DEV_CONSOLE_SUDO__=root\n"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf "__DEV_CONSOLE_SUDO__=ready\n"; else printf "__DEV_CONSOLE_SUDO__=setup_required\n"; fi; if php_path="$(command -v php 2>/dev/null)"; then printf "__DEV_CONSOLE_PHP_PATH__=%s\n" "$php_path"; php_version="$(php -r ' . managedServersShellQuote('echo PHP_VERSION;') . ' 2>/dev/null || php -v 2>/dev/null | head -n 1 || true)"; printf "__DEV_CONSOLE_PHP_VERSION__=%s\n" "$php_version"; fi; if composer_path="$(command -v composer 2>/dev/null)"; then printf "__DEV_CONSOLE_COMPOSER_PATH__=%s\n" "$composer_path"; composer_version="$(composer --version --no-interaction 2>/dev/null | head -n 1 || true)"; printf "__DEV_CONSOLE_COMPOSER_VERSION__=%s\n" "$composer_version"; fi';
+    return 'printf "__DEV_CONSOLE_CONNECTED__\n"; hostname; uname -a; pwd; whoami; '
+        . 'if [ -r /etc/os-release ]; then . /etc/os-release; printf "%s\n" "${PRETTY_NAME:-${NAME:-}}"; fi; '
+        . 'if [ "$(id -u)" = 0 ]; then printf "__DEV_CONSOLE_SUDO__=root\n"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf "__DEV_CONSOLE_SUDO__=ready\n"; else printf "__DEV_CONSOLE_SUDO__=setup_required\n"; fi; '
+        . 'if php_path="$(command -v php 2>/dev/null)"; then printf "__DEV_CONSOLE_PHP_PATH__=%s\n" "$php_path"; php_version="$(php -r ' . managedServersShellQuote('echo PHP_VERSION;') . ' 2>/dev/null || php -v 2>/dev/null | head -n 1 || true)"; printf "__DEV_CONSOLE_PHP_VERSION__=%s\n" "$php_version"; fi; '
+        . 'if composer_path="$(command -v composer 2>/dev/null)"; then printf "__DEV_CONSOLE_COMPOSER_PATH__=%s\n" "$composer_path"; composer_version="$(composer --version --no-interaction 2>/dev/null | head -n 1 || true)"; printf "__DEV_CONSOLE_COMPOSER_VERSION__=%s\n" "$composer_version"; fi; '
+        . 'if node_path="$(command -v node 2>/dev/null)"; then printf "__DEV_CONSOLE_NODE_PATH__=%s\n" "$node_path"; node_version="$(node --version 2>/dev/null | head -n 1 || true)"; printf "__DEV_CONSOLE_NODE_VERSION__=%s\n" "$node_version"; fi; '
+        . 'if npm_path="$(command -v npm 2>/dev/null)"; then printf "__DEV_CONSOLE_NPM_PATH__=%s\n" "$npm_path"; npm_version="$(npm --version 2>/dev/null | head -n 1 || true)"; printf "__DEV_CONSOLE_NPM_VERSION__=%s\n" "$npm_version"; fi; '
+        . 'apache_path="$(command -v apache2 2>/dev/null || command -v httpd 2>/dev/null || true)"; '
+        . 'if [ -n "$apache_path" ]; then printf "__DEV_CONSOLE_APACHE_INSTALLED__=1\n"; printf "__DEV_CONSOLE_APACHE_PATH__=%s\n" "$apache_path"; apache_version="$("$apache_path" -v 2>/dev/null | sed -n "s/^Server version:[[:space:]]*//p" | head -n 1 || true)"; printf "__DEV_CONSOLE_APACHE_VERSION__=%s\n" "$apache_version"; '
+        . 'if command -v systemctl >/dev/null 2>&1; then if systemctl is-active --quiet apache2 2>/dev/null || systemctl is-active --quiet httpd 2>/dev/null; then printf "__DEV_CONSOLE_APACHE_RUNNING__=1\n"; else printf "__DEV_CONSOLE_APACHE_RUNNING__=0\n"; fi; if systemctl is-enabled --quiet apache2 2>/dev/null || systemctl is-enabled --quiet httpd 2>/dev/null; then printf "__DEV_CONSOLE_APACHE_ENABLED__=1\n"; else printf "__DEV_CONSOLE_APACHE_ENABLED__=0\n"; fi; else printf "__DEV_CONSOLE_APACHE_RUNNING__=unknown\n"; printf "__DEV_CONSOLE_APACHE_ENABLED__=unknown\n"; fi; '
+        . 'else printf "__DEV_CONSOLE_APACHE_INSTALLED__=0\n"; fi; '
+        . 'if [ -d /etc/apache2/sites-available ]; then for conf in /etc/apache2/sites-available/*.conf; do [ -f "$conf" ] || continue; name="$(basename "$conf")"; enabled=0; [ -e "/etc/apache2/sites-enabled/$name" ] && enabled=1; server_name="$(sed -n "s/^[[:space:]]*ServerName[[:space:]]\{1,\}//Ip" "$conf" | head -n 1 | tr "\t" " ")"; document_root="$(sed -n "s/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}//Ip" "$conf" | head -n 1 | tr "\t" " ")"; managed=0; grep -F ' . managedServersShellQuote(defined('DEV_CONSOLE_MANAGED_MARKER') ? DEV_CONSOLE_MANAGED_MARKER : '# Managed by IOVON Dev Console') . ' "$conf" >/dev/null 2>&1 && managed=1; project_id="$(sed -n "s/^#[[:space:]]*Project ID:[[:space:]]*//p;s/^#[[:space:]]*Project:[[:space:]]*//p" "$conf" | head -n 1 | tr "\t" " ")"; environment="$(sed -n "s/^#[[:space:]]*Environment:[[:space:]]*//p" "$conf" | head -n 1 | tr "\t" " ")"; printf "__DEV_CONSOLE_APACHE_SITE__=%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$name" "$conf" "$enabled" "$server_name" "$document_root" "$managed" "$project_id|$environment"; done; fi';
 }
 
 function managedServerRunOperationById(string $operationId): void
@@ -929,9 +1092,17 @@ function managedServerRunConnectionTest(string $operationId, array $server): voi
         'php_installed' => !empty($parsed['php_installed']),
         'php_version' => (string)($parsed['php_version'] ?? ''),
         'php_path' => (string)($parsed['php_path'] ?? ''),
+        'node_installed' => !empty($parsed['node_installed']),
+        'node_version' => (string)($parsed['node_version'] ?? ''),
+        'node_path' => (string)($parsed['node_path'] ?? ''),
+        'npm_installed' => !empty($parsed['npm_installed']),
+        'npm_version' => (string)($parsed['npm_version'] ?? ''),
+        'npm_path' => (string)($parsed['npm_path'] ?? ''),
         'composer_installed' => !empty($parsed['composer_installed']),
         'composer_version' => (string)($parsed['composer_version'] ?? ''),
         'composer_path' => (string)($parsed['composer_path'] ?? ''),
+        'apache' => is_array($parsed['apache'] ?? null) ? $parsed['apache'] : managedServersEmptyServer()['apache'],
+        'apache_sites' => is_array($parsed['apache_sites'] ?? null) ? $parsed['apache_sites'] : [],
         'round_trip_ms' => $roundTripMs,
         'output' => managedServerOperationLog($operationId),
     ];
@@ -1059,9 +1230,17 @@ function managedServerRefreshDiagnosticsAfterOperation(string $operationId, arra
         'php_installed' => !empty($parsed['php_installed']),
         'php_version' => (string)($parsed['php_version'] ?? ''),
         'php_path' => (string)($parsed['php_path'] ?? ''),
+        'node_installed' => !empty($parsed['node_installed']),
+        'node_version' => (string)($parsed['node_version'] ?? ''),
+        'node_path' => (string)($parsed['node_path'] ?? ''),
+        'npm_installed' => !empty($parsed['npm_installed']),
+        'npm_version' => (string)($parsed['npm_version'] ?? ''),
+        'npm_path' => (string)($parsed['npm_path'] ?? ''),
         'composer_installed' => !empty($parsed['composer_installed']),
         'composer_version' => (string)($parsed['composer_version'] ?? ''),
         'composer_path' => (string)($parsed['composer_path'] ?? ''),
+        'apache' => is_array($parsed['apache'] ?? null) ? $parsed['apache'] : managedServersEmptyServer()['apache'],
+        'apache_sites' => is_array($parsed['apache_sites'] ?? null) ? $parsed['apache_sites'] : [],
         'round_trip_ms' => (int)round((microtime(true) - $started) * 1000),
         'output' => managedServerOperationLog($operationId),
     ];
@@ -1190,6 +1369,22 @@ function managedServersUpdateRuntimeDiagnostics(string $serverId, array $result)
             $servers[$index]['php_installed'] = !empty($result['php_installed']);
             $servers[$index]['php_version'] = (string)($result['php_version'] ?? '');
             $servers[$index]['php_path'] = (string)($result['php_path'] ?? '');
+        }
+        foreach (['node', 'npm'] as $tool) {
+            $installedField = $tool . '_installed';
+            $versionField = $tool . '_version';
+            $pathField = $tool . '_path';
+            if (array_key_exists($installedField, $result)) {
+                $servers[$index][$installedField] = !empty($result[$installedField]);
+                $servers[$index][$versionField] = (string)($result[$versionField] ?? '');
+                $servers[$index][$pathField] = (string)($result[$pathField] ?? '');
+            }
+        }
+        if (is_array($result['apache'] ?? null)) {
+            $servers[$index]['apache'] = array_merge(managedServersEmptyServer()['apache'], $result['apache']);
+        }
+        if (is_array($result['apache_sites'] ?? null)) {
+            $servers[$index]['apache_sites'] = $result['apache_sites'];
         }
         managedServersSave($servers);
         return;
