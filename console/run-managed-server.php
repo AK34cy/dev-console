@@ -16,24 +16,38 @@ if (!managedServerOperationValidateId($operationId)) {
 }
 
 try {
-    managedServerRunConnectionTestById($operationId);
+    managedServerRunOperationById($operationId);
     exit(0);
 } catch (Throwable $exception) {
+    managedServerOperationAppendLog($operationId, '[' . date('c') . '] Error: ' . $exception->getMessage());
     try {
-        $state = managedServerOperationRead($operationId);
-        if (!empty($state)) {
-            $state['status'] = 'failed';
-            $state['stage'] = 'Failed';
-            $state['finished_at'] = date('c');
-            $state['message'] = $exception->getMessage();
-            $state['result'] = [
-                'success' => false,
-                'message' => $exception->getMessage(),
-                'output' => managedServerOperationLog($operationId),
+        try {
+            $state = managedServerOperationRead($operationId);
+        } catch (Throwable $stateException) {
+            $state = [
+                'id' => $operationId,
+                'operation_action' => 'unknown',
+                'server_id' => '',
+                'server_name' => '',
+                'status' => 'running',
+                'stage' => 'Starting',
+                'started_at' => date('c'),
+                'updated_at' => date('c'),
+                'finished_at' => '',
+                'message' => $stateException->getMessage(),
+                'result' => null,
             ];
-            managedServerOperationWrite($state);
         }
-        managedServerOperationAppendLog($operationId, '[' . date('c') . '] Error: ' . $exception->getMessage());
+        $state['status'] = 'failed';
+        $state['stage'] = 'Failed';
+        $state['finished_at'] = date('c');
+        $state['message'] = $exception->getMessage();
+        $state['result'] = [
+            'success' => false,
+            'message' => $exception->getMessage(),
+            'output' => managedServerOperationLog($operationId),
+        ];
+        managedServerOperationWrite($state);
     } catch (Throwable) {
         // Detached worker cannot report further.
     }

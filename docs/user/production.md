@@ -8,6 +8,8 @@ Production deployment promotes the current remote Preview contents to the remote
 
 It does not automatically run after Preview deployment.
 
+For Composer projects, dependencies are prepared during Preview deployment. Production promotes the already-prepared Preview tree, including `vendor/`, and does not run `composer install` again.
+
 ## Deploy Production
 
 Deploy Production:

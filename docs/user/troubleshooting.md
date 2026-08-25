@@ -62,7 +62,7 @@ Symptoms: Codex run status is Failed.
 
 Likely reason: Codex authentication, validation, Git commit, or push failed.
 
-What to do next: read the Codex activity and raw log. If work was preserved in IN PROGRESS, retry the same task after fixing the reported issue.
+What to do next: read the Codex activity and raw log. If work was preserved in IN PROGRESS, retry the same task after fixing the reported issue. If the task should not continue, use Drop Task to move it to DROPPED while preserving the task file and failed run log.
 
 ## Preview Deployment Failed
 

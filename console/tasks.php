@@ -251,6 +251,7 @@ function taskStorageContexts(array $configuration, ?array $project): array
         'todo' => $projectRoot . '/TASKS/TODO',
         'in_progress' => $projectRoot . '/TASKS/IN PROGRESS',
         'done' => $projectRoot . '/TASKS/DONE',
+        'dropped' => $projectRoot . '/TASKS/DROPPED',
         'attachments' => taskAttachmentRoot($projectRoot),
         'legacy_attachments' => taskLegacyAttachmentRoot($projectRoot),
         'allow_implicit_ownership' => true,
@@ -268,6 +269,7 @@ function taskStorageContexts(array $configuration, ?array $project): array
                 'todo' => $legacyRoot . '/TASKS/TODO',
                 'in_progress' => $legacyRoot . '/TASKS/IN PROGRESS',
                 'done' => $legacyRoot . '/TASKS/DONE',
+                'dropped' => $legacyRoot . '/TASKS/DROPPED',
                 'attachments' => taskAttachmentRoot($legacyRoot),
                 'legacy_attachments' => taskLegacyAttachmentRoot($legacyRoot),
                 'allow_implicit_ownership' => true,
@@ -308,13 +310,13 @@ function taskGitMetadata(string $repoRoot): array
     }
 
     $metadata = ['commits' => [], 'tags' => []];
-    $history = deploymentCommand(['git', '-C', $repoRoot, 'log', '--format=@@%H%x09%s', '--name-only', '--', 'TASKS/TODO', 'TASKS/IN PROGRESS', 'TASKS/DONE']);
+    $history = deploymentCommand(['git', '-C', $repoRoot, 'log', '--format=@@%H%x09%s', '--name-only', '--', 'TASKS/TODO', 'TASKS/IN PROGRESS', 'TASKS/DONE', 'TASKS/DROPPED']);
     if ($history['exit_code'] === 0) {
         $currentCommit = '';
         foreach (preg_split('/\R/', $history['stdout']) ?: [] as $line) {
             if (str_starts_with($line, '@@')) {
                 [$currentCommit] = explode("\t", substr($line, 2), 2);
-            } elseif ($currentCommit !== '' && preg_match('#^TASKS/(?:TODO|IN PROGRESS|DONE)/(TASK-\d{3})\.md$#', $line, $matches)) {
+            } elseif ($currentCommit !== '' && preg_match('#^TASKS/(?:TODO|IN PROGRESS|DONE|DROPPED)/(TASK-\d{3})\.md$#', $line, $matches)) {
                 $metadata['commits'][$matches[1]] ??= $currentCommit;
             }
         }
@@ -346,7 +348,10 @@ function taskFileEntriesForContext(array $context, string $projectId): array
     $entries = [];
     $gitMetadata = taskGitMetadata((string)$context['root']);
 
-    foreach (['TODO' => (string)$context['todo'], 'IN PROGRESS' => (string)$context['in_progress'], 'DONE' => (string)$context['done']] as $status => $directory) {
+    foreach (['TODO' => (string)$context['todo'], 'IN PROGRESS' => (string)$context['in_progress'], 'DONE' => (string)$context['done'], 'DROPPED' => (string)($context['dropped'] ?? '')] as $status => $directory) {
+        if ($directory === '') {
+            continue;
+        }
         if (!is_dir($directory)) {
             continue;
         }
@@ -437,10 +442,15 @@ function groupedTaskEntries(array $tasks, string $runsDir): array
         'TODO' => [],
         'IN PROGRESS' => [],
         'DONE' => [],
+        'DROPPED' => [],
     ];
 
     foreach ($tasks as $task) {
         $status = (string)($task['status'] ?? '');
+        if ($status === 'DROPPED') {
+            $groups['DROPPED'][] = $task;
+            continue;
+        }
         if ($status === 'DONE') {
             $groups['DONE'][] = $task;
             continue;
@@ -514,7 +524,10 @@ function findTaskForView(array $contexts, string $projectId, string $filename, s
     $contextsToInspect = $source === '' ? $contexts : array_values(array_filter([$context = taskContextForSource($contexts, $source)]));
     $matches = [];
     foreach ($contextsToInspect as $context) {
-        foreach (['TODO' => (string)$context['todo'], 'IN PROGRESS' => (string)$context['in_progress'], 'DONE' => (string)$context['done']] as $status => $directory) {
+        foreach (['TODO' => (string)$context['todo'], 'IN PROGRESS' => (string)$context['in_progress'], 'DONE' => (string)$context['done'], 'DROPPED' => (string)($context['dropped'] ?? '')] as $status => $directory) {
+            if ($directory === '') {
+                continue;
+            }
             $path = $directory . '/' . $filename;
             if (!is_file($path)) {
                 continue;

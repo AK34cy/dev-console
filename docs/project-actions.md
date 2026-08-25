@@ -326,7 +326,7 @@ Safe to repeat: Yes; it uses `rsync --delete`.
 
 Changes local filesystem: Yes, runtime logs/state and temporary archive/source files.
 
-Changes remote server: Yes, replaces Preview directory contents.
+Changes remote server: Yes, replaces Preview directory contents. For Composer projects it also creates/updates `vendor/` in Preview by running Composer remotely.
 
 Changes Git: Local fetch/read-only archive operations.
 
@@ -334,13 +334,13 @@ Changes GitHub: No.
 
 Changes Apache: No.
 
-Requires sudo: No in the deployment module; remote Preview path must be writable by the deployment user.
+Requires sudo: No in the deployment module; remote Preview path must be writable by the deployment user. Composer must already be installed separately when required.
 
 Operation log: Yes.
 
-Success conditions: fetch, archive, rsync, and remote verification all succeed; Preview metadata is saved.
+Success conditions: fetch, archive, dependency checks, rsync, Composer install when required, and remote verification all succeed; Preview metadata is saved.
 
-Failure conditions: Git failure, missing rsync, SSH failure, unwritable Preview path, or empty/unreadable remote result.
+Failure conditions: Git failure, missing rsync, SSH failure, missing `composer.lock`, missing remote PHP/Composer for Composer projects, Composer install failure, unwritable Preview path, or empty/unreadable remote result.
 
 ## Deploy Production
 
@@ -352,7 +352,7 @@ Safe to repeat: Yes; it uses remote `rsync --delete`.
 
 Changes local filesystem: Yes, runtime logs/state and project metadata.
 
-Changes remote server: Yes, replaces Production directory contents from Preview.
+Changes remote server: Yes, replaces Production directory contents from Preview, including `vendor/` when Preview was prepared for a Composer project.
 
 Changes Git: No.
 
@@ -360,7 +360,7 @@ Changes GitHub: No.
 
 Changes Apache: No.
 
-Requires sudo: No in the deployment module; remote Production path must be writable by the deployment user.
+Requires sudo: No in the deployment module; remote Production path must be writable by the deployment user. Production does not run Composer.
 
 Operation log: Yes.
 
@@ -419,6 +419,32 @@ Operation log: Yes.
 Success conditions: Codex exits successfully, validation passes, implementation changes are committed when present, task moves to DONE, and pushes succeed.
 
 Failure conditions: Codex unavailable/unauthenticated, dirty working tree on fresh task, validation failure, Git parsing/staging failure, commit failure, or push failure.
+
+## Drop Task
+
+Purpose: explicitly abandon a TODO task before execution, or abandon a failed IN PROGRESS task while preserving the task file and failed Codex run history.
+
+When to use: when a TODO task was created by mistake or should not run, or when an IN PROGRESS task has a failed Codex run and should not be retried.
+
+Safe to repeat: No after success because the task is terminal in DROPPED.
+
+Changes local filesystem: Yes, moves the task from `TASKS/TODO/` or `TASKS/IN PROGRESS/` to `TASKS/DROPPED/` and updates the task YAML status.
+
+Changes remote server: No.
+
+Changes Git: Yes, commits and pushes the task lifecycle change.
+
+Changes GitHub: Yes, pushes the lifecycle commit.
+
+Changes Apache: No.
+
+Requires sudo: No.
+
+Operation log: Yes, lifecycle activity is appended to the task Codex log.
+
+Success conditions: task is TODO, or task is IN PROGRESS with Codex run status Failed; lifecycle paths are committed, and push succeeds.
+
+Failure conditions: task is not TODO or IN PROGRESS, IN PROGRESS run status is not Failed, task belongs to another project, or Git commit/push fails.
 
 ## Remove from Console
 

@@ -2,6 +2,8 @@
 
 A Managed Server is a Linux server that Dev Console can reach over SSH. Projects use Managed Servers for infrastructure setup, Preview deployment, and Production promotion.
 
+The Servers page is the registry, SSH onboarding, and connectivity page. Use Settings for Dev Console host/runtime configuration. Use Server Management to inspect and operate on the currently selected Managed Server.
+
 ## Server Fields
 
 - Server ID: stable internal identifier.
@@ -45,7 +47,26 @@ Test Connection verifies SSH access and records:
 - working directory
 - response time
 - passwordless sudo readiness
+- PHP availability and version
+- Composer availability and version
+
+## Composer
+
+Composer is a project-dependent Preview deployment prerequisite. If a project contains `composer.json`, the Managed Server must already have PHP and Composer installed before Preview deployment can replace the remote Preview tree.
+
+Use Server Management to install Composer explicitly on the selected Managed Server when the server is reachable and passwordless sudo is ready. Dev Console uses fixed `apt-get` commands over SSH with root or `sudo -n`; deployment never installs Composer automatically.
 
 ## Remove
 
 Remove deletes only the server registration from Dev Console. It does not delete SSH keys, users, remote files, Apache configuration, or project data.
+
+## Server Management
+
+Server Management is scoped to one selected Managed Server. In the current implementation it shows the selected server identity, host, SSH user, reachability, last check, response time, remote OS/kernel values when available, passwordless sudo status, and PHP/Composer diagnostic values.
+
+Server Management provides explicit operational actions for the selected server:
+
+- Refresh Diagnostics
+- Install Composer when Composer is missing and the existing safety prerequisites are met
+
+It does not manage the local Dev Console host. Dev Console host prerequisites and local tool actions are shown in Settings.

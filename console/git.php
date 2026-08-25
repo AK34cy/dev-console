@@ -752,6 +752,7 @@ function gitTaskDocumentationContent(array $project): string
         . "- `TASKS/TODO/` stores open task files.\n"
         . "- `TASKS/IN PROGRESS/` stores the task currently being executed by Codex.\n"
         . "- `TASKS/DONE/` stores completed task files.\n"
+        . "- `TASKS/DROPPED/` stores explicitly abandoned task files.\n"
         . "- `TASKS/attachments/<TASK-ID>/` stores files attached to a task. Older `TASKS/ATTACHMENTS/` directories remain readable.\n\n"
         . "Task numbers are project-specific and use the next available `TASK-001`, `TASK-002`, and so on.\n\n"
         . "Dev Console automatically prepends YAML Front Matter to each task:\n\n"
@@ -759,13 +760,13 @@ function gitTaskDocumentationContent(array $project): string
         . "Current task files include `task_id`, `project_id`, `title`, `status`, `created_at`, `updated_at`, and `attachments` fields. Each attachment entry records the original name, stable path, MIME type, and size.\n\n"
         . "When creating a task manually, keep the YAML Front Matter at the top and write the Markdown task body below it.\n\n"
         . "Use **Use in Workflow** to select a task in Dev Console, then use **Run Codex** to execute it.\n\n"
-        . "Dev Console is the sole owner of task lifecycle state. Codex may read `TASKS/` files and attachments as input, but must not edit, move, delete, rename, stage, or update status/metadata for files under `TASKS/`. Dev Console performs the TODO -> IN PROGRESS -> DONE transitions and commits task lifecycle updates separately from implementation commits.\n";
+        . "Dev Console is the sole owner of task lifecycle state. Codex may read `TASKS/` files and attachments as input, but must not edit, move, delete, rename, stage, or update status/metadata for files under `TASKS/`. Dev Console performs TODO -> IN PROGRESS -> DONE and IN PROGRESS -> DROPPED transitions and commits task lifecycle updates separately from implementation commits.\n";
 }
 
 function gitEnsureTaskDocumentation(array $project, string $path): ?string
 {
     $tasksPath = rtrim($path, '/') . '/TASKS';
-    foreach ([$tasksPath, $tasksPath . '/TODO', $tasksPath . '/IN PROGRESS', $tasksPath . '/DONE', $tasksPath . '/ATTACHMENTS'] as $directory) {
+    foreach ([$tasksPath, $tasksPath . '/TODO', $tasksPath . '/IN PROGRESS', $tasksPath . '/DONE', $tasksPath . '/DROPPED', $tasksPath . '/ATTACHMENTS'] as $directory) {
         if (!is_dir($directory) && !@mkdir($directory, 0755, true) && !is_dir($directory)) {
             throw new RuntimeException('Unable to create TASKS directory.');
         }

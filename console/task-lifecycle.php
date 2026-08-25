@@ -75,6 +75,7 @@ function taskPathForStatus(string $repoRoot, string $status, string $taskId): st
         'TODO' => 'TODO',
         'IN PROGRESS' => 'IN PROGRESS',
         'DONE' => 'DONE',
+        'DROPPED' => 'DROPPED',
         default => throw new RuntimeException('Invalid task status.'),
     };
 
@@ -285,6 +286,7 @@ function taskLifecycleStagePaths(string $repoRoot, string $taskId): array
         'TASKS/TODO/' . $taskId . '.md',
         'TASKS/IN PROGRESS/' . $taskId . '.md',
         'TASKS/DONE/' . $taskId . '.md',
+        'TASKS/DROPPED/' . $taskId . '.md',
     ];
 
     return array_values(array_filter($paths, static function (string $path) use ($repoRoot): bool {
@@ -298,6 +300,7 @@ function taskLifecycleExpectedPaths(string $taskId): array
         'TASKS/TODO/' . $taskId . '.md',
         'TASKS/IN PROGRESS/' . $taskId . '.md',
         'TASKS/DONE/' . $taskId . '.md',
+        'TASKS/DROPPED/' . $taskId . '.md',
     ];
 }
 
@@ -436,6 +439,74 @@ function completeTaskLifecycleTransaction(string $repoRoot, string $taskId, stri
 
     verifyLifecycleRemoteSynchronized($repoRoot, $logPath);
     verifyRepositoryClean($repoRoot, $logPath);
+}
+
+function dropTaskLifecycleTransaction(string $repoRoot, string $taskId, string $projectId, string $logPath): void
+{
+    $inProgress = taskPathForStatus($repoRoot, 'IN PROGRESS', $taskId);
+    $todo = taskPathForStatus($repoRoot, 'TODO', $taskId);
+    $dropped = taskPathForStatus($repoRoot, 'DROPPED', $taskId);
+    if (is_file($todo)) {
+        assertTaskIdentity($todo, $projectId, $taskId, 'TODO');
+        moveTaskFile($repoRoot, $taskId, 'TODO', 'DROPPED');
+        appendActivity($logPath, 'Task moved to DROPPED');
+    } elseif (is_file($inProgress)) {
+        assertTaskIdentity($inProgress, $projectId, $taskId, 'IN PROGRESS');
+        moveTaskFile($repoRoot, $taskId, 'IN PROGRESS', 'DROPPED');
+        appendActivity($logPath, 'Task moved to DROPPED');
+    } elseif (is_file($dropped)) {
+        assertTaskIdentity($dropped, $projectId, $taskId, 'DROPPED');
+        appendActivity($logPath, 'Existing unsynchronized DROPPED transition detected');
+    } else {
+        throw new RuntimeException('Task lifecycle state is ambiguous: expected TODO, IN PROGRESS, or DROPPED for ' . $taskId . '.');
+    }
+
+    $paths = taskLifecycleStagePaths($repoRoot, $taskId);
+    if (empty($paths)) {
+        throw new RuntimeException('Lifecycle changes could not be staged: no task lifecycle paths found.');
+    }
+    $add = runLoggedCommand(array_merge(['git', 'add', '--'], $paths), $repoRoot, $logPath, 120);
+    if ($add['exit_code'] !== 0) {
+        throw new RuntimeException('Lifecycle changes could not be staged.');
+    }
+    appendActivity($logPath, 'Lifecycle changes staged');
+
+    $expected = array_flip(taskLifecycleExpectedPaths($taskId));
+    $stagedPaths = gitNamesFromCommand(runLoggedCommand(array_merge(['git', 'diff', '--cached', '--name-only', '--'], $paths), $repoRoot, $logPath, 30));
+    foreach ($stagedPaths as $path) {
+        if (!isset($expected[$path])) {
+            throw new RuntimeException('Unexpected task lifecycle path staged: ' . $path . '.');
+        }
+    }
+
+    $diff = runLoggedCommand(array_merge(['git', 'diff', '--cached', '--quiet', '--'], $paths), $repoRoot, $logPath, 30);
+    if ($diff['exit_code'] === 0) {
+        appendActivity($logPath, 'Task lifecycle already synchronized');
+        $push = runLoggedCommand(['git', 'push', 'origin', 'main'], $repoRoot, $logPath, 180);
+        if ($push['exit_code'] !== 0) {
+            throw new RuntimeException('Lifecycle push failed.');
+        }
+        appendActivity($logPath, 'Lifecycle pushed');
+        verifyLifecycleRemoteSynchronized($repoRoot, $logPath);
+        return;
+    }
+    if ($diff['exit_code'] !== 1) {
+        throw new RuntimeException('Lifecycle diff verification failed.');
+    }
+
+    $commit = runLoggedCommand(array_merge(['git', 'commit', '-m', $taskId . ': drop task', '--'], $paths), $repoRoot, $logPath, 120);
+    if ($commit['exit_code'] !== 0) {
+        throw new RuntimeException('Lifecycle commit failed.');
+    }
+    appendActivity($logPath, 'Lifecycle commit created');
+
+    $push = runLoggedCommand(['git', 'push', 'origin', 'main'], $repoRoot, $logPath, 180);
+    if ($push['exit_code'] !== 0) {
+        throw new RuntimeException('Lifecycle push failed.');
+    }
+    appendActivity($logPath, 'Lifecycle pushed');
+
+    verifyLifecycleRemoteSynchronized($repoRoot, $logPath);
 }
 
 function codexLifecycleRecoverySourceSynchronized(string $repoRoot, string $commit, string $logPath = ''): bool

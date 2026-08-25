@@ -37,6 +37,12 @@ function managedServersEmptyServer(): array
         'remote_working_directory' => '',
         'remote_user' => '',
         'passwordless_sudo' => 'unknown',
+        'php_installed' => false,
+        'php_version' => '',
+        'php_path' => '',
+        'composer_installed' => false,
+        'composer_version' => '',
+        'composer_path' => '',
         'last_error' => '',
     ];
 }
@@ -58,9 +64,14 @@ function managedServersNormalize(array $input): array
             continue;
         }
         $server = managedServersEmptyServer();
-        foreach (['id', 'name', 'host', 'user', 'auth_method', 'key', 'key_fingerprint', 'description', 'status', 'remote_hostname', 'remote_os', 'remote_kernel', 'remote_working_directory', 'remote_user', 'passwordless_sudo', 'last_error'] as $field) {
+        foreach (['id', 'name', 'host', 'user', 'auth_method', 'key', 'key_fingerprint', 'description', 'status', 'remote_hostname', 'remote_os', 'remote_kernel', 'remote_working_directory', 'remote_user', 'passwordless_sudo', 'php_version', 'php_path', 'composer_version', 'composer_path', 'last_error'] as $field) {
             if (isset($serverInput[$field]) && is_scalar($serverInput[$field])) {
                 $server[$field] = trim((string)$serverInput[$field]);
+            }
+        }
+        foreach (['php_installed', 'composer_installed'] as $field) {
+            if (array_key_exists($field, $serverInput)) {
+                $server[$field] = filter_var($serverInput[$field], FILTER_VALIDATE_BOOLEAN);
             }
         }
         $server['id'] = managedServersNormalizeId($server['id']);
@@ -444,6 +455,12 @@ function managedServersUpsert(array $servers, array $server, string $existingId 
         'remote_working_directory',
         'remote_user',
         'passwordless_sudo',
+        'php_installed',
+        'php_version',
+        'php_path',
+        'composer_installed',
+        'composer_version',
+        'composer_path',
         'last_error',
     ];
     $connectionFields = ['host', 'port', 'user', 'key', 'key_fingerprint'];
@@ -471,6 +488,12 @@ function managedServersUpsert(array $servers, array $server, string $existingId 
                     $server['remote_working_directory'] = '';
                     $server['remote_user'] = '';
                     $server['passwordless_sudo'] = 'unknown';
+                    $server['php_installed'] = false;
+                    $server['php_version'] = '';
+                    $server['php_path'] = '';
+                    $server['composer_installed'] = false;
+                    $server['composer_version'] = '';
+                    $server['composer_path'] = '';
                     $server['last_error'] = '';
                 }
                 $replaced = true;
@@ -527,6 +550,12 @@ function managedServersUpdateConnectionResult(string $serverId, array $result): 
         $servers[$index]['remote_working_directory'] = $success ? (string)($result['working_directory'] ?? '') : '';
         $servers[$index]['remote_user'] = $success ? (string)($result['remote_user'] ?? '') : '';
         $servers[$index]['passwordless_sudo'] = $success ? (string)($result['passwordless_sudo'] ?? 'unknown') : 'unknown';
+        $servers[$index]['php_installed'] = $success && !empty($result['php_installed']);
+        $servers[$index]['php_version'] = $success ? (string)($result['php_version'] ?? '') : '';
+        $servers[$index]['php_path'] = $success ? (string)($result['php_path'] ?? '') : '';
+        $servers[$index]['composer_installed'] = $success && !empty($result['composer_installed']);
+        $servers[$index]['composer_version'] = $success ? (string)($result['composer_version'] ?? '') : '';
+        $servers[$index]['composer_path'] = $success ? (string)($result['composer_path'] ?? '') : '';
         $servers[$index]['last_error'] = $success ? '' : (string)($result['message'] ?? 'SSH connection failed');
         $servers[$index]['key_fingerprint'] = managedServersKeyFingerprint((string)($server['key'] ?? ''));
         managedServersSave($servers);
@@ -560,17 +589,57 @@ function managedServerOperationWrite(array $state): void
     $path = managedServerOperationPath((string)($state['id'] ?? ''), 'json');
     $state['updated_at'] = date('c');
     $json = json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-    if ($json === false || @file_put_contents($path, $json . "\n", LOCK_EX) === false) {
+    if ($json === false) {
         throw new RuntimeException('Unable to write managed server operation state.');
+    }
+    $directory = dirname($path);
+    $temporaryPath = $directory . '/.' . basename($path) . '.tmp.' . bin2hex(random_bytes(8));
+    $handle = @fopen($temporaryPath, 'xb');
+    if ($handle === false) {
+        throw new RuntimeException('Unable to write managed server operation state.');
+    }
+    try {
+        if (@fwrite($handle, $json . "\n") === false || !@fflush($handle)) {
+            throw new RuntimeException('Unable to write managed server operation state.');
+        }
+        if (!@fclose($handle)) {
+            $handle = null;
+            throw new RuntimeException('Unable to write managed server operation state.');
+        }
+        $handle = null;
+        @chmod($temporaryPath, 0600);
+        if (!@rename($temporaryPath, $path)) {
+            throw new RuntimeException('Unable to write managed server operation state.');
+        }
+    } finally {
+        if (is_resource($handle)) {
+            @fclose($handle);
+        }
+        if (is_file($temporaryPath)) {
+            @unlink($temporaryPath);
+        }
     }
 }
 
 function managedServerOperationRead(string $operationId): array
 {
     $path = managedServerOperationPath($operationId, 'json');
-    $decoded = is_file($path) ? json_decode((string)@file_get_contents($path), true) : null;
+    if (!is_file($path)) {
+        throw new RuntimeException('Managed server operation state file is missing.');
+    }
+    if (!is_readable($path)) {
+        throw new RuntimeException('Managed server operation state file is unreadable.');
+    }
+    $contents = @file_get_contents($path);
+    if ($contents === false) {
+        throw new RuntimeException('Unable to read managed server operation state.');
+    }
+    $decoded = json_decode($contents, true);
+    if (!is_array($decoded)) {
+        throw new RuntimeException('Managed server operation state is invalid JSON.');
+    }
 
-    return is_array($decoded) ? $decoded : [];
+    return $decoded;
 }
 
 function managedServerOperationAppendLog(string $operationId, string $message): void
@@ -611,6 +680,14 @@ function managedServerParseConnectionOutput(string $stdout): array
         array_shift($lines);
     }
     $passwordlessSudo = 'unknown';
+    $runtime = [
+        'php_installed' => false,
+        'php_path' => '',
+        'php_version' => '',
+        'composer_installed' => false,
+        'composer_path' => '',
+        'composer_version' => '',
+    ];
     $filtered = [];
     foreach ($lines as $line) {
         if (str_starts_with($line, '__DEV_CONSOLE_SUDO__=')) {
@@ -618,11 +695,24 @@ function managedServerParseConnectionOutput(string $stdout): array
             $passwordlessSudo = in_array($value, ['ready', 'setup_required', 'root'], true) ? $value : 'unknown';
             continue;
         }
+        foreach ([
+            '__DEV_CONSOLE_PHP_PATH__=' => 'php_path',
+            '__DEV_CONSOLE_PHP_VERSION__=' => 'php_version',
+            '__DEV_CONSOLE_COMPOSER_PATH__=' => 'composer_path',
+            '__DEV_CONSOLE_COMPOSER_VERSION__=' => 'composer_version',
+        ] as $prefix => $field) {
+            if (str_starts_with($line, $prefix)) {
+                $runtime[$field] = substr($line, strlen($prefix));
+                continue 2;
+            }
+        }
         $filtered[] = $line;
     }
     $lines = $filtered;
+    $runtime['php_installed'] = $runtime['php_path'] !== '';
+    $runtime['composer_installed'] = $runtime['composer_path'] !== '';
 
-    return [
+    return array_merge([
         'hostname' => (string)($lines[0] ?? ''),
         'uname' => (string)($lines[1] ?? ''),
         'kernel' => (string)($lines[1] ?? ''),
@@ -630,18 +720,36 @@ function managedServerParseConnectionOutput(string $stdout): array
         'remote_user' => (string)($lines[3] ?? ''),
         'os' => (string)($lines[4] ?? ''),
         'passwordless_sudo' => $passwordlessSudo,
-    ];
+    ], $runtime);
 }
 
 function managedServerStartConnectionTest(array $servers, string $serverId): array
+{
+    return managedServerStartOperation($servers, $serverId, 'connection_test');
+}
+
+function managedServerStartComposerInstall(array $servers, string $serverId): array
+{
+    return managedServerStartOperation($servers, $serverId, 'install_composer');
+}
+
+function managedServerStartOperation(array $servers, string $serverId, string $operationAction): array
 {
     $server = managedServersFind($servers, $serverId);
     if ($server === null) {
         throw new RuntimeException('Managed server not found.');
     }
+    if (!in_array($operationAction, ['connection_test', 'install_composer'], true)) {
+        throw new RuntimeException('Unsupported managed server operation.');
+    }
+    if ($operationAction === 'install_composer' && (string)($server['status'] ?? '') !== 'reachable') {
+        throw new RuntimeException('Test the managed server connection successfully before installing Composer.');
+    }
     $operationId = 'mso_' . bin2hex(random_bytes(16));
+    $message = $operationAction === 'install_composer' ? 'Installing Composer.' : 'Testing SSH connection.';
     $state = [
         'id' => $operationId,
+        'operation_action' => $operationAction,
         'server_id' => $serverId,
         'server_name' => (string)$server['name'],
         'status' => 'running',
@@ -649,11 +757,11 @@ function managedServerStartConnectionTest(array $servers, string $serverId): arr
         'started_at' => date('c'),
         'updated_at' => date('c'),
         'finished_at' => '',
-        'message' => 'Testing SSH connection.',
+        'message' => $message,
         'result' => null,
     ];
     managedServerOperationWrite($state);
-    managedServerOperationAppendLog($operationId, '[' . date('c') . '] Starting SSH connection test for ' . (string)$server['name'] . '.');
+    managedServerOperationAppendLog($operationId, '[' . date('c') . '] ' . $message . ' Server: ' . (string)$server['name'] . '.');
 
     $worker = __DIR__ . '/run-managed-server.php';
     $command = 'nohup ' . escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($worker) . ' ' . escapeshellarg($operationId) . ' >/dev/null 2>&1 & echo $!';
@@ -666,25 +774,43 @@ function managedServerStartConnectionTest(array $servers, string $serverId): arr
         managedServerOperationWrite($state);
         throw new RuntimeException('Unable to start managed server worker.');
     }
-    $state['pid'] = $pid;
-    managedServerOperationWrite($state);
+    $latestState = managedServerOperationRead($operationId);
+    $latestState['pid'] = $pid;
+    managedServerOperationWrite($latestState);
 
     return managedServerOperationRead($operationId);
 }
 
 function managedServerRunConnectionTestById(string $operationId): void
 {
+    managedServerRunOperationById($operationId);
+}
+
+function managedServerDiagnosticCommand(): string
+{
+    return 'printf "__DEV_CONSOLE_CONNECTED__\n"; hostname; uname -a; pwd; whoami; if [ -r /etc/os-release ]; then . /etc/os-release; printf "%s\n" "${PRETTY_NAME:-${NAME:-}}"; fi; if [ "$(id -u)" = 0 ]; then printf "__DEV_CONSOLE_SUDO__=root\n"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf "__DEV_CONSOLE_SUDO__=ready\n"; else printf "__DEV_CONSOLE_SUDO__=setup_required\n"; fi; if php_path="$(command -v php 2>/dev/null)"; then printf "__DEV_CONSOLE_PHP_PATH__=%s\n" "$php_path"; php_version="$(php -r ' . managedServersShellQuote('echo PHP_VERSION;') . ' 2>/dev/null || php -v 2>/dev/null | head -n 1 || true)"; printf "__DEV_CONSOLE_PHP_VERSION__=%s\n" "$php_version"; fi; if composer_path="$(command -v composer 2>/dev/null)"; then printf "__DEV_CONSOLE_COMPOSER_PATH__=%s\n" "$composer_path"; composer_version="$(composer --version --no-interaction 2>/dev/null | head -n 1 || true)"; printf "__DEV_CONSOLE_COMPOSER_VERSION__=%s\n" "$composer_version"; fi';
+}
+
+function managedServerRunOperationById(string $operationId): void
+{
     $state = managedServerOperationRead($operationId);
-    if (empty($state)) {
-        throw new RuntimeException('Managed server operation not found.');
-    }
     $serverId = (string)($state['server_id'] ?? '');
     $server = managedServersFind(managedServersLoad(), $serverId);
     if ($server === null) {
         throw new RuntimeException('Managed server not found.');
     }
 
-    managedServerRunConnectionTest($operationId, $server);
+    $operationAction = (string)($state['operation_action'] ?? 'connection_test');
+    if ($operationAction === 'install_composer') {
+        managedServerRunComposerInstall($operationId, $server);
+        return;
+    }
+    if ($operationAction === 'connection_test') {
+        managedServerRunConnectionTest($operationId, $server);
+        return;
+    }
+
+    throw new RuntimeException('Unsupported managed server operation.');
 }
 
 function managedServerRunConnectionTest(string $operationId, array $server): void
@@ -758,9 +884,7 @@ function managedServerRunConnectionTest(string $operationId, array $server): voi
         '-o', 'ConnectTimeout=8',
         '-o', 'StrictHostKeyChecking=accept-new',
         $target,
-        'sh',
-        '-c',
-        'printf "__DEV_CONSOLE_CONNECTED__\n"; hostname; uname -a; pwd; whoami; if [ -r /etc/os-release ]; then . /etc/os-release; printf "%s\n" "${PRETTY_NAME:-${NAME:-}}"; fi; if [ "$(id -u)" = 0 ]; then printf "__DEV_CONSOLE_SUDO__=root\n"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf "__DEV_CONSOLE_SUDO__=ready\n"; else printf "__DEV_CONSOLE_SUDO__=setup_required\n"; fi',
+        managedServerDiagnosticCommand(),
     ];
     managedServerOperationAppendLog($operationId, '$ ssh [managed-server-options] ' . $target . ' [diagnostic-command]');
     $result = processRunCommand($arguments, [
@@ -802,6 +926,12 @@ function managedServerRunConnectionTest(string $operationId, array $server): voi
         'working_directory' => (string)$parsed['working_directory'],
         'remote_user' => (string)$parsed['remote_user'],
         'passwordless_sudo' => (string)$parsed['passwordless_sudo'],
+        'php_installed' => !empty($parsed['php_installed']),
+        'php_version' => (string)($parsed['php_version'] ?? ''),
+        'php_path' => (string)($parsed['php_path'] ?? ''),
+        'composer_installed' => !empty($parsed['composer_installed']),
+        'composer_version' => (string)($parsed['composer_version'] ?? ''),
+        'composer_path' => (string)($parsed['composer_path'] ?? ''),
         'round_trip_ms' => $roundTripMs,
         'output' => managedServerOperationLog($operationId),
     ];
@@ -816,12 +946,259 @@ function managedServerRunConnectionTest(string $operationId, array $server): voi
     managedServerOperationAppendLog($operationId, '[' . date('c') . '] ' . $state['stage'] . '.');
 }
 
+function managedServerRemoteSshArguments(array $server, string $remoteCommand): array
+{
+    return [
+        managedServersSshExecutable(),
+        '-i', (string)$server['key'],
+        '-p', (string)((int)$server['port']),
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=10',
+        '-o', 'StrictHostKeyChecking=accept-new',
+        (string)$server['user'] . '@' . (string)$server['host'],
+        $remoteCommand,
+    ];
+}
+
+function managedServerOperationRunRemoteCommand(string $operationId, array $server, string $remoteCommand, int $timeout = 120): array
+{
+    managedServerOperationAppendLog($operationId, '$ ssh [managed-server-options] ' . (string)$server['user'] . '@' . (string)$server['host'] . ' ' . managedServersShellQuote($remoteCommand));
+    $result = processRunCommand(managedServerRemoteSshArguments($server, $remoteCommand), [
+        'timeout' => $timeout,
+        'env' => ['PATH' => serverToolsDefaultPath()],
+        'inherit_env' => false,
+    ]);
+    managedServerOperationAppendLog($operationId, 'Exit code: ' . (string)$result['exit_code']);
+    if (trim((string)$result['output']) !== '') {
+        managedServerOperationAppendLog($operationId, trim((string)$result['output']));
+    }
+
+    return $result;
+}
+
+function managedServerComposerInstallCheckCommand(): string
+{
+    return 'printf "__DEV_CONSOLE_SERVER_CHECK__\n"; '
+        . 'if [ -r /etc/os-release ]; then . /etc/os-release; printf "__DEV_CONSOLE_OS_ID__=%s\n" "${ID:-}"; printf "__DEV_CONSOLE_OS_LIKE__=%s\n" "${ID_LIKE:-}"; fi; '
+        . 'if [ "$(id -u)" = 0 ]; then printf "__DEV_CONSOLE_SUDO__=root\n"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf "__DEV_CONSOLE_SUDO__=ready\n"; else printf "__DEV_CONSOLE_SUDO__=setup_required\n"; fi; '
+        . 'if composer_path="$(command -v composer 2>/dev/null)"; then printf "__DEV_CONSOLE_COMPOSER_PATH__=%s\n" "$composer_path"; composer --version --no-interaction 2>/dev/null | sed "s/^/__DEV_CONSOLE_COMPOSER_VERSION__=/"; fi';
+}
+
+function managedServerParseComposerInstallCheck(string $stdout): array
+{
+    $result = [
+        'os_id' => '',
+        'os_like' => '',
+        'passwordless_sudo' => 'unknown',
+        'composer_path' => '',
+        'composer_version' => '',
+    ];
+    foreach (preg_split('/\R/', $stdout) ?: [] as $line) {
+        $line = trim($line);
+        foreach ([
+            '__DEV_CONSOLE_OS_ID__=' => 'os_id',
+            '__DEV_CONSOLE_OS_LIKE__=' => 'os_like',
+            '__DEV_CONSOLE_SUDO__=' => 'passwordless_sudo',
+            '__DEV_CONSOLE_COMPOSER_PATH__=' => 'composer_path',
+            '__DEV_CONSOLE_COMPOSER_VERSION__=' => 'composer_version',
+        ] as $prefix => $field) {
+            if (str_starts_with($line, $prefix)) {
+                $result[$field] = substr($line, strlen($prefix));
+                continue 2;
+            }
+        }
+    }
+
+    return $result;
+}
+
+function managedServerRemotePrivilegedPrefix(array $server): string
+{
+    return (string)($server['user'] ?? '') === 'root' ? '' : 'sudo -n ';
+}
+
+function managedServerComposerInstallCommand(array $server): string
+{
+    if ((string)($server['user'] ?? '') === 'root') {
+        return 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y composer';
+    }
+
+    return 'sudo -n apt-get update && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y composer';
+}
+
+function managedServerComposerVerifyCommand(): string
+{
+    return 'command -v composer && composer --version --no-interaction';
+}
+
+function managedServerRefreshDiagnosticsAfterOperation(string $operationId, array $server, float $started): array
+{
+    managedServerOperationAppendLog($operationId, '[' . date('c') . '] Refreshing managed server diagnostics.');
+    $diagnostic = managedServerOperationRunRemoteCommand($operationId, $server, managedServerDiagnosticCommand(), 30);
+    if ((int)$diagnostic['exit_code'] !== 0) {
+        managedServerOperationAppendLog($operationId, '[' . date('c') . '] Warning: Diagnostics refresh failed after the operation.');
+
+        return [
+            'success' => true,
+            'message' => 'Operation completed, but diagnostics refresh failed.',
+            'output' => managedServerOperationLog($operationId),
+        ];
+    }
+
+    $parsed = managedServerParseConnectionOutput((string)$diagnostic['stdout']);
+    $resultData = [
+        'success' => true,
+        'message' => 'Diagnostics refreshed.',
+        'hostname' => (string)$parsed['hostname'],
+        'os' => (string)$parsed['os'],
+        'kernel' => (string)$parsed['kernel'],
+        'uname' => (string)$parsed['uname'],
+        'working_directory' => (string)$parsed['working_directory'],
+        'remote_user' => (string)$parsed['remote_user'],
+        'passwordless_sudo' => (string)$parsed['passwordless_sudo'],
+        'php_installed' => !empty($parsed['php_installed']),
+        'php_version' => (string)($parsed['php_version'] ?? ''),
+        'php_path' => (string)($parsed['php_path'] ?? ''),
+        'composer_installed' => !empty($parsed['composer_installed']),
+        'composer_version' => (string)($parsed['composer_version'] ?? ''),
+        'composer_path' => (string)($parsed['composer_path'] ?? ''),
+        'round_trip_ms' => (int)round((microtime(true) - $started) * 1000),
+        'output' => managedServerOperationLog($operationId),
+    ];
+    managedServersUpdateConnectionResult((string)$server['id'], $resultData);
+
+    return $resultData;
+}
+
+function managedServerRunComposerInstall(string $operationId, array $server): void
+{
+    $started = microtime(true);
+    $state = managedServerOperationRead($operationId);
+    $state['stage'] = 'Checking Server';
+    $state['message'] = 'Checking SSH, sudo and Composer state.';
+    managedServerOperationWrite($state);
+
+    $ssh = managedServersSshExecutable();
+    if ($ssh === '') {
+        throw new RuntimeException('SSH executable missing.');
+    }
+    if (!is_file((string)$server['key']) || !is_readable((string)$server['key'])) {
+        throw new RuntimeException('Key file missing.');
+    }
+    if (!managedServersKeyPermissionsValid((string)$server['key'])) {
+        throw new RuntimeException('Invalid key permissions.');
+    }
+
+    $check = managedServerOperationRunRemoteCommand($operationId, $server, managedServerComposerInstallCheckCommand(), 30);
+    if ($check['exit_code'] !== 0) {
+        throw new RuntimeException(managedServerConnectionResultMessage((string)$check['output']));
+    }
+    $parsed = managedServerParseComposerInstallCheck((string)$check['stdout']);
+    $sudoState = (string)$parsed['passwordless_sudo'];
+    if (!in_array($sudoState, ['root', 'ready'], true)) {
+        throw new RuntimeException('Passwordless sudo is not configured for this deployment user. Run the Managed Server setup command again as root.');
+    }
+    $osId = strtolower((string)$parsed['os_id']);
+    $osLike = strtolower((string)$parsed['os_like']);
+    if ($osId !== 'ubuntu' && $osId !== 'debian' && !str_contains($osLike, 'debian')) {
+        throw new RuntimeException('Composer installation is supported only for Ubuntu/Debian managed servers.');
+    }
+    if ((string)$parsed['composer_path'] !== '') {
+        $resultData = [
+            'success' => true,
+            'message' => 'Composer is already installed.',
+            'composer_installed' => true,
+            'composer_path' => (string)$parsed['composer_path'],
+            'composer_version' => (string)$parsed['composer_version'],
+            'output' => managedServerOperationLog($operationId),
+        ];
+        managedServersUpdateRuntimeDiagnostics((string)$server['id'], $resultData);
+        $diagnosticData = managedServerRefreshDiagnosticsAfterOperation($operationId, $server, $started);
+        $resultData = array_merge($resultData, $diagnosticData, [
+            'success' => true,
+            'message' => 'Composer is already installed.',
+            'output' => managedServerOperationLog($operationId),
+        ]);
+        $state['finished_at'] = date('c');
+        $state['status'] = 'completed';
+        $state['stage'] = 'Completed';
+        $state['message'] = 'Composer is already installed.';
+        $state['result'] = $resultData;
+        $state['elapsed_seconds'] = max(0, (int)round(microtime(true) - $started));
+        managedServerOperationWrite($state);
+        managedServerOperationAppendLog($operationId, '[' . date('c') . '] Composer is already installed.');
+        return;
+    }
+
+    $state['stage'] = 'Installing Composer';
+    $state['message'] = 'Installing Composer with apt-get.';
+    managedServerOperationWrite($state);
+    $install = managedServerOperationRunRemoteCommand($operationId, $server, managedServerComposerInstallCommand($server), 600);
+    if ($install['exit_code'] !== 0) {
+        throw new RuntimeException('Composer installation failed.');
+    }
+
+    $verify = managedServerOperationRunRemoteCommand($operationId, $server, managedServerComposerVerifyCommand(), 30);
+    if ($verify['exit_code'] !== 0 || trim((string)$verify['stdout']) === '') {
+        throw new RuntimeException('Composer installation completed but composer --version failed.');
+    }
+    $verifyLines = explode("\n", trim((string)$verify['stdout']));
+    $composerPath = trim((string)($verifyLines[0] ?? ''));
+    $composerVersion = trim((string)($verifyLines[1] ?? ''));
+    $resultData = [
+        'success' => true,
+        'message' => 'Composer installed.',
+        'composer_installed' => true,
+        'composer_path' => $composerPath,
+        'composer_version' => $composerVersion,
+        'output' => managedServerOperationLog($operationId),
+    ];
+    managedServersUpdateRuntimeDiagnostics((string)$server['id'], $resultData);
+    $diagnosticData = managedServerRefreshDiagnosticsAfterOperation($operationId, $server, $started);
+    $resultData = array_merge($resultData, $diagnosticData, [
+        'success' => true,
+        'message' => 'Composer installed.',
+        'composer_installed' => true,
+        'composer_path' => $composerPath,
+        'composer_version' => $composerVersion,
+        'output' => managedServerOperationLog($operationId),
+    ]);
+    $state = managedServerOperationRead($operationId);
+    $state['finished_at'] = date('c');
+    $state['status'] = 'completed';
+    $state['stage'] = 'Completed';
+    $state['message'] = 'Composer installed.';
+    $state['result'] = $resultData;
+    $state['elapsed_seconds'] = max(0, (int)round(microtime(true) - $started));
+    managedServerOperationWrite($state);
+    managedServerOperationAppendLog($operationId, '[' . date('c') . '] Composer installed.');
+}
+
+function managedServersUpdateRuntimeDiagnostics(string $serverId, array $result): void
+{
+    $servers = managedServersLoad();
+    foreach ($servers as $index => $server) {
+        if ((string)($server['id'] ?? '') !== $serverId) {
+            continue;
+        }
+        if (array_key_exists('composer_installed', $result)) {
+            $servers[$index]['composer_installed'] = !empty($result['composer_installed']);
+            $servers[$index]['composer_version'] = (string)($result['composer_version'] ?? '');
+            $servers[$index]['composer_path'] = (string)($result['composer_path'] ?? '');
+        }
+        if (array_key_exists('php_installed', $result)) {
+            $servers[$index]['php_installed'] = !empty($result['php_installed']);
+            $servers[$index]['php_version'] = (string)($result['php_version'] ?? '');
+            $servers[$index]['php_path'] = (string)($result['php_path'] ?? '');
+        }
+        managedServersSave($servers);
+        return;
+    }
+}
+
 function managedServerOperationStatus(string $operationId): array
 {
     $state = managedServerOperationRead($operationId);
-    if (empty($state)) {
-        throw new RuntimeException('Managed server operation not found.');
-    }
     $state['log'] = managedServerOperationLog($operationId);
     $startedAt = strtotime((string)($state['started_at'] ?? '')) ?: time();
     $finishedAt = strtotime((string)($state['finished_at'] ?? '')) ?: time();

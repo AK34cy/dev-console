@@ -450,6 +450,38 @@ function previewDeploymentRemoteVerifyCommand(string $remotePath): string
         . ' && find ' . $path . ' -mindepth 1 -maxdepth 1 -print -quit';
 }
 
+function previewDeploymentComposerRequirement(string $sourceDirectory): array
+{
+    $composerJson = rtrim($sourceDirectory, '/') . '/composer.json';
+    if (!is_file($composerJson)) {
+        return ['required' => false, 'lock_present' => false];
+    }
+
+    return [
+        'required' => true,
+        'lock_present' => is_file(rtrim($sourceDirectory, '/') . '/composer.lock'),
+    ];
+}
+
+function previewDeploymentRemoteComposerPrerequisiteCommand(): string
+{
+    return 'if ! command -v php >/dev/null 2>&1; then printf "%s\n" "__DEV_CONSOLE_PHP_MISSING__"; exit 20; fi; '
+        . 'command -v php; php -v; '
+        . 'if ! command -v composer >/dev/null 2>&1; then printf "%s\n" "__DEV_CONSOLE_COMPOSER_MISSING__"; exit 21; fi; '
+        . 'command -v composer; composer --version --no-interaction';
+}
+
+function previewDeploymentRemoteComposerInstallCommand(string $remotePath): string
+{
+    $path = previewDeploymentShellPath($remotePath);
+    return 'cd ' . $path . ' && composer install --no-dev --prefer-dist --no-interaction --no-progress';
+}
+
+function previewDeploymentRemoteComposerAutoloadVerifyCommand(string $remotePath): string
+{
+    return 'test -r ' . previewDeploymentShellPath(rtrim($remotePath, '/') . '/vendor/autoload.php');
+}
+
 function previewDeploymentRemoteNormalizeRootCommand(string $remotePath): string
 {
     return projectRemoteEnvironmentRootPermissionCommand($remotePath);
@@ -485,20 +517,25 @@ function previewDeploymentRsyncArguments(array $server, string $sourceDirectory,
         '-o', 'StrictHostKeyChecking=accept-new',
     ]));
     $target = (string)$server['user'] . '@' . (string)$server['host'] . ':' . rtrim($remotePath, '/') . '/';
-    return [
+    $arguments = [
         previewDeploymentLocalRsync(),
         '-a',
         '--delete',
         '--itemize-changes',
         '--no-owner',
         '--no-group',
+    ];
+    if (!is_file(rtrim($sourceDirectory, '/') . '/.env')) {
+        $arguments[] = '--filter=- /.env';
+    }
+    return array_merge($arguments, [
         '--exclude=.git/',
         '--exclude=TASKS/',
         '-e',
         $ssh,
         rtrim($sourceDirectory, '/') . '/',
         $target,
-    ];
+    ]);
 }
 
 function previewDeploymentRemoveDirectory(string $path): void
@@ -588,6 +625,29 @@ function previewDeploymentRun(string $operationId, string $projectId): void
         }
         $documentRoot = projectEnvironmentDocumentRoot($project, 'preview', $sourceDirectory);
         $usesPublicWebRoot = projectSourceUsesPublicWebRoot($sourceDirectory);
+        previewDeploymentSetStage($operationId, 'Detecting Dependencies', 'Checking whether the deployment source requires Composer dependencies.');
+        $composerRequirement = previewDeploymentComposerRequirement($sourceDirectory);
+        $composerRequired = !empty($composerRequirement['required']);
+        if ($composerRequired && empty($composerRequirement['lock_present'])) {
+            throw new RuntimeException("composer.json exists but composer.lock is missing.\nGenerate and commit composer.lock before deployment.");
+        }
+        if ($composerRequired) {
+            previewDeploymentSetStage($operationId, 'Checking Runtime', 'Checking PHP and Composer on the Managed Server before modifying Preview.');
+            $composerPrerequisites = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, previewDeploymentRemoteComposerPrerequisiteCommand()), [
+                'timeout' => 30,
+                'env' => ['PATH' => serverToolsDefaultPath()],
+                'inherit_env' => false,
+            ]);
+            if ($composerPrerequisites['exit_code'] === 20 || str_contains((string)$composerPrerequisites['stdout'], '__DEV_CONSOLE_PHP_MISSING__')) {
+                throw new RuntimeException('PHP is required by this project but is not installed on Managed Server "' . (string)($server['name'] ?? $server['id']) . '".');
+            }
+            if ($composerPrerequisites['exit_code'] === 21 || str_contains((string)$composerPrerequisites['stdout'], '__DEV_CONSOLE_COMPOSER_MISSING__')) {
+                throw new RuntimeException('Composer is required by this project but is not installed on Managed Server "' . (string)($server['name'] ?? $server['id']) . "\".\nInstall the Composer prerequisite and retry Preview deployment.");
+            }
+            if ($composerPrerequisites['exit_code'] !== 0) {
+                throw new RuntimeException('Runtime prerequisite check failed on Managed Server "' . (string)($server['name'] ?? $server['id']) . '".');
+            }
+        }
 
         previewDeploymentSetStage($operationId, 'Checking Managed Server', 'Preparing the remote Preview directory.');
         $remotePrep = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, previewDeploymentRemotePrepareCommand($remotePath)), [
@@ -625,6 +685,25 @@ function previewDeploymentRun(string $operationId, string $projectId): void
         if ($normalizeRoot['exit_code'] !== 0) {
             throw new RuntimeException('Preview files were transferred, but the Preview root permissions could not be normalized.');
         }
+        if ($composerRequired) {
+            previewDeploymentSetStage($operationId, 'Installing Dependencies', 'Running Composer install in remote Preview.');
+            $composerInstall = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, previewDeploymentRemoteComposerInstallCommand($remotePath)), [
+                'timeout' => 600,
+                'env' => ['PATH' => serverToolsDefaultPath()],
+                'inherit_env' => false,
+            ]);
+            if ($composerInstall['exit_code'] !== 0) {
+                throw new RuntimeException('Composer install failed.');
+            }
+            $composerAutoload = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, previewDeploymentRemoteComposerAutoloadVerifyCommand($remotePath)), [
+                'timeout' => 30,
+                'env' => ['PATH' => serverToolsDefaultPath()],
+                'inherit_env' => false,
+            ]);
+            if ($composerAutoload['exit_code'] !== 0) {
+                throw new RuntimeException('Composer completed but vendor/autoload.php was not created or is not readable.');
+            }
+        }
 
         previewDeploymentSetStage($operationId, 'Verifying Preview', 'Verifying remote Preview directory and deployed files.');
         $verify = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, previewDeploymentRemoteVerifyCommand($remotePath)), [
@@ -653,6 +732,7 @@ function previewDeploymentRun(string $operationId, string $projectId): void
             'managed_server_id' => (string)$server['id'],
             'remote_path' => $remotePath,
             'document_root' => $documentRoot,
+            'composer_dependencies' => $composerRequired,
             'duration_ms' => $durationMs,
         ];
         previewDeploymentPersist(devConsoleLoadProjectConfiguration(), $projectId, [

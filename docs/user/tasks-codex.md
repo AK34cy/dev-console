@@ -7,13 +7,14 @@ Tasks live inside the current Project repository under `TASKS/`.
 - `TASKS/TODO`: tasks waiting to run.
 - `TASKS/IN PROGRESS`: tasks currently being worked on or retryable after failure.
 - `TASKS/DONE`: completed tasks.
+- `TASKS/DROPPED`: explicitly abandoned failed tasks.
 - `TASKS/attachments`: task-scoped attachments. Older `TASKS/ATTACHMENTS` directories remain readable.
 
 Each task contains generated YAML Front Matter with task metadata. Users edit the task body, not the metadata.
 
 ## Create Task
 
-Create Task writes the next Project-specific task file, saves attachments, commits the task, pushes to GitHub, and selects it for workflow.
+New Task explicitly starts creation of another task. Save Task writes the next Project-specific task file, saves attachments, commits the task, pushes to GitHub, and keeps the saved TODO task selected in the editor and Current Workflow.
 
 The front matter contains at least:
 
@@ -32,6 +33,8 @@ attachments: []
 Uploaded attachments are stored under `TASKS/attachments/<TASK-ID>/` and listed in the task YAML with name, path, MIME type, and size. Selecting **Use in Workflow** restores the task body and attachment list from the repository.
 
 Dev Console owns task lifecycle state. Codex may read task Markdown, YAML metadata, and attachments as context, but it must not edit, move, delete, rename, stage, or update status/metadata for files under `TASKS/`.
+
+TODO tasks remain editable before execution. Saving an existing TODO task updates that same task and keeps it open.
 
 ## Attachments
 
@@ -68,6 +71,12 @@ Implementation commits never include `TASKS/` changes. Dev Console commits task 
 
 If a Codex run fails after preserving work, the same IN PROGRESS task can be retried. Dev Console should preserve implementation changes for the retry rather than requiring manual reset.
 
+## Drop Task
+
+If a TODO task should not be executed, use Drop Task. If an IN PROGRESS task has a failed Codex run and should not continue, use Drop Task. Dev Console moves the task file to `TASKS/DROPPED`, updates the YAML status to `DROPPED`, commits and pushes that lifecycle change, and leaves any failed Codex run status/log intact.
+
+DROPPED tasks are terminal. They are listed separately and are not editable or runnable.
+
 ## Practical Loop
 
-Create Task -> Run Codex -> Review result -> Deploy Preview.
+New Task -> Save Task -> Run Codex -> Review result -> Deploy Preview.

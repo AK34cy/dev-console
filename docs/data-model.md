@@ -367,6 +367,7 @@ Task file location defines task state:
 - `TASKS/TODO/<task-id>.md`
 - `TASKS/IN PROGRESS/<task-id>.md`
 - `TASKS/DONE/<task-id>.md`
+- `TASKS/DROPPED/<task-id>.md`
 
 Attachments are stored under:
 

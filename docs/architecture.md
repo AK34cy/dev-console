@@ -149,6 +149,7 @@ TASKS/
   TODO/
   IN PROGRESS/
   DONE/
+  DROPPED/
   ATTACHMENTS/
 ```
 
@@ -160,9 +161,11 @@ project_id: <project-id>
 ---
 ```
 
-Task numbers are project-specific. Task lists are grouped as TODO, IN PROGRESS, and DONE. Attachments are scoped by project and task ID.
+Task numbers are project-specific. Task lists are grouped as TODO, IN PROGRESS, DONE, and DROPPED. Attachments are scoped by project and task ID.
 
 When Codex runs a task, Dev Console moves the task from TODO to IN PROGRESS, runs Codex inside the project repository, commits implementation changes outside `TASKS/`, then moves the task to DONE and commits the task lifecycle update separately.
+
+If an IN PROGRESS task has a failed Codex run, the user can retry it or explicitly drop it. Dropping moves the task to DROPPED and commits only the lifecycle change; the failed Codex run status remains separate.
 
 ## Deployment Architecture
 

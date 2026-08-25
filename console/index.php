@@ -354,6 +354,7 @@ $prompt = '';
 $error = '';
 $taskSaveMessage = '';
 $taskAttachmentMessage = '';
+$taskLifecycleMessage = '';
 $apacheActionResult = null;
 $projectActionResult = null;
 $githubActionResult = null;
@@ -655,6 +656,46 @@ if ($action === 'recover_codex_lifecycle' && $requestMethod === 'POST') {
     }
 }
 
+if ($action === 'drop_task' && $requestMethod === 'POST') {
+    $taskId = (string)($_POST['task'] ?? '');
+    $taskSource = (string)($_POST['task_source'] ?? 'project');
+    try {
+        if (!hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+            throw new RuntimeException('Invalid task drop request.');
+        }
+        if ($activeProject === null || $activeProjectId === '') {
+            throw new RuntimeException('Select a Project before dropping a task.');
+        }
+        if ($taskSource !== 'project') {
+            throw new RuntimeException('Only Project tasks can be dropped.');
+        }
+        $task = findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', $taskSource);
+        if (!isTaskId($taskId) || $task === null) {
+            throw new RuntimeException('Task does not belong to the active Project.');
+        }
+        $taskStatusForDrop = (string)($task['status'] ?? '');
+        if (!in_array($taskStatusForDrop, ['TODO', 'IN PROGRESS'], true)) {
+            throw new RuntimeException('Only TODO or IN PROGRESS tasks can be dropped.');
+        }
+        if ($taskStatusForDrop === 'IN PROGRESS' && codexRunStatus($runsDir, $taskId, $taskSource) !== 'failed') {
+            throw new RuntimeException('Drop Task is available only after a failed Codex run.');
+        }
+        ensureRunsDir($runsDir);
+        $logPath = workerRunFile($runsDir, $taskId, 'log', $taskSource);
+        appendActivity($logPath, 'Drop task requested');
+        dropTaskLifecycleTransaction($repoRoot, $taskId, $activeProjectId, $logPath);
+        appendActivity($logPath, 'Task dropped');
+        clearCurrentTaskSelection($activeProjectId);
+        $_SESSION['task_lifecycle_message'] = $taskId . ' moved to DROPPED and synchronized.';
+        header('Location: /?tab=dashboard#tasks');
+        exit;
+    } catch (Throwable $exception) {
+        $_SESSION['codex_recovery_error'] = $exception->getMessage();
+        header('Location: /?tab=dashboard&task=' . rawurlencode($taskId . '.md') . '&task_source=' . rawurlencode($taskSource) . '#codexRunPanel');
+        exit;
+    }
+}
+
 if ($action === 'refresh_server_diagnostics') {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $serverDiagnosticsResult = [
@@ -668,7 +709,7 @@ if ($action === 'refresh_server_diagnostics') {
         $serverDiagnosticsResult = serverToolsRefreshResult();
     }
     $_SESSION['server_diagnostics_result'] = $serverDiagnosticsResult;
-    header('Location: /?tab=server-management#server-tools');
+    header('Location: /?tab=settings#dev-console-tools');
     exit;
 }
 
@@ -698,6 +739,23 @@ if ($action === 'test_managed_server') {
         try {
             $serverId = managedServersNormalizeId(is_scalar($_POST['server_id'] ?? null) ? (string)$_POST['server_id'] : '');
             $operation = managedServerStartConnectionTest(managedServersLoad(), $serverId);
+            sendJson(['ok' => true, 'operation' => $operation]);
+        } catch (Throwable $exception) {
+            http_response_code(400);
+            sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+        }
+    }
+    exit;
+}
+
+if ($action === 'install_managed_server_composer') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        http_response_code(403);
+        sendJson(['ok' => false, 'error' => 'Invalid managed server request.']);
+    } else {
+        try {
+            $serverId = managedServersNormalizeId(is_scalar($_POST['server_id'] ?? null) ? (string)$_POST['server_id'] : '');
+            $operation = managedServerStartComposerInstall(managedServersLoad(), $serverId);
             sendJson(['ok' => true, 'operation' => $operation]);
         } catch (Throwable $exception) {
             http_response_code(400);
@@ -1195,6 +1253,8 @@ if ($requestMethod === 'POST' && $action === 'create_task') {
         }
 
         saveCurrentTaskSelection($activeProjectId, $taskId, 'project');
+        $taskContexts = taskStorageContexts(devConsoleLoadProjectConfiguration(), $activeProject);
+        $viewTask = findTaskForView($taskContexts, $activeProjectId, $taskId . '.md', 'project');
         $prompt = codexPromptForTask($taskContexts, $activeProjectId, $taskId, 'project');
 
         $nextNumber = nextTaskNumber($taskContexts, $activeProjectId);
@@ -1243,7 +1303,10 @@ $codexLifecycleRecovery = $activeTaskId === '' || $activeProject === null || $ac
 $codexRecoveryError = is_scalar($_SESSION['codex_recovery_error'] ?? null) ? (string)$_SESSION['codex_recovery_error'] : '';
 unset($_SESSION['codex_recovery_error']);
 $projectCodexRunActive = codexProjectHasActiveRun($runsDir);
-$activeTaskRunnable = in_array($activeTaskStatus, ['TODO', 'IN PROGRESS'], true) && !in_array($activeRunStatus, ['queued', 'running', 'completed'], true);
+$activeTaskRunnable = ($activeTaskStatus === 'TODO' && !in_array($activeRunStatus, ['queued', 'running', 'completed'], true))
+    || ($activeTaskStatus === 'IN PROGRESS' && $activeRunStatus === 'failed');
+$activeTaskDroppable = $activeTaskSource === 'project'
+    && ($activeTaskStatus === 'TODO' || ($activeTaskStatus === 'IN PROGRESS' && $activeRunStatus === 'failed'));
 $codexRetryWithPreservedChanges = $activeTaskStatus === 'IN PROGRESS'
     && $activeRunStatus === 'failed'
     && str_contains($taskCreationUnavailableReason, 'Repository synchronization is pending');
@@ -1251,7 +1314,7 @@ $codexRepositoryReady = $taskCreationReady || $codexRetryWithPreservedChanges;
 $taskGitCompleted = $activeTaskId !== '';
 $taskGitPushed = $activeTaskId !== '' && $taskPushWarning === '';
 $editorTaskId = $viewTask ? pathinfo($viewTask['filename'], PATHINFO_FILENAME) : '';
-$editorBody = ($createdTaskId === '' && $viewTask) ? taskEditableBody((string)$viewTask['body']) : '';
+$editorBody = $viewTask ? taskEditableBody((string)$viewTask['body']) : '';
 $editorHeading = $editorTaskId === '' ? 'Create New Task' : 'View Task: ' . $editorTaskId;
 $editorAttachments = $viewTask ? taskAttachmentRecordsForTask($taskContexts, $activeProjectId, $editorTaskId, (string)$viewTask['source']) : $createdTaskAttachments;
 $editorCanSave = $viewTask !== null && taskCanRemoveAttachments($viewTask, $runsDir) && (string)$viewTask['source'] === 'project';
@@ -1295,6 +1358,8 @@ $githubActionResult = is_array($_SESSION['github_action_result'] ?? null) ? $_SE
 unset($_SESSION['github_action_result']);
 $runtimeActionResult = is_array($_SESSION['runtime_action_result'] ?? null) ? $_SESSION['runtime_action_result'] : $runtimeActionResult;
 unset($_SESSION['runtime_action_result']);
+$taskLifecycleMessage = is_scalar($_SESSION['task_lifecycle_message'] ?? null) ? (string)$_SESSION['task_lifecycle_message'] : $taskLifecycleMessage;
+unset($_SESSION['task_lifecycle_message']);
 $managedServerActionResult = is_array($_SESSION['managed_server_result'] ?? null) ? $_SESSION['managed_server_result'] : $managedServerActionResult;
 unset($_SESSION['managed_server_result']);
 $serverDiagnosticsResult = is_array($_SESSION['server_diagnostics_result'] ?? null) ? $_SESSION['server_diagnostics_result'] : $serverDiagnosticsResult;
@@ -1320,6 +1385,18 @@ $serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostic
 $managedServers = managedServersLoad();
 $managedServerSharedKey = managedServersSharedKeyInfo();
 $activeManagedServer = $activeProject === null ? null : devConsoleFindManagedServerById($managedServers, (string)($activeProject['managed_server_id'] ?? ''));
+$serverManagementSelectedId = managedServersNormalizeId(is_scalar($_GET['managed_server_id'] ?? null) ? (string)$_GET['managed_server_id'] : '');
+if ($serverManagementSelectedId === '' && $activeManagedServer !== null) {
+    $serverManagementSelectedId = (string)($activeManagedServer['id'] ?? '');
+}
+if ($serverManagementSelectedId === '' && !empty($managedServers)) {
+    $serverManagementSelectedId = (string)($managedServers[0]['id'] ?? '');
+}
+$serverManagementSelectedServer = $serverManagementSelectedId === '' ? null : managedServersFind($managedServers, $serverManagementSelectedId);
+if ($serverManagementSelectedServer === null && !empty($managedServers)) {
+    $serverManagementSelectedServer = $managedServers[0];
+    $serverManagementSelectedId = (string)($serverManagementSelectedServer['id'] ?? '');
+}
 $managedPreviewDeploymentOverview = $activeProject === null ? null : previewDeploymentOverview($activeProject, $activeManagedServer);
 $managedPreviewDeploymentReadiness = previewDeploymentReadiness($activeProject, $managedServers);
 $managedProductionDeploymentOverview = $activeProject === null ? null : productionDeploymentOverview($activeProject, $activeManagedServer);
@@ -1447,6 +1524,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .milestone { color: #7a5b00; }
     .badge { background: #e3f5f9; border-radius: 999px; color: var(--blue); display: inline-block; flex: 0 0 auto; font-size: 11px; font-weight: 700; padding: 4px 8px; }
     .badge.done { background: #e9f7ef; color: var(--green); }
+    .badge.dropped { background: #edf0f2; color: #56636a; }
     .workflow-steps { display: grid; gap: 10px; list-style: none; margin: 16px 0 0; padding: 0; }
     .workflow-steps li { align-items: center; border-top: 1px solid var(--line); display: flex; gap: 10px; padding-top: 10px; }
     .workflow-steps li:first-child { border-top: 0; padding-top: 0; }
@@ -1582,7 +1660,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .documentation-content blockquote { border-left: 4px solid var(--line); color: var(--muted); margin: 14px 0; padding: 2px 0 2px 14px; }
     .tool-status { white-space: nowrap; }
     .site-path, .path-value { overflow-wrap: anywhere; word-break: normal; }
-    #projects, #github, #apache, #runtime { scroll-margin-top: 18px; }
+    #projects, #github, #apache, #runtime, #dev-console-host, #dev-console-tools { scroll-margin-top: 18px; }
     #createProject { scroll-margin-top: 18px; }
     #createProject button[type="submit"] { width: 100%; }
     .subsection { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 18px; }
@@ -1679,7 +1757,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       </div>
       <div data-page-context="settings"<?= $initialTab === 'settings' ? '' : ' hidden' ?>>
         <strong>Settings</strong>
-        <span>GitHub and local service configuration</span>
+        <span>Dev Console configuration and host environment</span>
       </div>
       <div data-page-context="projects"<?= $initialTab === 'projects' ? '' : ' hidden' ?>>
         <strong>Projects</strong>
@@ -1687,11 +1765,11 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       </div>
       <div data-page-context="servers"<?= $initialTab === 'servers' ? '' : ' hidden' ?>>
         <strong>Servers</strong>
-        <span>Managed remote Linux servers</span>
+        <span>Server registry and SSH connectivity</span>
       </div>
       <div data-page-context="server-management"<?= $initialTab === 'server-management' ? '' : ' hidden' ?>>
         <strong>Server Management</strong>
-        <span>Read-only server diagnostics</span>
+        <span>Selected Managed Server operations</span>
       </div>
       <div data-page-context="documentation"<?= $initialTab === 'documentation' ? '' : ' hidden' ?>>
         <strong>Documentation</strong>
@@ -1778,6 +1856,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       <p class="success-message"><?= h($taskSaveMessage) ?></p>
     <?php elseif ($taskAttachmentMessage !== ''): ?>
       <p class="success-message"><?= h($taskAttachmentMessage) ?></p>
+    <?php elseif ($taskLifecycleMessage !== ''): ?>
+      <p class="success-message"><?= h($taskLifecycleMessage) ?></p>
     <?php elseif ($createdTaskId !== '' && $error === ''): ?>
       <p class="success-message">Task "<?= h($createdTaskId) ?>" created, committed locally, and synchronized with GitHub for Project "<?= h(projectMessageName($activeProject, $activeProjectId)) ?>".</p>
     <?php endif; ?>
@@ -1841,7 +1921,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         </section>
       <?php endif; ?>
 
-      <button type="submit"<?= $editorTaskId === '' ? ($taskCreationReady ? '' : ' disabled title="' . h($taskCreationUnavailableReason === '' ? 'Review Git status in Projects before creating tasks.' : $taskCreationUnavailableReason) . '"') : ($editorCanSave ? '' : ' disabled title="Only TODO Project tasks can be edited before execution."') ?>><?= h($editorTaskId === '' ? 'Create Task' : 'Save Task') ?></button>
+      <button type="submit"<?= $editorTaskId === '' ? ($taskCreationReady ? '' : ' disabled title="' . h($taskCreationUnavailableReason === '' ? 'Review Git status in Projects before creating tasks.' : $taskCreationUnavailableReason) . '"') : ($editorCanSave ? '' : ' disabled title="Only TODO Project tasks can be edited before execution."') ?>>Save Task</button>
     </form>
   </section>
 
@@ -1884,6 +1964,16 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
               <button type="button" disabled title="<?= h($runCodexDisabledReason) ?>">Run Codex</button>
             <?php endif; ?>
             <a class="button-link" href="?tab=dashboard&task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>" target="_blank" rel="noopener">Open TASK</a>
+            <?php if ($activeTaskDroppable): ?>
+              <form method="post" class="inline-form" action="/?tab=dashboard&task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>#codexRunPanel" onsubmit="return confirm('Drop <?= h($activeTaskId) ?>? The task file will be moved to TASKS/DROPPED and synchronized. Project application files will not be changed.');">
+                <input type="hidden" name="action" value="drop_task">
+                <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                <input type="hidden" name="task" value="<?= h($activeTaskId) ?>">
+                <input type="hidden" name="task_source" value="<?= h($activeTaskSource) ?>">
+                <button type="submit" class="secondary">Drop Task</button>
+              </form>
+              <span class="hint"><?= h($activeTaskStatus === 'TODO' ? 'This TODO task can be run, edited, or dropped before execution.' : 'This failed IN PROGRESS task can be retried with Run Codex or explicitly dropped.') ?></span>
+            <?php endif; ?>
             <?php if (!empty($codexLifecycleRecovery['recoverable'])): ?>
               <form method="post" class="inline-form" action="/?tab=dashboard&task=<?= h(rawurlencode($activeTaskId . '.md')) ?>&task_source=<?= h(rawurlencode($activeTaskSource)) ?>#codexRunPanel">
                 <input type="hidden" name="action" value="recover_codex_lifecycle">
@@ -2020,7 +2110,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       <div class="dashboard-grid" id="environmentDashboard" aria-live="polite"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="tasks">
       <h2>Tasks</h2>
       <?php if ($legacyTasksDetected): ?>
         <p class="field-help">Legacy tasks detected. They belong to the previous global task storage and are associated with the default Project.</p>
@@ -2600,31 +2690,31 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
             <?php endif; ?>
           </section>
         <?php endif; ?>
-        <section class="result-block tool-operation-panel" id="managedServerOperationPanel" hidden>
-          <h2>SSH connection test</h2>
-          <p id="managedServerOperationMessage">Starting...</p>
+        <section class="result-block tool-operation-panel" id="managedServerOperationPanel" data-managed-server-operation-panel="servers" hidden>
+          <h2 id="managedServerOperationTitle" data-managed-server-field="title">Managed server operation</h2>
+          <p id="managedServerOperationMessage" data-managed-server-field="message">Starting...</p>
           <dl class="tool-operation-grid">
-            <div><dt>Server</dt><dd id="managedServerOperationServer">-</dd></div>
-            <div><dt>Status</dt><dd id="managedServerOperationStatus">Starting</dd></div>
-            <div><dt>Stage</dt><dd id="managedServerOperationStage">Starting</dd></div>
-            <div><dt>Elapsed</dt><dd id="managedServerOperationElapsed">0s</dd></div>
+            <div><dt>Server</dt><dd id="managedServerOperationServer" data-managed-server-field="server">-</dd></div>
+            <div><dt>Status</dt><dd id="managedServerOperationStatus" data-managed-server-field="status">Starting</dd></div>
+            <div><dt>Stage</dt><dd id="managedServerOperationStage" data-managed-server-field="stage">Starting</dd></div>
+            <div><dt>Elapsed</dt><dd id="managedServerOperationElapsed" data-managed-server-field="elapsed">0s</dd></div>
           </dl>
-          <dl class="apache-summary-grid" id="managedServerConnectionDetails" hidden>
-            <div><dt>SSH access</dt><dd id="managedServerResultSshAccess">-</dd></div>
-            <div><dt>Passwordless sudo</dt><dd id="managedServerResultSudo">-</dd></div>
-            <div><dt>Hostname</dt><dd id="managedServerResultHostname">-</dd></div>
-            <div><dt>OS</dt><dd id="managedServerResultOs">-</dd></div>
-            <div><dt>Kernel</dt><dd id="managedServerResultKernel">-</dd></div>
-            <div><dt>Current user</dt><dd id="managedServerResultUser">-</dd></div>
-            <div><dt>Working directory</dt><dd id="managedServerResultWorkingDirectory">-</dd></div>
-            <div><dt>Round-trip time</dt><dd id="managedServerResultRtt">-</dd></div>
+          <dl class="apache-summary-grid" id="managedServerConnectionDetails" data-managed-server-field="details" hidden>
+            <div><dt>SSH access</dt><dd id="managedServerResultSshAccess" data-managed-server-field="ssh_access">-</dd></div>
+            <div><dt>Passwordless sudo</dt><dd id="managedServerResultSudo" data-managed-server-field="sudo">-</dd></div>
+            <div><dt>Hostname</dt><dd id="managedServerResultHostname" data-managed-server-field="hostname">-</dd></div>
+            <div><dt>OS</dt><dd id="managedServerResultOs" data-managed-server-field="os">-</dd></div>
+            <div><dt>Kernel</dt><dd id="managedServerResultKernel" data-managed-server-field="kernel">-</dd></div>
+            <div><dt>Current user</dt><dd id="managedServerResultUser" data-managed-server-field="user">-</dd></div>
+            <div><dt>Working directory</dt><dd id="managedServerResultWorkingDirectory" data-managed-server-field="working_directory">-</dd></div>
+            <div><dt>Round-trip time</dt><dd id="managedServerResultRtt" data-managed-server-field="rtt">-</dd></div>
           </dl>
           <div class="result-actions">
             <button type="button" class="secondary" data-copy-log="managedServerLiveLog">Copy Log</button>
             <button type="button" class="secondary" data-download-log="managedServerLiveLog" data-download-name="managed-server-connection.log">Download Log</button>
             <span class="hint" data-log-message="managedServerLiveLog" aria-live="polite"></span>
           </div>
-          <pre id="managedServerLiveLog" class="tool-operation-log">Waiting for operation log...</pre>
+          <pre id="managedServerLiveLog" class="tool-operation-log" data-managed-server-field="log">Waiting for operation log...</pre>
         </section>
 
         <?php if (empty($managedServers)): ?>
@@ -2659,6 +2749,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 	                    'unreachable' => 'Not ready',
 	                    default => 'Not tested',
 	                };
+	                $serverPhpInstalled = !empty($server['php_installed']);
+	                $serverComposerInstalled = !empty($server['composer_installed']);
 	              ?>
 	              <section class="project-item" data-server-card data-server-id="<?= h($serverId) ?>" data-server-host="<?= h((string)($server['host'] ?? '')) ?>" data-server-user="<?= h((string)($server['user'] ?? '')) ?>">
 	                <div class="project-summary server-compact-summary">
@@ -2697,6 +2789,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 		                    <div><dt>Status</dt><dd><span class="status-pill <?= h(managedServersStatusClass($server)) ?>" data-server-detail-status><?= h(managedServersStatusLabel($server)) ?></span><?= (string)($server['last_error'] ?? '') !== '' ? '<br><span class="meta" data-server-detail-error>' . h((string)$server['last_error']) . '</span>' : '<br><span class="meta" data-server-detail-error></span>' ?></dd></div>
 		                    <div><dt>SSH access</dt><dd data-server-detail-ssh-access><?= h($serverSshAccessLabel) ?></dd></div>
 		                    <div><dt>Passwordless sudo</dt><dd data-server-detail-sudo><?= h($serverSudoLabel) ?></dd></div>
+		                    <div><dt>PHP</dt><dd data-server-detail-php><?= $serverPhpInstalled ? 'Installed' . ((string)($server['php_version'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$server['php_version']) . '</span>' : '') : 'Missing' ?></dd></div>
+		                    <div><dt>Composer</dt><dd data-server-detail-composer><?= $serverComposerInstalled ? 'Installed' . ((string)($server['composer_version'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$server['composer_version']) . '</span>' : '') : 'Missing' ?></dd></div>
 		                    <div><dt>Last checked</dt><dd data-server-detail-last-checked><?= h(configuredDisplayValue($server['last_connection_test_at'] ?? '')) ?></dd></div>
 		                    <div><dt>Response time</dt><dd data-server-detail-response><?= h(($server['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$server['response_time_ms'] . ' ms')) ?></dd></div>
 		                    <div><dt>Working directory</dt><dd data-server-detail-working-directory><?= h(configuredDisplayValue($server['remote_working_directory'] ?? '')) ?></dd></div>
@@ -2896,6 +2990,116 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <button type="submit">Apply Settings</button>
         </form>
         <p class="field-help">Applying settings saves Dev Console runtime configuration. Effective values change only after the service uses the managed wrapper and the PHP process restarts. Current service permissions do not provide a safe in-app restart.</p>
+      </section>
+      <section class="panel" id="dev-console-host">
+        <div class="dashboard-header">
+          <h2>Dev Console Host</h2>
+          <span class="meta">The host where this console runs</span>
+        </div>
+        <dl class="apache-summary-grid">
+          <div><dt>Service</dt><dd><?= h(configuredDisplayValue($serverContext['service_name'] ?? '')) ?></dd></div>
+          <div><dt>User</dt><dd><?= h(configuredDisplayValue($serverContext['user'] ?? '')) ?></dd></div>
+          <div><dt>Group</dt><dd><?= h(configuredDisplayValue($serverContext['group'] ?? '')) ?></dd></div>
+          <div><dt>Working directory</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['working_directory'] ?? '')) ?></dd></div>
+          <div><dt>PATH</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['path'] ?? '')) ?></dd></div>
+          <div><dt>PHP executable</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['php_executable'] ?? '')) ?></dd></div>
+        </dl>
+        <p class="field-help">These values describe the Dev Console service process, not a remote Managed Server.</p>
+      </section>
+
+      <section class="panel" id="dev-console-tools">
+        <div class="dashboard-header">
+          <h2>Dev Console Host Tools</h2>
+          <form method="post" action="/?tab=settings#dev-console-tools" data-preserve-settings-scroll="1">
+            <input type="hidden" name="action" value="refresh_server_diagnostics">
+            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+            <button type="submit" class="secondary">Refresh Diagnostics</button>
+          </form>
+        </div>
+        <?php if ($serverDiagnosticsResult !== null): ?>
+          <?php renderOperationResult($serverDiagnosticsResult, 'serverDiagnosticsOperationLog', 'server-diagnostics.log'); ?>
+        <?php endif; ?>
+        <section class="result-block tool-operation-panel" id="serverToolOperationPanel" hidden>
+          <h2>Dev Console host tool operation</h2>
+          <p id="serverToolOperationMessage">Starting...</p>
+          <dl class="tool-operation-grid">
+            <div><dt>Tool</dt><dd id="serverToolOperationTool">-</dd></div>
+            <div><dt>Action</dt><dd id="serverToolOperationAction">-</dd></div>
+            <div><dt>Status</dt><dd id="serverToolOperationStatus">Starting</dd></div>
+            <div><dt>Elapsed</dt><dd id="serverToolOperationElapsed">0s</dd></div>
+          </dl>
+          <p><strong>Stage:</strong> <span id="serverToolOperationStage">Starting</span></p>
+          <div class="result-actions">
+            <button type="button" class="secondary" data-copy-log="serverToolLiveLog">Copy Log</button>
+            <button type="button" class="secondary" data-download-log="serverToolLiveLog" data-download-name="server-tool-operation.log">Download Log</button>
+            <span class="hint" data-log-message="serverToolLiveLog" aria-live="polite"></span>
+          </div>
+          <pre id="serverToolLiveLog" class="tool-operation-log">Waiting for operation log...</pre>
+        </section>
+        <?php foreach (['required' => ['Dev Console prerequisites', true], 'optional' => ['Available development tools', false]] as $toolGroup => [$toolGroupLabel, $toolGroupOpen]): ?>
+          <details class="compact-details"<?= $toolGroupOpen ? ' open' : '' ?>>
+            <summary><?= h($toolGroupLabel) ?></summary>
+            <div class="table-scroll">
+              <table class="settings-table compact-sites">
+                <thead>
+                  <tr>
+                    <th>Tool</th>
+                    <th>Status</th>
+                    <th>Installed version</th>
+                    <th>Latest available</th>
+                    <th>Executable</th>
+                    <th>Installation source</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($serverTools as $toolId => $tool): ?>
+                    <?php if ((string)($tool['required_group'] ?? '') !== $toolGroup) continue; ?>
+                    <?php
+                      $diagnosticStatus = (string)($tool['diagnostic_status'] ?? 'Diagnostic unavailable');
+                      $statusClass = $diagnosticStatus === 'Installed' ? 'healthy' : ($toolGroup === 'required' ? 'error' : 'warning');
+                      $actions = serverToolsAllowedActionsForTool((string)$toolId, $tool);
+                    ?>
+                    <tr>
+                      <td>
+                        <strong><?= h(configuredDisplayValue($tool['display_name'] ?? '')) ?></strong><br>
+                        <span class="meta"><?= h(configuredDisplayValue($tool['requirement'] ?? '')) ?></span>
+                      </td>
+                      <td class="tool-status"><span class="status-pill <?= h($statusClass) ?>"><?= h($diagnosticStatus) ?></span></td>
+                      <td><?= h(configuredDisplayValue($tool['version'] ?? '')) ?></td>
+                      <td><?= h(configuredDisplayValue($tool['latest_version'] ?? '')) ?></td>
+                      <td class="path-value"><?= h(configuredDisplayValue($tool['executable_path'] ?? '')) ?></td>
+                      <td>
+                        <?= h(configuredDisplayValue($tool['package_source'] ?? '')) ?><br>
+                        <span class="meta"><?= h(configuredDisplayValue($tool['purpose'] ?? '')) ?></span><br>
+                        <span class="meta">Service user: <?= !empty($tool['available_to_service_user']) ? 'Executable' : 'Unavailable' ?></span><br>
+                        <span class="meta">Last checked: <?= h(configuredDisplayValue($tool['last_checked_at'] ?? '')) ?></span>
+                      </td>
+                      <td>
+                        <div class="project-actions">
+                          <?php foreach ($actions as $toolAction): ?>
+                            <form method="post" action="/?tab=settings#dev-console-tools" data-server-tool-form="1" data-tool-id="<?= h((string)$toolId) ?>" data-tool-name="<?= h(configuredDisplayValue($tool['display_name'] ?? '')) ?>" data-tool-action="<?= h((string)$toolAction) ?>" data-action-label="<?= h(serverToolsActionLabel((string)$toolAction)) ?>">
+                              <input type="hidden" name="action" value="server_tool_action">
+                              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                              <input type="hidden" name="tool_id" value="<?= h((string)$toolId) ?>">
+                              <input type="hidden" name="tool_action" value="<?= h((string)$toolAction) ?>">
+                              <button type="submit" class="<?= $toolAction === 'refresh' ? 'secondary' : '' ?>"><?= h(serverToolsActionLabel((string)$toolAction)) ?></button>
+                            </form>
+                          <?php endforeach; ?>
+                        </div>
+                        <?php if ((string)$toolId === 'npm'): ?>
+                          <p class="field-help">npm is installed and updated with Node.js.</p>
+                        <?php elseif (in_array((string)$toolId, ['git', 'php'], true)): ?>
+                          <p class="field-help">Diagnostics only.</p>
+                        <?php endif; ?>
+                      </td>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          </details>
+        <?php endforeach; ?>
       </section>
       <div class="settings-service-row">
       <section class="panel" id="github">
@@ -3160,118 +3364,136 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   </section>
 
   <section id="serverManagementTab" data-tab-panel="server-management"<?= $initialTab === 'server-management' ? '' : ' hidden' ?>>
-    <div class="server-layout">
-      <section class="panel">
-        <div class="dashboard-header">
-          <h2>Server Management</h2>
-          <form method="post" action="/?tab=server-management#server-tools">
-            <input type="hidden" name="action" value="refresh_server_diagnostics">
-            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-            <button type="submit" class="secondary">Refresh Diagnostics</button>
-          </form>
-        </div>
-        <?php if ($serverDiagnosticsResult !== null): ?>
-          <?php renderOperationResult($serverDiagnosticsResult, 'serverDiagnosticsOperationLog', 'server-diagnostics.log'); ?>
-        <?php endif; ?>
-        <section class="result-block tool-operation-panel" id="serverToolOperationPanel" hidden>
-          <h2>Server tool operation</h2>
-          <p id="serverToolOperationMessage">Starting...</p>
-          <dl class="tool-operation-grid">
-            <div><dt>Tool</dt><dd id="serverToolOperationTool">-</dd></div>
-            <div><dt>Action</dt><dd id="serverToolOperationAction">-</dd></div>
-            <div><dt>Status</dt><dd id="serverToolOperationStatus">Starting</dd></div>
-            <div><dt>Elapsed</dt><dd id="serverToolOperationElapsed">0s</dd></div>
-          </dl>
-          <p><strong>Stage:</strong> <span id="serverToolOperationStage">Starting</span></p>
-          <div class="result-actions">
-            <button type="button" class="secondary" data-copy-log="serverToolLiveLog">Copy Log</button>
-            <button type="button" class="secondary" data-download-log="serverToolLiveLog" data-download-name="server-tool-operation.log">Download Log</button>
-            <span class="hint" data-log-message="serverToolLiveLog" aria-live="polite"></span>
-          </div>
-          <pre id="serverToolLiveLog" class="tool-operation-log">Waiting for operation log...</pre>
-        </section>
-      </section>
-
-      <section class="panel" id="server-context">
-        <h2>Server Context</h2>
-        <dl class="apache-summary-grid">
-          <div><dt>Service</dt><dd><?= h(configuredDisplayValue($serverContext['service_name'] ?? '')) ?></dd></div>
-          <div><dt>User</dt><dd><?= h(configuredDisplayValue($serverContext['user'] ?? '')) ?></dd></div>
-          <div><dt>Group</dt><dd><?= h(configuredDisplayValue($serverContext['group'] ?? '')) ?></dd></div>
-          <div><dt>Working directory</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['working_directory'] ?? '')) ?></dd></div>
-          <div><dt>PATH</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['path'] ?? '')) ?></dd></div>
-          <div><dt>PHP executable</dt><dd class="path-value"><?= h(configuredDisplayValue($serverContext['php_executable'] ?? '')) ?></dd></div>
-        </dl>
-      </section>
-
-      <section class="panel" id="server-tools">
-        <h2>Server Tools</h2>
-        <?php foreach (['required' => ['Required Tools', true], 'optional' => ['Optional / Project-dependent Tools', false]] as $toolGroup => [$toolGroupLabel, $toolGroupOpen]): ?>
-          <details class="compact-details"<?= $toolGroupOpen ? ' open' : '' ?>>
-            <summary><?= h($toolGroupLabel) ?></summary>
-            <div class="table-scroll">
-              <table class="settings-table compact-sites">
-                <thead>
-                  <tr>
-                    <th>Tool</th>
-                    <th>Status</th>
-                    <th>Installed version</th>
-                    <th>Latest available</th>
-                    <th>Executable</th>
-                    <th>Installation source</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <?php foreach ($serverTools as $toolId => $tool): ?>
-                    <?php if ((string)($tool['required_group'] ?? '') !== $toolGroup) continue; ?>
-                    <?php
-                      $diagnosticStatus = (string)($tool['diagnostic_status'] ?? 'Diagnostic unavailable');
-                      $statusClass = $diagnosticStatus === 'Installed' ? 'healthy' : ($toolGroup === 'required' ? 'error' : 'warning');
-                      $actions = serverToolsAllowedActionsForTool((string)$toolId, $tool);
-                    ?>
-                    <tr>
-                      <td>
-                        <strong><?= h(configuredDisplayValue($tool['display_name'] ?? '')) ?></strong><br>
-                        <span class="meta"><?= h(configuredDisplayValue($tool['requirement'] ?? '')) ?></span>
-                      </td>
-                      <td class="tool-status"><span class="status-pill <?= h($statusClass) ?>"><?= h($diagnosticStatus) ?></span></td>
-                      <td><?= h(configuredDisplayValue($tool['version'] ?? '')) ?></td>
-                      <td><?= h(configuredDisplayValue($tool['latest_version'] ?? '')) ?></td>
-                      <td class="path-value"><?= h(configuredDisplayValue($tool['executable_path'] ?? '')) ?></td>
-                      <td>
-                        <?= h(configuredDisplayValue($tool['package_source'] ?? '')) ?><br>
-                        <span class="meta"><?= h(configuredDisplayValue($tool['purpose'] ?? '')) ?></span><br>
-                        <span class="meta">Service user: <?= !empty($tool['available_to_service_user']) ? 'Executable' : 'Unavailable' ?></span><br>
-                        <span class="meta">Last checked: <?= h(configuredDisplayValue($tool['last_checked_at'] ?? '')) ?></span>
-                      </td>
-                      <td>
-                        <div class="project-actions">
-                          <?php foreach ($actions as $toolAction): ?>
-                            <form method="post" action="/?tab=server-management#server-tools" data-server-tool-form="1" data-tool-id="<?= h((string)$toolId) ?>" data-tool-name="<?= h(configuredDisplayValue($tool['display_name'] ?? '')) ?>" data-tool-action="<?= h((string)$toolAction) ?>" data-action-label="<?= h(serverToolsActionLabel((string)$toolAction)) ?>">
-                              <input type="hidden" name="action" value="server_tool_action">
-                              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
-                              <input type="hidden" name="tool_id" value="<?= h((string)$toolId) ?>">
-                              <input type="hidden" name="tool_action" value="<?= h((string)$toolAction) ?>">
-                              <button type="submit" class="<?= $toolAction === 'refresh' ? 'secondary' : '' ?>"><?= h(serverToolsActionLabel((string)$toolAction)) ?></button>
-                            </form>
-                          <?php endforeach; ?>
-                        </div>
-                        <?php if ((string)$toolId === 'npm'): ?>
-                          <p class="field-help">npm is installed and updated with Node.js.</p>
-                        <?php elseif (in_array((string)$toolId, ['git', 'php'], true)): ?>
-                          <p class="field-help">Diagnostics only.</p>
-                        <?php endif; ?>
-                      </td>
-                    </tr>
-                  <?php endforeach; ?>
-                </tbody>
-              </table>
+    <section class="panel">
+      <div class="dashboard-header">
+        <h2>Server Management</h2>
+        <span class="meta">Runtime and operational management of a selected Managed Server</span>
+      </div>
+      <?php if (empty($managedServers)): ?>
+        <p class="meta">No Managed Servers configured.</p>
+        <p class="field-help">Add a server in the Servers section first.</p>
+      <?php else: ?>
+        <form method="get" class="project-selector" action="/">
+          <input type="hidden" name="tab" value="server-management">
+          <label for="server_management_server_id">Server</label>
+          <select id="server_management_server_id" name="managed_server_id" onchange="this.form.submit()">
+            <?php foreach ($managedServers as $server): ?>
+              <?php $optionId = (string)($server['id'] ?? ''); ?>
+              <option value="<?= h($optionId) ?>"<?= $optionId === $serverManagementSelectedId ? ' selected' : '' ?>><?= h(configuredDisplayValue($server['name'] ?? $optionId)) ?></option>
+            <?php endforeach; ?>
+          </select>
+        </form>
+        <?php if ($serverManagementSelectedServer !== null): ?>
+          <?php
+            $selectedServerId = (string)($serverManagementSelectedServer['id'] ?? '');
+            $selectedServerSudoState = (string)($serverManagementSelectedServer['passwordless_sudo'] ?? 'unknown');
+            $selectedServerSudoLabel = match ($selectedServerSudoState) {
+                'ready', 'root' => 'Ready',
+                'setup_required' => 'Not available',
+                default => 'Unknown',
+            };
+            $selectedServerPhpInstalled = !empty($serverManagementSelectedServer['php_installed']);
+            $selectedServerComposerInstalled = !empty($serverManagementSelectedServer['composer_installed']);
+            $selectedServerComposerInstallDisabledReason = (string)($serverManagementSelectedServer['status'] ?? '') !== 'reachable'
+                ? 'Refresh diagnostics successfully before installing Composer.'
+                : (!in_array($selectedServerSudoState, ['ready', 'root'], true)
+                    ? 'Passwordless sudo is required before installing Composer.'
+                    : '');
+          ?>
+          <section class="result-block tool-operation-panel" data-managed-server-operation-panel="server-management" hidden>
+            <h2 data-managed-server-field="title">Managed server operation</h2>
+            <p data-managed-server-field="message">Starting...</p>
+            <dl class="tool-operation-grid">
+              <div><dt>Server</dt><dd data-managed-server-field="server">-</dd></div>
+              <div><dt>Status</dt><dd data-managed-server-field="status">Starting</dd></div>
+              <div><dt>Stage</dt><dd data-managed-server-field="stage">Starting</dd></div>
+              <div><dt>Elapsed</dt><dd data-managed-server-field="elapsed">0s</dd></div>
+            </dl>
+            <dl class="apache-summary-grid" data-managed-server-field="details" hidden>
+              <div><dt>SSH access</dt><dd data-managed-server-field="ssh_access">-</dd></div>
+              <div><dt>Passwordless sudo</dt><dd data-managed-server-field="sudo">-</dd></div>
+              <div><dt>Hostname</dt><dd data-managed-server-field="hostname">-</dd></div>
+              <div><dt>OS</dt><dd data-managed-server-field="os">-</dd></div>
+              <div><dt>Kernel</dt><dd data-managed-server-field="kernel">-</dd></div>
+              <div><dt>Current user</dt><dd data-managed-server-field="user">-</dd></div>
+              <div><dt>Working directory</dt><dd data-managed-server-field="working_directory">-</dd></div>
+              <div><dt>Round-trip time</dt><dd data-managed-server-field="rtt">-</dd></div>
+            </dl>
+            <div class="result-actions">
+              <button type="button" class="secondary" data-copy-log="serverManagementLiveLog">Copy Log</button>
+              <button type="button" class="secondary" data-download-log="serverManagementLiveLog" data-download-name="managed-server-operation.log">Download Log</button>
+              <span class="hint" data-log-message="serverManagementLiveLog" aria-live="polite"></span>
             </div>
-          </details>
-        <?php endforeach; ?>
-      </section>
-    </div>
+            <pre id="serverManagementLiveLog" class="tool-operation-log" data-managed-server-field="log">Waiting for operation log...</pre>
+          </section>
+          <section class="project-item">
+            <div class="project-summary">
+              <span>
+                <strong><?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?></strong>
+                <span class="project-summary-line">
+                  <span>ID: <?= h(configuredDisplayValue($serverManagementSelectedServer['id'] ?? '')) ?></span>
+                  <span>Host: <?= h(configuredDisplayValue($serverManagementSelectedServer['host'] ?? '')) ?></span>
+                  <span>User: <?= h(configuredDisplayValue($serverManagementSelectedServer['user'] ?? '')) ?></span>
+                </span>
+              </span>
+              <span class="status-pill <?= h(managedServersStatusClass($serverManagementSelectedServer)) ?>"><?= h(managedServersStatusLabel($serverManagementSelectedServer)) ?></span>
+            </div>
+            <dl class="project-detail-grid">
+              <div><dt>Server ID</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['id'] ?? '')) ?></dd></div>
+              <div><dt>Display name</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?></dd></div>
+              <div><dt>Host / IP</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['host'] ?? '')) ?></dd></div>
+              <div><dt>SSH user</dt><dd><?= h(configuredDisplayValue($serverManagementSelectedServer['user'] ?? '')) ?></dd></div>
+              <div><dt>SSH port</dt><dd><?= h((string)((int)($serverManagementSelectedServer['port'] ?? 22))) ?></dd></div>
+              <div><dt>Reachability</dt><dd data-selected-server-detail="reachability"><?= h(managedServersStatusLabel($serverManagementSelectedServer)) ?></dd></div>
+              <div><dt>Last checked</dt><dd data-selected-server-detail="last_checked"><?= h(configuredDisplayValue($serverManagementSelectedServer['last_connection_test_at'] ?? '')) ?></dd></div>
+              <div><dt>Response time</dt><dd data-selected-server-detail="response"><?= h(($serverManagementSelectedServer['response_time_ms'] ?? null) === null ? 'Not configured' : ((string)$serverManagementSelectedServer['response_time_ms'] . ' ms')) ?></dd></div>
+              <div><dt>Remote hostname</dt><dd data-selected-server-detail="hostname"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_hostname'] ?? '')) ?></dd></div>
+              <div><dt>Remote OS</dt><dd data-selected-server-detail="os"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_os'] ?? $serverManagementSelectedServer['os'] ?? '')) ?></dd></div>
+              <div><dt>Kernel</dt><dd data-selected-server-detail="kernel"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_kernel'] ?? $serverManagementSelectedServer['kernel'] ?? $serverManagementSelectedServer['uname'] ?? '')) ?></dd></div>
+              <div><dt>Remote user</dt><dd data-selected-server-detail="remote_user"><?= h(configuredDisplayValue($serverManagementSelectedServer['remote_user'] ?? '')) ?></dd></div>
+              <div><dt>PHP</dt><dd data-selected-server-detail="php"><?= $selectedServerPhpInstalled ? h(configuredDisplayValue($serverManagementSelectedServer['php_version'] ?? 'Installed')) : 'Missing' ?></dd></div>
+              <div><dt>Composer</dt><dd data-selected-server-detail="composer"><?= $selectedServerComposerInstalled ? h(configuredDisplayValue($serverManagementSelectedServer['composer_version'] ?? 'Installed')) : 'Missing' ?></dd></div>
+              <div><dt>Passwordless sudo</dt><dd data-selected-server-detail="sudo"><?= h($selectedServerSudoLabel) ?></dd></div>
+            </dl>
+            <div class="project-actions">
+              <form method="post" action="/?tab=server-management&managed_server_id=<?= rawurlencode($selectedServerId) ?>#server-management-tools" data-managed-server-test-form="1" data-operation-target="server-management" data-server-id="<?= h($selectedServerId) ?>" data-server-name="<?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?>">
+                <input type="hidden" name="action" value="test_managed_server">
+                <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                <input type="hidden" name="server_id" value="<?= h($selectedServerId) ?>">
+                <button type="submit">Refresh Diagnostics</button>
+              </form>
+            </div>
+          </section>
+
+          <section class="panel" id="server-management-tools">
+            <div class="dashboard-header">
+              <h2>Managed Server tools</h2>
+              <span class="meta">Prerequisites for Preview and Production operations</span>
+            </div>
+            <dl class="project-detail-grid">
+              <div><dt>PHP</dt><dd data-selected-server-detail="tool_php"><?= $selectedServerPhpInstalled ? 'Installed' . ((string)($serverManagementSelectedServer['php_version'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$serverManagementSelectedServer['php_version']) . '</span>' : '') : 'Missing' ?></dd></div>
+              <div><dt>Composer</dt><dd data-selected-server-detail="tool_composer"><?= $selectedServerComposerInstalled ? 'Installed' . ((string)($serverManagementSelectedServer['composer_version'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$serverManagementSelectedServer['composer_version']) . '</span>' : '') : 'Missing' ?></dd></div>
+              <div><dt>Passwordless sudo</dt><dd data-selected-server-detail="tool_sudo"><?= h($selectedServerSudoLabel) ?></dd></div>
+            </dl>
+            <div class="project-actions">
+              <?php if (!$selectedServerComposerInstalled): ?>
+                <form method="post" action="/?tab=server-management&managed_server_id=<?= rawurlencode($selectedServerId) ?>#server-management-tools" data-managed-server-test-form="1" data-operation-target="server-management" data-server-id="<?= h($selectedServerId) ?>" data-server-name="<?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?>">
+                  <input type="hidden" name="action" value="install_managed_server_composer">
+                  <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                  <input type="hidden" name="server_id" value="<?= h($selectedServerId) ?>">
+                  <button type="submit"<?= $selectedServerComposerInstallDisabledReason === '' ? ' onclick="return confirm(\'Install Composer on this managed server using apt-get?\');"' : ' disabled title="' . h($selectedServerComposerInstallDisabledReason) . '"' ?>>Install Composer</button>
+                </form>
+              <?php endif; ?>
+            </div>
+            <p class="field-help">PHP is diagnostic-only in this release. Composer installation uses the existing fixed Ubuntu/Debian command path and requires passwordless sudo or root SSH.</p>
+          </section>
+          <section class="panel">
+            <h2>Server registry</h2>
+            <p class="field-help">Use the Servers page to add, edit, remove, test SSH onboarding, and manage SSH setup for Managed Servers.</p>
+          </section>
+        <?php endif; ?>
+      <?php endif; ?>
+    </section>
   </section>
 
 </main>
@@ -3516,7 +3738,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         clearInterval(poll);
         setServerToolButtons(toolId, false);
         window.setTimeout(() => {
-          window.location.href = `/?tab=server-management&server_tool_operation=${encodeURIComponent(operationId)}#server-tools`;
+          window.location.href = `/?tab=settings&server_tool_operation=${encodeURIComponent(operationId)}#dev-console-tools`;
         }, 900);
       }
     };
@@ -3552,7 +3774,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         log: '',
       });
       try {
-        const response = await fetch('/?tab=server-management#server-tools', { method: 'POST', body: new FormData(form) });
+        const response = await fetch('/?tab=settings#dev-console-tools', { method: 'POST', body: new FormData(form) });
         const payload = await response.json();
         if (!payload.ok) throw new Error(payload.error || 'Unable to start server tool operation.');
         showServerToolOperation(payload.operation);
@@ -3568,6 +3790,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   });
 
   const managedServerPanel = document.getElementById('managedServerOperationPanel');
+  const managedServerTitle = document.getElementById('managedServerOperationTitle');
   const managedServerMessage = document.getElementById('managedServerOperationMessage');
   const managedServerName = document.getElementById('managedServerOperationServer');
   const managedServerStatus = document.getElementById('managedServerOperationStatus');
@@ -3584,6 +3807,29 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const managedServerResultWorkingDirectory = document.getElementById('managedServerResultWorkingDirectory');
   const managedServerResultRtt = document.getElementById('managedServerResultRtt');
   const managedServerForms = Array.from(document.querySelectorAll('[data-managed-server-test-form="1"]'));
+  const managedServerPanelElements = (target) => {
+    const panel = document.querySelector(`[data-managed-server-operation-panel="${target || 'servers'}"]`) || managedServerPanel;
+    const field = (name, fallback) => panel?.querySelector(`[data-managed-server-field="${name}"]`) || fallback || null;
+    return {
+      panel,
+      title: field('title', managedServerTitle),
+      message: field('message', managedServerMessage),
+      server: field('server', managedServerName),
+      status: field('status', managedServerStatus),
+      stage: field('stage', managedServerStage),
+      elapsed: field('elapsed', managedServerElapsed),
+      log: field('log', managedServerLog),
+      details: field('details', managedServerDetails),
+      sshAccess: field('ssh_access', managedServerResultSshAccess),
+      sudo: field('sudo', managedServerResultSudo),
+      hostname: field('hostname', managedServerResultHostname),
+      os: field('os', managedServerResultOs),
+      kernel: field('kernel', managedServerResultKernel),
+      user: field('user', managedServerResultUser),
+      workingDirectory: field('working_directory', managedServerResultWorkingDirectory),
+      rtt: field('rtt', managedServerResultRtt),
+    };
+  };
 	  const setManagedServerButtons = (serverId, disabled) => {
 	    managedServerForms.forEach((form) => {
 	      if (form.dataset.serverId !== serverId) return;
@@ -3633,70 +3879,122 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 	    if (sshAccessNode) sshAccessNode.textContent = reachable ? 'Ready' : 'Not ready';
 	    const sudoNode = card.querySelector('[data-server-detail-sudo]');
 	    if (sudoNode) sudoNode.textContent = reachable ? sudoLabel : 'Unknown';
+	    const phpNode = card.querySelector('[data-server-detail-php]');
+	    if (phpNode && Object.prototype.hasOwnProperty.call(result, 'php_installed')) {
+	      phpNode.textContent = result.php_installed ? `Installed${result.php_version ? ` ${result.php_version}` : ''}` : 'Missing';
+	    }
+	    const composerNode = card.querySelector('[data-server-detail-composer]');
+	    if (composerNode && Object.prototype.hasOwnProperty.call(result, 'composer_installed')) {
+	      composerNode.textContent = result.composer_installed ? `Installed${result.composer_version ? ` ${result.composer_version}` : ''}` : 'Missing';
+	    }
 	    const errorNode = card.querySelector('[data-server-detail-error]');
 	    if (errorNode) errorNode.textContent = reachable ? '' : (result.message || 'SSH connection failed');
 	  };
-	  const showManagedServerOperation = (operation) => {
-    if (!managedServerPanel) return;
+  const updateSelectedManagedServerSummary = (operation) => {
     const result = operation.result || {};
-    managedServerPanel.hidden = false;
-    managedServerPanel.classList.toggle('failed', operation.status === 'failed');
-    if (managedServerName) managedServerName.textContent = operation.server_name || operation.server_id || '-';
-    if (managedServerStatus) managedServerStatus.textContent = String(operation.status || 'running').replace(/^\w/, (letter) => letter.toUpperCase());
-    if (managedServerStage) managedServerStage.textContent = operation.stage || 'Starting';
-    if (managedServerElapsed) managedServerElapsed.textContent = formatElapsed(operation.elapsed_seconds || 0);
-    if (managedServerMessage) managedServerMessage.textContent = operation.message || 'Testing SSH connection.';
-    if (managedServerLog) {
-      managedServerLog.textContent = operation.log && operation.log.trim() !== '' ? operation.log : 'Waiting for operation log...';
-      managedServerLog.scrollTop = managedServerLog.scrollHeight;
+    const completed = operation.status === 'completed' && result.success !== false;
+    const sudoState = result.passwordless_sudo || 'unknown';
+    const sudoLabel = sudoState === 'ready' || sudoState === 'root' ? 'Ready' : (sudoState === 'setup_required' ? 'Not available' : 'Unknown');
+    const setDetail = (name, value) => {
+      document.querySelectorAll(`[data-selected-server-detail="${name}"]`).forEach((node) => {
+        node.textContent = value || 'Not configured';
+      });
+    };
+    if (operation.operation_action === 'connection_test') {
+      const checkedAt = operation.finished_at || new Date().toISOString();
+      const response = result.round_trip_ms ? `${result.round_trip_ms} ms` : 'Not configured';
+      setDetail('reachability', completed ? 'Reachable' : 'Unreachable');
+      setDetail('last_checked', checkedAt);
+      setDetail('response', response);
+      setDetail('hostname', result.hostname || '');
+      setDetail('os', result.os || '');
+      setDetail('kernel', result.kernel || '');
+      setDetail('remote_user', result.remote_user || '');
+      setDetail('sudo', sudoLabel);
+      setDetail('tool_sudo', sudoLabel);
     }
-    if (managedServerDetails) {
-      const hasDetails = Boolean(result.hostname || result.os || result.kernel || result.remote_user || result.working_directory || result.round_trip_ms || result.passwordless_sudo);
-      managedServerDetails.hidden = !hasDetails;
-      const sudoState = result.passwordless_sudo || 'unknown';
-      const sudoLabel = sudoState === 'ready' || sudoState === 'root' ? 'Ready' : (sudoState === 'setup_required' ? 'Setup required' : 'Unknown');
-      if (managedServerResultSshAccess) managedServerResultSshAccess.textContent = result.success === false ? 'Not ready' : (hasDetails ? 'Ready' : '-');
-      if (managedServerResultSudo) managedServerResultSudo.textContent = sudoLabel;
-      if (managedServerResultHostname) managedServerResultHostname.textContent = result.hostname || '-';
-      if (managedServerResultOs) managedServerResultOs.textContent = result.os || '-';
-      if (managedServerResultKernel) managedServerResultKernel.textContent = result.kernel || '-';
-      if (managedServerResultUser) managedServerResultUser.textContent = result.remote_user || '-';
-      if (managedServerResultWorkingDirectory) managedServerResultWorkingDirectory.textContent = result.working_directory || '-';
-      if (managedServerResultRtt) managedServerResultRtt.textContent = result.round_trip_ms ? `${result.round_trip_ms} ms` : '-';
+    const phpText = Object.prototype.hasOwnProperty.call(result, 'php_installed')
+      ? (result.php_installed ? `Installed${result.php_version ? ` ${result.php_version}` : ''}` : 'Missing')
+      : '';
+    const composerText = Object.prototype.hasOwnProperty.call(result, 'composer_installed')
+      ? (result.composer_installed ? `Installed${result.composer_version ? ` ${result.composer_version}` : ''}` : 'Missing')
+      : '';
+    if (phpText) {
+      setDetail('php', phpText);
+      setDetail('tool_php', phpText);
+    }
+    if (composerText) {
+      setDetail('composer', composerText);
+      setDetail('tool_composer', composerText);
     }
   };
-  const pollManagedServerOperation = (operationId, serverId) => {
+	  const showManagedServerOperation = (operation, target = 'servers') => {
+    const elements = managedServerPanelElements(target);
+    if (!elements.panel) return;
+    const result = operation.result || {};
+    elements.panel.hidden = false;
+    elements.panel.classList.toggle('failed', operation.status === 'failed');
+    if (elements.title) elements.title.textContent = operation.operation_action === 'install_composer' ? 'Install Composer' : 'Refresh Diagnostics';
+    if (elements.server) elements.server.textContent = operation.server_name || operation.server_id || '-';
+    if (elements.status) elements.status.textContent = String(operation.status || 'running').replace(/^\w/, (letter) => letter.toUpperCase());
+    if (elements.stage) elements.stage.textContent = operation.stage || 'Starting';
+    if (elements.elapsed) elements.elapsed.textContent = formatElapsed(operation.elapsed_seconds || 0);
+    if (elements.message) elements.message.textContent = operation.message || 'Testing SSH connection.';
+    if (elements.log) {
+      elements.log.textContent = operation.log && operation.log.trim() !== '' ? operation.log : 'Waiting for operation log...';
+      elements.log.scrollTop = elements.log.scrollHeight;
+    }
+    if (elements.details) {
+      const hasDetails = Boolean(result.hostname || result.os || result.kernel || result.remote_user || result.working_directory || result.round_trip_ms || result.passwordless_sudo || Object.prototype.hasOwnProperty.call(result, 'php_installed') || Object.prototype.hasOwnProperty.call(result, 'composer_installed'));
+      elements.details.hidden = !hasDetails;
+      const sudoState = result.passwordless_sudo || 'unknown';
+      const sudoLabel = sudoState === 'ready' || sudoState === 'root' ? 'Ready' : (sudoState === 'setup_required' ? 'Setup required' : 'Unknown');
+      if (elements.sshAccess) elements.sshAccess.textContent = result.success === false ? 'Not ready' : (hasDetails ? 'Ready' : '-');
+      if (elements.sudo) elements.sudo.textContent = sudoLabel;
+      if (elements.hostname) elements.hostname.textContent = result.hostname || '-';
+      if (elements.os) elements.os.textContent = result.os || '-';
+      if (elements.kernel) elements.kernel.textContent = result.kernel || '-';
+      if (elements.user) elements.user.textContent = result.remote_user || '-';
+      if (elements.workingDirectory) elements.workingDirectory.textContent = result.working_directory || '-';
+      if (elements.rtt) elements.rtt.textContent = result.round_trip_ms ? `${result.round_trip_ms} ms` : '-';
+    }
+  };
+  const pollManagedServerOperation = (operationId, serverId, target = 'servers') => {
     let poll = null;
     const update = async () => {
       const response = await fetch(`?action=managed-server-operation-status&id=${encodeURIComponent(operationId)}`, { cache: 'no-store' });
       const payload = await response.json();
       if (!payload.ok) throw new Error(payload.error || 'Unable to read managed server operation.');
-      showManagedServerOperation(payload.operation);
+      showManagedServerOperation(payload.operation, target);
 	      if (payload.operation.status === 'completed' || payload.operation.status === 'failed') {
 	        clearInterval(poll);
 	        setManagedServerButtons(serverId, false);
 	        updateManagedServerCard(payload.operation);
+          if (target === 'server-management') updateSelectedManagedServerSummary(payload.operation);
 	      }
     };
     update().catch((error) => {
       clearInterval(poll);
       setManagedServerButtons(serverId, false);
-      if (managedServerPanel) managedServerPanel.hidden = false;
-      if (managedServerPanel) managedServerPanel.classList.add('failed');
-      if (managedServerMessage) managedServerMessage.textContent = error.message;
-      if (managedServerStatus) managedServerStatus.textContent = 'Failed';
+      const elements = managedServerPanelElements(target);
+      if (elements.panel) elements.panel.hidden = false;
+      if (elements.panel) elements.panel.classList.add('failed');
+      if (elements.message) elements.message.textContent = error.message;
+      if (elements.status) elements.status.textContent = 'Failed';
     });
     poll = window.setInterval(() => update().catch((error) => {
       clearInterval(poll);
       setManagedServerButtons(serverId, false);
-      if (managedServerMessage) managedServerMessage.textContent = error.message;
-      if (managedServerStatus) managedServerStatus.textContent = 'Failed';
+      const elements = managedServerPanelElements(target);
+      if (elements.message) elements.message.textContent = error.message;
+      if (elements.status) elements.status.textContent = 'Failed';
     }), 1000);
   };
   managedServerForms.forEach((form) => {
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const serverId = form.dataset.serverId || '';
+      const target = form.dataset.operationTarget || 'servers';
       setManagedServerButtons(serverId, true);
       showManagedServerOperation({
         server_id: serverId,
@@ -3704,20 +4002,22 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         status: 'running',
         stage: 'Starting',
         elapsed_seconds: 0,
-        message: 'Starting SSH connection test.',
+        operation_action: (form.querySelector('input[name="action"]')?.value || '') === 'install_managed_server_composer' ? 'install_composer' : 'connection_test',
+        message: (form.querySelector('input[name="action"]')?.value || '') === 'install_managed_server_composer' ? 'Starting Composer installation.' : 'Starting SSH connection test.',
         log: '',
-      });
+      }, target);
       try {
-        const response = await fetch('/?tab=servers#managed-servers', { method: 'POST', body: new FormData(form) });
+        const response = await fetch(form.getAttribute('action') || '/?tab=servers#managed-servers', { method: 'POST', body: new FormData(form) });
         const payload = await response.json();
         if (!payload.ok) throw new Error(payload.error || 'Unable to start SSH connection test.');
-        showManagedServerOperation(payload.operation);
-        pollManagedServerOperation(payload.operation.id, serverId);
+        showManagedServerOperation(payload.operation, target);
+        pollManagedServerOperation(payload.operation.id, serverId, target);
       } catch (error) {
         setManagedServerButtons(serverId, false);
-        if (managedServerPanel) managedServerPanel.classList.add('failed');
-        if (managedServerMessage) managedServerMessage.textContent = error.message;
-        if (managedServerStatus) managedServerStatus.textContent = 'Failed';
+        const elements = managedServerPanelElements(target);
+        if (elements.panel) elements.panel.classList.add('failed');
+        if (elements.message) elements.message.textContent = error.message;
+        if (elements.status) elements.status.textContent = 'Failed';
       }
     });
   });

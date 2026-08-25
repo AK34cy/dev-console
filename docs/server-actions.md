@@ -2,6 +2,12 @@
 
 Managed Servers are registered in `console/config/servers.json` and operated through `console/servers.php`.
 
+Page responsibilities:
+
+- Settings: Dev Console host/runtime/configuration and local host tool management.
+- Servers: managed server registry, SSH onboarding, Add/Edit/Remove, Test Connection, and compact runtime diagnostics.
+- Server Management: selected Managed Server summary and future remote operations.
+
 ## Add Server
 
 Purpose: create a managed server registration.
@@ -65,6 +71,8 @@ The fixed SSH diagnostic command collects:
 - remote user
 - optional Linux distribution from `/etc/os-release`
 - passwordless sudo status
+- PHP path/version when available
+- Composer path/version when available
 
 The command set is fixed by the backend. The browser does not provide shell commands.
 
@@ -75,6 +83,7 @@ Success result:
 - Response time is saved.
 - Hostname, OS, kernel, remote user, and remote working directory are saved when available.
 - Passwordless sudo state is saved.
+- PHP and Composer diagnostic values are saved when available.
 
 Failure result:
 
@@ -91,6 +100,49 @@ Known failure messages include:
 - Key file missing.
 - Invalid key permissions.
 - Passwordless sudo is not configured for this deployment user.
+
+## Install Composer
+
+Purpose: install Composer explicitly on a managed server for projects that need Composer during Preview deployment.
+
+UI location: Server Management for the currently selected Managed Server. The Servers page remains focused on registry, onboarding, editing, removal, and SSH connection testing.
+
+Execution model:
+
+- The browser starts a managed server operation.
+- `console/run-managed-server.php` dispatches the operation to the Composer installer.
+- Dev Console uses SSH with fixed backend-generated commands.
+
+Prerequisites:
+
+- SSH executable exists locally.
+- The configured SSH key exists and has acceptable permissions.
+- The server is Ubuntu/Debian-family.
+- The SSH user is root or `sudo -n true` succeeds.
+
+Remote operations:
+
+- Checks `/etc/os-release`.
+- Checks whether Composer already exists.
+- If Composer exists, the action succeeds without reinstalling.
+- Otherwise runs fixed apt commands:
+  - `apt-get update`
+  - `apt-get install -y composer`
+- Non-root users run the apt commands through `sudo -n`.
+- Verifies `composer --version`.
+
+Result:
+
+- Composer path/version diagnostics are saved.
+- The operation log keeps command output.
+
+Failure conditions:
+
+- Unsupported OS.
+- Missing SSH executable or key.
+- Passwordless sudo is not configured.
+- Package manager failure.
+- Composer verification failure.
 
 ## Generate SSH Key
 

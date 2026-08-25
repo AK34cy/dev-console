@@ -2,6 +2,13 @@
 
 This document describes the workflows implemented in the current source code.
 
+## Page Responsibilities
+
+- Settings: Dev Console configuration, GitHub configuration, local Dev Console host environment, local Apache management, runtime limits, and Dev Console host tool diagnostics/actions.
+- Servers: Managed Server registration, SSH onboarding, Add/Edit/Remove, Test Connection, reachability, and compact PHP/Composer diagnostics.
+- Server Management: selector, diagnostics refresh, runtime prerequisite status, and operational Composer installation for one configured Managed Server. It does not show the local Dev Console host as the managed server.
+- Projects: Project lifecycle, repository state, infrastructure setup, and deployment configuration.
+
 ## Create Managed Server
 
 Purpose: register a Linux server that Dev Console can contact over SSH.
@@ -641,9 +648,10 @@ Prerequisites:
 
 User actions:
 
-1. Enter task body.
-2. Add optional attachments.
-3. Press Create Task.
+1. Click New Task when starting a new task.
+2. Enter task body.
+3. Add optional attachments.
+4. Press Save Task.
 
 Internal operations:
 
@@ -653,7 +661,7 @@ Internal operations:
 - Ensures `TASKS/README.md` exists without overwriting it.
 - Stores attachments under `TASKS/attachments/<task-id>`.
 - Commits and pushes the task addition.
-- Selects the task for current workflow.
+- Selects the task for current workflow and keeps it open in the editor.
 
 Files modified:
 
@@ -667,7 +675,7 @@ Remote operations:
 
 Result:
 
-- Task appears in the TODO group and can be used in workflow.
+- Task appears in the TODO group, remains open in the editor, and can be edited, run, or dropped.
 
 Possible failures:
 
@@ -707,7 +715,7 @@ Internal operations:
 - Restores the pre-Codex `TASKS/` state if Codex edits task metadata, moves task files, deletes attachments, or changes unrelated task files.
 - Parses Git porcelain output without trimming status columns.
 - Commits implementation changes outside `TASKS/`.
-- Moves the task to DONE.
+- Moves the task to DONE after a successful run.
 - Commits and pushes task lifecycle state.
 
 Files modified:
@@ -735,6 +743,82 @@ Possible failures:
 Recovery:
 
 - Fix the reported issue. If the task is left IN PROGRESS with preserved work, retry the same task.
+- If the task should not continue, use Drop Task to move it to DROPPED. This preserves the task file and failed run log while removing it from the active workflow.
+
+## Edit TODO Task
+
+Purpose: update an existing TODO task before execution.
+
+Prerequisites:
+
+- Current task belongs to the active project.
+- Task is in `TASKS/TODO/`.
+
+User actions:
+
+1. Select the task with Use in Workflow.
+2. Edit the task body.
+3. Press Save Task.
+
+Internal operations:
+
+- Updates the existing task file.
+- Preserves generated YAML metadata and attachments.
+- Commits and pushes the task update.
+- Keeps the same task selected.
+
+Result:
+
+- The TODO task remains open and editable until Run Codex starts execution or the user drops it.
+
+## Drop Task
+
+Purpose: abandon a TODO task before execution or abandon a failed IN PROGRESS task without deleting its task file or rewriting the failed Codex run result.
+
+Prerequisites:
+
+- Current task belongs to the active project.
+- Task is in `TASKS/TODO/`; or
+- Task is in `TASKS/IN PROGRESS/` and the Codex run status is Failed.
+
+User actions:
+
+1. Select the TODO or failed IN PROGRESS task.
+2. Press Drop Task.
+3. Confirm the action.
+
+Internal operations:
+
+- Moves `TASKS/TODO/<task-id>.md` or `TASKS/IN PROGRESS/<task-id>.md` to `TASKS/DROPPED/<task-id>.md`.
+- Updates YAML task status to `DROPPED`.
+- Stages only task lifecycle paths.
+- Commits the lifecycle change.
+- Pushes to GitHub.
+
+Files modified:
+
+- Project `TASKS/` lifecycle files only.
+- Codex run log receives lifecycle activity entries.
+
+Remote operations:
+
+- Git push to GitHub.
+
+Result:
+
+- Task appears in the DROPPED task group.
+- The failed Codex run remains recorded as Failed when one exists.
+- The task no longer counts as active workflow state.
+
+Possible failures:
+
+- Task is not TODO or IN PROGRESS.
+- IN PROGRESS task Codex run status is not Failed.
+- Git commit or push fails.
+
+Recovery:
+
+- Resolve the reported Git or repository issue, then retry Drop Task.
 
 ## Deploy Preview
 
@@ -759,7 +843,12 @@ Internal operations:
 - Resolves `origin/<branch>`.
 - Creates a Git archive of that remote commit.
 - Extracts the archive into a temporary source directory.
-- Runs `rsync --delete` to the remote Preview path, excluding `.git/` and `TASKS/`.
+- Detects Composer projects by `composer.json`.
+- Requires `composer.lock` when `composer.json` exists.
+- Checks remote PHP and Composer before modifying Preview for Composer projects.
+- Runs `rsync --delete` to the remote Preview path, excluding `.git/` and `TASKS/`, and handling root `.env` according to the deployment source.
+- Runs remote `composer install --no-dev --prefer-dist --no-interaction --no-progress` for Composer projects.
+- Verifies remote `vendor/autoload.php` for Composer projects.
 - Verifies remote Preview directory exists, is readable, and contains at least one file.
 - Stores Preview deployment metadata.
 
@@ -767,12 +856,20 @@ Files modified:
 
 - `config/projects.json`
 - Runtime files under `console/runtime/preview-deployments`
+
+Remote Preview `.env` note:
+
+- If the deployment source contains root `.env`, Git is authoritative and Dev Console deploys it.
+- If the deployment source does not contain root `.env`, Dev Console preserves an existing `<preview_path>/.env` as server-local runtime configuration and does not create one.
+- Dev Console does not create, edit, inspect, or manage server-local `.env` contents.
+- `.env.example` and other committed source files continue to deploy normally.
 - Temporary files under `/tmp/dev-console-preview-deployments`
 
 Remote operations:
 
 - SSH directory checks.
 - Remote file synchronization with rsync.
+- Remote PHP/Composer checks and Composer install for Composer projects.
 
 Result:
 
@@ -784,9 +881,12 @@ Possible failures:
 - Missing local rsync.
 - SSH failure.
 - Remote path missing or not writable.
+- `composer.json` exists without `composer.lock`.
+- PHP or Composer missing on the Managed Server for Composer projects.
+- Composer install failure.
 - Remote verification failure.
 
-Recovery:
+Recovery: read the operation log, install missing prerequisites or commit `composer.lock` if needed, then deploy Preview again.
 
 - Fix Git, SSH, or remote permissions and deploy again.
 
