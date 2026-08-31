@@ -2260,19 +2260,20 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .dashboard-workspace { display: grid; gap: 16px; }
     .dashboard-task-grid { align-items: stretch; display: grid; gap: 16px; grid-template-columns: minmax(0, 2fr) minmax(320px, .95fr); }
     .dashboard-execution-grid, .dashboard-deployment-grid { align-items: stretch; display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .dashboard-execution-grid > .panel { box-sizing: border-box; display: flex; flex-direction: column; width: 100%; }
     .dashboard-task-grid > .dashboard-column { display: flex; }
     .dashboard-task-grid > .dashboard-column > .panel, .dashboard-deployment-grid > .panel { box-sizing: border-box; display: flex; flex-direction: column; width: 100%; }
-    .project-selector { align-items: end; display: grid; gap: 12px; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); }
+    .project-selector { align-items: start; display: grid; gap: 10px 14px; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); padding: 12px 14px; }
     .project-selector form { margin: 0; }
-    .project-selector label { margin-top: 0; }
-    .project-identity { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+    .project-selector label { font-size: 12px; margin: 0 0 5px; }
+    .project-identity { display: grid; gap: 6px; }
+    .project-summary-line, .project-paths-inline { display: flex; flex-wrap: wrap; gap: 5px 14px; }
     .project-identity span { color: var(--muted); font-size: 12px; }
-    .project-paths { border-top: 1px solid var(--line); grid-column: 1 / -1; padding-top: 10px; }
-    .project-paths h3 { color: var(--blue); font-size: 13px; margin: 0 0 7px; }
-    .project-paths-list { display: grid; gap: 8px 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; }
-    .project-paths-list dt { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
-    .project-paths-list dd { font-size: 12px; margin: 3px 0 0; overflow-wrap: anywhere; }
-    .project-paths-list code { padding: 1px 3px; }
+    .project-identity strong { color: var(--ink); }
+    .project-paths-inline { border-top: 1px solid var(--line); padding-top: 6px; }
+    .project-paths-inline span { font-size: 11px; }
+    .project-paths-inline b { color: var(--muted); font-weight: 700; text-transform: uppercase; }
+    .project-paths-inline code { padding: 1px 3px; }
     .panel, .result-block { background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 18px rgba(0, 83, 133, 0.07); margin-top: 14px; padding: 18px; }
     .result-block h2, .command-output h3 { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 15px; }
     .result-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
@@ -2317,19 +2318,21 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .attachment-list li { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
     .inline-form { display: inline; margin: 0; }
     .link-button { background: none; border: 0; color: var(--blue); cursor: pointer; font: inherit; padding: 0; text-decoration: underline; }
-    .task-list-scroll { flex: 1 1 auto; max-height: 760px; overflow-y: auto; padding-right: 6px; }
-    .task-group { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+    .dashboard-task-list .panel { min-height: 0; }
+    .task-list-scroll { flex: 1 1 0; min-height: 0; overflow-y: auto; padding-right: 6px; }
+    .task-group { border-top: 1px solid var(--line); margin-top: 9px; padding-top: 9px; }
     .task-group:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
-    .task-group h3 { color: var(--blue); font-size: 13px; letter-spacing: 0; margin: 0 0 6px; }
+    .task-group h3 { color: var(--blue); font-size: 12px; letter-spacing: 0; margin: 0 0 4px; }
+    .task-group-empty { color: var(--muted); font-size: 11px; margin: 0; }
     .task-list { list-style: none; margin: 0; padding: 0; }
-    .task-list > li { border-top: 1px solid var(--line); padding: 8px 0; }
+    .task-list > li { border-top: 1px solid var(--line); padding: 6px 0; }
     .task-list li:first-child { border-top: 0; }
     .task-row-header { align-items: center; display: flex; gap: 8px; justify-content: space-between; }
     .task-row-actions { display: flex; justify-content: flex-end; }
     .task-summary-label { color: var(--blue); font-weight: 700; }
-    .task-title { color: var(--ink); display: block; font-size: 12px; margin-top: 3px; }
-    .task-metadata { color: var(--muted); display: flex; flex-wrap: wrap; font-size: 12px; gap: 5px 12px; margin-top: 6px; }
-    .task-list .button-link { font-size: 12px; margin-top: 7px; padding: 6px 9px; }
+    .task-title { color: var(--ink); display: block; font-size: 11.5px; margin-top: 2px; }
+    .task-metadata { color: var(--muted); display: flex; flex-wrap: wrap; font-size: 11px; gap: 3px 10px; margin-top: 3px; }
+    .task-list .button-link { font-size: 11px; margin-top: 4px; padding: 5px 8px; }
     .milestone { color: #7a5b00; }
     .badge { background: #e3f5f9; border-radius: 999px; color: var(--blue); display: inline-block; flex: 0 0 auto; font-size: 11px; font-weight: 700; padding: 4px 8px; }
     .badge.done { background: #e9f7ef; color: var(--green); }
@@ -2340,9 +2343,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .step-state { background: #edf4f7; border-radius: 999px; color: var(--muted); flex: 0 0 auto; font-size: 11px; font-weight: 700; padding: 4px 8px; text-transform: uppercase; }
     .step-state.done { background: #e9f7ef; color: var(--green); }
     .step-state.pending { background: #f4f1e8; color: #76622d; }
-    .workflow-summary { justify-self: start; margin-bottom: 2px; max-width: calc(50% - 8px); padding: 12px 14px; width: 100%; }
     .workflow-stage-grid { align-items: stretch; display: grid; gap: 8px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .workflow-stage { background: #f8fbfc; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 8px 10px; position: relative; }
+    .current-workflow-stages { margin-top: auto; padding-top: 14px; }
+    .workflow-stage { background: #f8fbfc; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 10px 10px 9px; position: relative; }
     .workflow-stage:not(:last-child)::after { color: var(--muted); content: "→"; font-weight: 700; position: absolute; right: -10px; top: 50%; transform: translateY(-50%); }
     .workflow-stage h3 { color: var(--muted); font-size: 10px; letter-spacing: 0; margin: 0 0 5px; text-transform: uppercase; }
     .workflow-stage strong { color: var(--ink); display: block; font-size: 13px; overflow-wrap: anywhere; }
@@ -2399,23 +2402,23 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .modal-actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; margin-top: 20px; }
     .change-list { background: #f3f6f7; max-height: 220px; overflow: auto; padding: 12px 12px 12px 30px; }
     .deployment-error { color: #8a1f1f; font-weight: 700; }
-    .environment-block { padding: 14px; }
+    .environment-block { padding: 12px 14px; }
     .environment-block a { color: var(--blue); }
     .dashboard-header { align-items: baseline; display: flex; gap: 8px; justify-content: space-between; }
     .dashboard-header button { margin-top: 0; }
-    .dashboard-header h2 { font-size: 18px; }
+    .dashboard-header h2 { font-size: 17px; margin-bottom: 0; }
     .dashboard-header .meta { font-size: 11px; white-space: nowrap; }
-    .dashboard-grid { display: grid; gap: 10px; margin-top: 10px; }
+    .dashboard-grid { display: grid; gap: 8px; margin-top: 8px; }
     .summary-grid { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .environment-host-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .environment-host-grid { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .environment-status-card { grid-column: 1 / -1; }
     .repository-card { grid-column: 1 / -1; }
-    .dashboard-card { background: #f8fbfc; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 9px 10px; }
-    .dashboard-card h3 { color: var(--blue); font-size: 13px; margin: 0 0 6px; }
-    .dashboard-list { display: grid; gap: 4px; margin: 0; }
-    .dashboard-list div { display: grid; gap: 5px; grid-template-columns: minmax(68px, .75fr) minmax(0, 1.25fr); }
-    .dashboard-list dt { color: var(--muted); font-size: 11px; font-weight: 700; }
-    .dashboard-list dd { font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+    .dashboard-card { background: #f8fbfc; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 8px 9px; }
+    .dashboard-card h3 { color: var(--blue); font-size: 12px; margin: 0 0 5px; }
+    .dashboard-list { display: grid; gap: 3px; margin: 0; }
+    .dashboard-list div { display: grid; gap: 5px; grid-template-columns: minmax(62px, .62fr) minmax(0, 1.38fr); }
+    .dashboard-list dt { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .dashboard-list dd { font-size: 11px; margin: 0; overflow-wrap: anywhere; }
     .dashboard-list code { padding: 1px 3px; }
     .status-pill { align-items: center; background: #edf0f2; border-radius: 999px; color: #56636a; display: inline-flex; font-size: 11px; font-weight: 700; justify-content: center; line-height: 1; min-height: 22px; padding: 4px 8px; text-transform: uppercase; vertical-align: middle; }
     .status-pill.pending { background: #edf0f2; color: #56636a; }
@@ -2423,19 +2426,28 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .status-pill.healthy { background: #e4f6ea; color: var(--green); }
     .status-pill.warning { background: #fff2b8; color: #705900; }
     .status-pill.error { background: #fde8e8; color: #8a1f1f; }
-    .health-row { display: flex; flex-wrap: wrap; gap: 6px 12px; }
-    .health-item { align-items: center; display: inline-flex; font-size: 11px; font-weight: 700; gap: 5px; }
+    .status-pill.quiet { background: #edf0f2; color: #56636a; }
+    .health-row { display: flex; flex-wrap: wrap; gap: 5px 10px; }
+    .health-item { align-items: center; display: inline-flex; font-size: 10.5px; font-weight: 700; gap: 5px; }
     .health-dot { background: #8a969c; border-radius: 50%; height: 8px; width: 8px; }
     .health-item.healthy .health-dot { background: #1b9a59; }
     .health-item.warning .health-dot { background: #d59b00; }
     .health-item.error .health-dot { background: #c83232; }
-    .resource-grid { display: grid; gap: 9px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .resource-head { display: flex; font-size: 11px; font-weight: 700; justify-content: space-between; margin-bottom: 4px; }
-    .progress-track { background: #dce8ed; border-radius: 999px; height: 7px; overflow: hidden; }
+    .health-item.quiet { color: var(--muted); opacity: .78; }
+    .health-item.quiet .health-dot { background: #9aa7ad; }
+    .resource-grid { display: grid; gap: 7px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 7px; }
+    .resource-head { display: flex; font-size: 10px; font-weight: 700; justify-content: space-between; margin-bottom: 3px; }
+    .progress-track { background: #dce8ed; border-radius: 999px; height: 6px; overflow: hidden; }
     .progress-bar { background: #238654; border-radius: inherit; height: 100%; }
     .progress-bar.warning { background: #d59b00; }
     .progress-bar.error { background: #c83232; }
-    .resource-value { color: var(--muted); font-size: 10px; margin: 4px 0 0; }
+    .resource-value { color: var(--muted); font-size: 9.5px; margin: 3px 0 0; }
+    .environment-summary-card h3 { align-items: baseline; display: flex; gap: 8px; justify-content: space-between; }
+    .environment-summary-card h3 span { color: var(--muted); font-size: 10px; font-weight: 400; overflow-wrap: anywhere; text-align: right; }
+    .environment-metadata-row { align-items: center; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+    .environment-metadata-row span { color: var(--ink); font-size: 11px; min-width: 0; overflow-wrap: anywhere; }
+    .environment-metadata-row b { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+    .environment-metadata-row .status-pill { min-height: 18px; padding: 3px 7px; }
     .compact-details summary { color: var(--blue); cursor: pointer; font-size: 13px; font-weight: 700; }
     .app-footer { color: var(--muted); font-size: 12px; margin: 22px 0 4px; text-align: center; }
     .compact-table { border-collapse: collapse; font-size: 11px; width: 100%; }
@@ -2598,14 +2610,15 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .hosts-copy-row { align-items: stretch; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; margin-top: 8px; }
     .hosts-copy-row .local-hosts { margin: 0; }
     .success-message { background: #e9f7ef; border: 1px solid #b8dfc7; border-radius: 6px; color: var(--green); padding: 10px 12px; }
-    .process-table { border-collapse: collapse; font-size: 12px; width: 100%; }
-    .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 6px; text-align: left; }
+    .dashboard-processes { padding: 7px 8px; }
+    .dashboard-processes summary { font-size: 12px; }
+    .process-table { border-collapse: collapse; font-size: 10.5px; width: 100%; }
+    .process-table th, .process-table td { border-top: 1px solid var(--line); padding: 3px 4px; text-align: left; }
     .process-table th { border-top: 0; color: var(--muted); }
     .process-table td:last-child { overflow-wrap: anywhere; }
     @media (max-width: 900px) {
       .dashboard-columns { display: block; }
       .dashboard-task-grid, .dashboard-execution-grid, .dashboard-deployment-grid, .environment-host-grid { grid-template-columns: 1fr; }
-      .workflow-summary { max-width: none; }
 	      .workflow-stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	      .workflow-stage:nth-child(2)::after { content: ""; }
 	      .settings-layout, .server-layout, .projects-layout, .documentation-layout { grid-template-columns: 1fr; }
@@ -2618,7 +2631,6 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       .apache-summary, .runtime-limit-row, .github-config-grid { grid-template-columns: 1fr; }
       .page-header { display: block; }
       .brand-logo { height: 30px; }
-      .project-paths-list { grid-template-columns: 1fr; }
       .brand-separator { height: 24px; }
       .page-context { margin-top: 12px; text-align: left; }
       main { margin-top: 18px; }
@@ -2712,29 +2724,19 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           $projectProductionUrl = $projectProductionDomain === '' ? '' : 'http://' . $projectProductionDomain;
           $projectPreviewUrl = $projectPreviewDomain === '' ? '' : 'http://' . $projectPreviewDomain;
         ?>
-        <span><strong><?= h((string)($activeProject['name'] ?? '')) ?></strong></span>
-        <span>Server: <?= h(devConsoleManagedServerLabel($activeManagedServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></span>
-        <span>Status: <?= h(devConsoleManagedServerStatusLabel($activeManagedServer)) ?></span>
-        <span>Production: <?php if ($projectProductionUrl !== ''): ?><a href="<?= h($projectProductionUrl) ?>" target="_blank" rel="noopener noreferrer"><?= h($projectProductionDomain) ?></a><?php else: ?>Not configured<?php endif; ?></span>
-        <span>Preview: <?php if ($projectPreviewUrl !== ''): ?><a href="<?= h($projectPreviewUrl) ?>" target="_blank" rel="noopener noreferrer"><?= h($projectPreviewDomain) ?></a><?php else: ?>Not configured<?php endif; ?></span>
+        <div class="project-summary-line">
+          <span><strong><?= h((string)($activeProject['name'] ?? '')) ?></strong></span>
+          <span>Server: <?= h(devConsoleManagedServerLabel($activeManagedServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></span>
+          <span>Status: <?= h(devConsoleManagedServerStatusLabel($activeManagedServer)) ?></span>
+          <span>Production: <?php if ($projectProductionUrl !== ''): ?><a href="<?= h($projectProductionUrl) ?>" target="_blank" rel="noopener noreferrer"><?= h($projectProductionDomain) ?></a><?php else: ?>Not configured<?php endif; ?></span>
+          <span>Preview: <?php if ($projectPreviewUrl !== ''): ?><a href="<?= h($projectPreviewUrl) ?>" target="_blank" rel="noopener noreferrer"><?= h($projectPreviewDomain) ?></a><?php else: ?>Not configured<?php endif; ?></span>
+        </div>
+        <div class="project-paths-inline" aria-label="Project paths">
+          <span><b>Source</b> <code><?= h(configuredDisplayValue($activeProject['repository_path'] ?? '')) ?></code></span>
+          <span><b>Preview</b> <code><?= h(configuredDisplayValue($activeProject['preview']['path'] ?? '')) ?></code></span>
+          <span><b>Production</b> <code><?= h(configuredDisplayValue($activeProject['production']['path'] ?? '')) ?></code></span>
+        </div>
       </div>
-      <section class="project-paths" aria-label="Project paths">
-        <h3>Project Paths</h3>
-        <dl class="project-paths-list">
-          <div>
-            <dt>Source repository</dt>
-            <dd><code><?= h(configuredDisplayValue($activeProject['repository_path'] ?? '')) ?></code></dd>
-          </div>
-          <div>
-            <dt>Preview path</dt>
-            <dd><code><?= h(configuredDisplayValue($activeProject['preview']['path'] ?? '')) ?></code></dd>
-          </div>
-          <div>
-            <dt>Production path</dt>
-            <dd><code><?= h(configuredDisplayValue($activeProject['production']['path'] ?? '')) ?></code></dd>
-          </div>
-        </dl>
-      </section>
     <?php endif; ?>
   </section>
 
@@ -2847,7 +2849,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <section class="task-group">
             <h3><?= h($groupName) ?></h3>
             <?php if (empty($groupTasks)): ?>
-              <p class="meta">No <?= h(strtolower($groupName)) ?> tasks.</p>
+              <p class="task-group-empty">No <?= h(strtolower($groupName)) ?> tasks.</p>
             <?php else: ?>
               <ul class="task-list">
                 <?php foreach ($groupTasks as $task): ?>
@@ -2888,8 +2890,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
             <div><dt>Current branch</dt><dd><?= h(configuredDisplayValue($activeGitStatus['branch'] ?? '')) ?></dd></div>
             <div><dt>Task location</dt><dd><code><?= h($activeTaskPath) ?></code></dd></div>
           </dl>
-          <details class="compact-details">
-            <summary>Show workflow details</summary>
+          <details class="compact-details" open>
+            <summary>Workflow details</summary>
             <ul class="workflow-steps">
               <li><span class="step-state done">Done</span><span>Task file created<?php if ($activeTaskPath !== ''): ?>: <code><?= h($activeTaskPath) ?></code><?php endif; ?></span></li>
               <li><span class="step-state <?= h($taskGitCompleted ? 'done' : 'pending') ?>"><?= h($taskGitCompleted ? 'Done' : 'Ready') ?></span><span>Task committed locally<?php if ($commitHash !== ''): ?>: <code title="<?= h($commitHash) ?>"><?= h(shortSha($commitHash)) ?></code><?php endif; ?></span></li>
@@ -2960,6 +2962,19 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         <?php else: ?>
           <p class="meta">No active task. Create a task or open a task from the list.</p>
         <?php endif; ?>
+        <div class="workflow-stage-grid current-workflow-stages" aria-label="Project workflow summary">
+          <?php foreach ($workflowStages as $stage): ?>
+            <?php $stageState = (string)($stage['state'] ?? ''); ?>
+            <section class="workflow-stage" data-workflow-stage="<?= h((string)($stage['name'] ?? '')) ?>">
+              <h3><?= h((string)($stage['name'] ?? '')) ?></h3>
+              <span class="status-pill <?= h(workflowStateClass($stageState)) ?>" data-workflow-state><?= h($stageState) ?></span>
+              <strong data-workflow-primary><?= h((string)($stage['primary'] ?? '')) ?></strong>
+              <?php if ((string)($stage['detail'] ?? '') !== ''): ?>
+                <span class="meta" data-workflow-detail><?= h((string)$stage['detail']) ?></span>
+              <?php endif; ?>
+            </section>
+          <?php endforeach; ?>
+        </div>
       </section>
 
       <section class="panel">
@@ -3006,25 +3021,6 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       </section>
 
   </div>
-  <section class="panel workflow-summary" aria-label="Project workflow summary">
-    <div class="dashboard-header">
-      <h2>Workflow</h2>
-      <span class="meta">Task → Codex → Preview → Production</span>
-    </div>
-    <div class="workflow-stage-grid">
-      <?php foreach ($workflowStages as $stage): ?>
-        <?php $stageState = (string)($stage['state'] ?? ''); ?>
-        <section class="workflow-stage" data-workflow-stage="<?= h((string)($stage['name'] ?? '')) ?>">
-          <h3><?= h((string)($stage['name'] ?? '')) ?></h3>
-          <span class="status-pill <?= h(workflowStateClass($stageState)) ?>" data-workflow-state><?= h($stageState) ?></span>
-          <strong data-workflow-primary><?= h((string)($stage['primary'] ?? '')) ?></strong>
-          <?php if ((string)($stage['detail'] ?? '') !== ''): ?>
-            <span class="meta" data-workflow-detail><?= h((string)$stage['detail']) ?></span>
-          <?php endif; ?>
-        </section>
-      <?php endforeach; ?>
-    </div>
-  </section>
   <div class="dashboard-deployment-grid">
       <section class="panel deployment-panel" id="previewDeployment">
         <h2>Preview Deployment</h2>
@@ -3051,7 +3047,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <div><dt>Preview version</dt><dd><code id="previewDeploymentCommit" title="<?= h($previewCommit) ?>"><?= h($previewCommit === '' ? 'Not deployed' : shortSha($previewCommit)) ?></code></dd></div>
           <div><dt>Last deployment</dt><dd id="previewLastDeploymentTime"><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['deployed_at'] ?? '')) ?></dd></div>
         </dl>
-        <details class="compact-details">
+        <details class="compact-details" open>
           <summary>Deployment details</summary>
           <dl class="deployment-details">
             <div><dt>Managed Server</dt><dd><?= h(devConsoleManagedServerLabel($previewServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></dd></div>
@@ -3119,7 +3115,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         <div><dt>Last deployed</dt><dd id="productionLastDeploymentTime"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['deployed_at'] ?? '')) ?></dd></div>
         <div><dt>Version state</dt><dd id="productionVersionState"><?= h((string)($managedProductionDeploymentOverview['version_state'] ?? 'Preview has not been deployed')) ?></dd></div>
       </dl>
-      <details class="compact-details">
+      <details class="compact-details" open>
         <summary>Deployment details</summary>
         <dl class="deployment-details">
           <div><dt>Managed Server</dt><dd id="productionDeploymentServer"><?= h(devConsoleManagedServerLabel($productionServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></dd></div>
@@ -5212,10 +5208,12 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     const value = String(status).toLowerCase();
     if (['running', 'success', 'healthy'].includes(value)) return 'healthy';
     if (['pending', 'not_started'].includes(value)) return 'warning';
+    if (['unknown', 'not configured', 'not_configured', 'not deployed', 'not_deployed', 'not available', 'not_available', ''].includes(value)) return 'quiet';
     return 'error';
   };
   const statusLabel = (status) => String(status).replaceAll('_', ' ');
   const dashboardCard = (title, rows, extraClass = '') => `<section class="dashboard-card ${extraClass}"><h3>${dashboardEscape(title)}</h3><dl class="dashboard-list">${rows.map(([label, value]) => `<div><dt>${dashboardEscape(label)}</dt><dd>${value}</dd></div>`).join('')}</dl></section>`;
+  const environmentSummaryCard = (title, subtitle, rows, resources) => `<section class="dashboard-card environment-summary-card"><h3>${dashboardEscape(title)}<span>${dashboardEscape(subtitle)}</span></h3><div class="environment-metadata-row">${rows.map(([label, value]) => `<span><b>${dashboardEscape(label)}</b> ${value}</span>`).join('')}</div>${resources ? `<div class="resource-grid">${resources}</div>` : ''}</section>`;
   const dashboardLink = (url) => `<a href="${dashboardEscape(url)}" target="_blank" rel="noopener noreferrer">${dashboardEscape(url)}</a>`;
   const dashboardStatus = (status) => `<span class="status-pill ${statusClass(status)}">${dashboardEscape(statusLabel(status))}</span>`;
   const safeLink = (url) => url ? dashboardLink(url) : 'Not configured';
@@ -5230,8 +5228,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     if (!environmentDashboard || environmentRefreshInProgress) return;
     environmentRefreshInProgress = true;
     try {
-      const topProcessesWasOpen = sessionStorage.getItem('dev-console-topProcesses-open') === '1' || (environmentDashboard.querySelector('#topProcesses')?.open ?? false);
-      const managedProcessesWasOpen = sessionStorage.getItem('dev-console-managedTopProcesses-open') === '1' || (environmentDashboard.querySelector('#managedTopProcesses')?.open ?? false);
+      const topProcessesWasOpen = environmentDashboard.querySelector('#topProcesses')?.open ?? false;
+      const managedProcessesWasOpen = environmentDashboard.querySelector('#managedTopProcesses')?.open ?? false;
       const response = await fetch('?action=environment-status', { cache: 'no-store' });
       const payload = await response.json();
       if (!payload.ok) throw new Error(payload.error || 'Unable to load environment status.');
@@ -5263,37 +5261,37 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       const apache = managedServer.apache || {};
       const sites = Array.isArray(managedServer.apache_sites) ? managedServer.apache_sites : [];
       const projectSites = sites.filter((site) => site && site.project_id === activeProjectId && site.managed_marker);
-      const webHealth = apache.installed === false ? 'error' : (projectSites.some((site) => site.enabled === true) ? 'healthy' : (projectSites.length ? 'warning' : 'warning'));
-      const tailscaleHealth = 'warning';
+      const webHealth = apache.installed === false ? 'error' : (projectSites.some((site) => site.enabled === true) ? 'healthy' : (projectSites.length ? 'warning' : 'quiet'));
+      const tailscaleHealth = 'quiet';
       const tailscaleLabel = 'Tailscale: Unknown';
-      const devConsoleResources = `<section class="dashboard-card"><h3>Dev Console Host Resources</h3><div class="resource-grid">${resourceBar('CPU', data.server.load_percentage, `Load ${data.server.load.join(' / ') || 'not detected'}`)}${resourceBar('Memory', memory.percentage, `${formatBytes(memory.used)} / ${formatBytes(memory.total)}`)}${resourceBar('Disk', disk.percentage, `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`)}</div></section>`;
+      const devConsoleResources = `${resourceBar('CPU', data.server.load_percentage, `Load ${data.server.load.join(' / ') || 'not detected'}`)}${resourceBar('Memory', memory.percentage, `${formatBytes(memory.used)} / ${formatBytes(memory.total)}`)}${resourceBar('Disk', disk.percentage, `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`)}`;
       const managedResources = managedMetrics && managedServer.available
-        ? `<section class="dashboard-card"><h3>Managed Server Resources</h3><div class="resource-grid">${resourceBar('CPU', managedMetrics.load_percentage, `Load ${(managedMetrics.load || []).join(' / ') || 'not detected'}`)}${resourceBar('Memory', managedMemory.percentage, `${formatBytes(managedMemory.used)} / ${formatBytes(managedMemory.total)}`)}${resourceBar('Disk', managedDisk.percentage, `${formatBytes(managedDisk.used)} / ${formatBytes(managedDisk.total)}`)}</div></section>`
-        : dashboardCard('Managed Server Resources', [['Server', dashboardEscape(activeManagedServerLabel || 'Not configured')], ['Status', dashboardEscape(activeManagedServerStatus || 'Unknown')], ['Diagnostics', dashboardEscape(managedServer.message || 'Unavailable until the server is reachable')]], '');
+        ? `${resourceBar('CPU', managedMetrics.load_percentage, `Load ${(managedMetrics.load || []).join(' / ') || 'not detected'}`)}${resourceBar('Memory', managedMemory.percentage, `${formatBytes(managedMemory.used)} / ${formatBytes(managedMemory.total)}`)}${resourceBar('Disk', managedDisk.percentage, `${formatBytes(managedDisk.used)} / ${formatBytes(managedDisk.total)}`)}`
+        : '';
+      const devConsoleHostRows = [
+        ['Status', dashboardStatus(data.environment.console.status)],
+        ['Repository size', formatBytes(data.statistics.development.bytes)],
+        ['Repository files', data.statistics.development.files.toLocaleString()],
+      ];
+      const managedServerRows = [
+        ['Server', dashboardEscape(activeManagedServerLabel || 'Not configured')],
+        ['Status', dashboardEscape(activeManagedServerStatus || 'Unknown')],
+        ...storageRows('preview', 'Preview'),
+        ...storageRows('production', 'Production'),
+      ];
+      if (!managedResources) {
+        managedServerRows.push(['Diagnostics', dashboardEscape(managedServer.message || 'Unavailable until the server is reachable')]);
+      }
       environmentDashboard.innerHTML =
         `<section class="dashboard-card environment-status-card"><div class="health-row">${healthItem(`Preview: ${statusLabel(preview.status)}`, previewHealth)}${healthItem(`Production: ${statusLabel(production.status)}`, productionHealth)}${healthItem('Dev Console: Running', consoleHealth)}${healthItem(`Git: ${activeGitStatusLabel || 'Unknown'}`, gitHealth)}${healthItem(`Project Apache: ${projectSites.length ? 'Configured' : 'Unknown'}`, webHealth)}${healthItem(tailscaleLabel, tailscaleHealth)}</div></section>` +
         `<div class="environment-host-grid">` +
-        dashboardCard('Dev Console Host', [['Status', dashboardStatus(data.environment.console.status)]]) +
-        dashboardCard('Managed Server', [['Server', dashboardEscape(activeManagedServerLabel || 'Not configured')], ['Status', dashboardEscape(activeManagedServerStatus || 'Unknown')]]) +
+        environmentSummaryCard('Dev Console Host', 'Runtime and repository', devConsoleHostRows, devConsoleResources) +
+        environmentSummaryCard('Managed Server', managedServer.available ? 'Remote infrastructure' : 'Not reachable', managedServerRows, managedResources) +
         `</div>` +
-        `<div class="environment-host-grid">${devConsoleResources}${managedResources}</div>` +
-        dashboardCard('Repository / Project Storage', [
-          ['Dev Console Host', '<strong>Repository</strong>'],
-          ['Repository size', formatBytes(data.statistics.development.bytes)],
-          ['Repository files', data.statistics.development.files.toLocaleString()],
-          ['Managed Server', '<strong>Deployed storage</strong>'],
-          ...storageRows('preview', 'Preview'),
-          ...storageRows('production', 'Production'),
-        ], 'repository-card') +
         `<div class="environment-host-grid">` +
         `<details class="dashboard-card compact-details dashboard-processes" id="topProcesses"${topProcessesWasOpen ? ' open' : ''}><summary>Dev Console Host Top Processes</summary><table class="process-table"><thead><tr><th>PID</th><th>User</th><th>CPU %</th><th>Memory %</th><th>Command</th></tr></thead><tbody>${processes}</tbody></table></details>` +
         `<details class="dashboard-card compact-details dashboard-processes" id="managedTopProcesses"${managedProcessesWasOpen ? ' open' : ''}><summary>Managed Server Top Processes</summary><table class="process-table"><thead><tr><th>PID</th><th>User</th><th>CPU %</th><th>Memory %</th><th>Command</th></tr></thead><tbody>${managedProcesses}</tbody></table></details>` +
         `</div>`;
-      environmentDashboard.querySelectorAll('.dashboard-processes').forEach((details) => {
-        details.addEventListener('toggle', () => {
-          sessionStorage.setItem(`dev-console-${details.id}-open`, details.open ? '1' : '0');
-        });
-      });
       dashboardUpdated.textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
     } finally {
       environmentRefreshInProgress = false;
