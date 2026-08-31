@@ -80,6 +80,9 @@ function devConsoleEmptyProject(): array
             'last_attempt_at' => null,
             'last_attempt_commit' => null,
             'last_attempt_message' => null,
+            'preserve_paths' => [],
+            'preflight' => null,
+            'deletion_approval' => null,
         ],
         'git' => [
             'provider' => null,
@@ -222,6 +225,18 @@ function devConsoleNormalizeProjectConfiguration(array $configuration): array
         }
         if (array_key_exists('duration_ms', $productionDeploymentInput)) {
             $project['production_deployment']['duration_ms'] = is_numeric($productionDeploymentInput['duration_ms']) ? (int)$productionDeploymentInput['duration_ms'] : null;
+        }
+        if (array_key_exists('preserve_paths', $productionDeploymentInput) && is_array($productionDeploymentInput['preserve_paths'])) {
+            $project['production_deployment']['preserve_paths'] = array_values(array_unique(array_filter(array_map(
+                static fn($value): string => is_scalar($value) ? trim((string)$value) : '',
+                $productionDeploymentInput['preserve_paths']
+            ), static fn(string $value): bool => $value !== '')));
+        }
+        if (array_key_exists('preflight', $productionDeploymentInput)) {
+            $project['production_deployment']['preflight'] = is_array($productionDeploymentInput['preflight']) ? $productionDeploymentInput['preflight'] : null;
+        }
+        if (array_key_exists('deletion_approval', $productionDeploymentInput)) {
+            $project['production_deployment']['deletion_approval'] = is_array($productionDeploymentInput['deletion_approval']) ? $productionDeploymentInput['deletion_approval'] : null;
         }
 
         $provisioningInput = is_array($projectInput['provisioning'] ?? null) ? $projectInput['provisioning'] : [];
@@ -649,6 +664,19 @@ function devConsoleProjectUsesGeneratedEnvironmentPaths(array $project): bool
     $paths = devConsoleGeneratedEnvironmentPaths($projectId);
     return (string)($project['production']['path'] ?? '') === $paths['production']
         && (string)($project['preview']['path'] ?? '') === $paths['preview'];
+}
+
+function devConsoleProjectAdoptedInPlace(array $project): bool
+{
+    $setup = is_array($project['setup'] ?? null) ? $project['setup'] : [];
+    $infrastructure = is_array($setup['infrastructure'] ?? null) ? $setup['infrastructure'] : [];
+
+    return !empty($infrastructure['adopted_in_place'])
+        && (string)($setup['status'] ?? '') === 'Configured'
+        && devConsoleIsAbsoluteUnixPath((string)($project['production']['path'] ?? ''))
+        && devConsoleIsAbsoluteUnixPath((string)($project['preview']['path'] ?? ''))
+        && devConsoleIsHostname((string)($project['production']['domain'] ?? ''))
+        && devConsoleIsHostname((string)($project['preview']['domain'] ?? ''));
 }
 
 function devConsoleReplaceProject(array $configuration, array $updatedProject): array

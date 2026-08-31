@@ -1,6 +1,6 @@
 # Projects
 
-A Project connects a name, domains, generated directories, a Dev Console host Git repository path, and Managed Server assignment.
+A Project connects a name, domains, configured Preview/Production paths, a Dev Console host Git repository path, and Managed Server assignment.
 
 ## Create Project
 
@@ -13,6 +13,21 @@ Dev Console generates:
 - Production directory
 - Preview directory
 - Preview domain from the Production domain
+
+These generated directories are defaults for new Projects. Adopted Projects may preserve existing Preview and Production paths outside `/var/www/projects/<project-id>`.
+
+## Add Existing Project
+
+Add Existing Project imports an already-hosted project into Dev Console without changing the existing website.
+
+The normal flow is:
+
+1. Scan a Managed Server.
+2. Inspect a discovered site or project source.
+3. Review the adoption plan.
+4. Confirm Adopt Project.
+
+Adoption copies the selected source into a local Dev Console host repository at `/var/www/git/<project-id>`, preserves existing Git/TASKS history when present, and registers the Project after the import succeeds. Existing Preview and Production paths are adopted in place. Dev Console does not modify Apache, deploy files, create GitHub repositories, or push to GitHub during adoption.
 
 ## Edit Project
 
@@ -28,7 +43,7 @@ If infrastructure-affecting settings change, Dev Console marks Infrastructure as
 
 ## Set Up
 
-Set up prepares Project infrastructure. For managed-server Projects it creates remote Preview and Production directories, installs Apache virtual hosts, enables them, validates Apache configuration, reloads Apache, and saves setup metadata.
+Set up prepares Project infrastructure. For managed-server Projects created by Dev Console it creates remote Preview and Production directories, installs Apache virtual hosts, enables them, validates Apache configuration, reloads Apache, and saves setup metadata. Adopted-in-place Projects preserve their existing Preview, Production, and Apache state when that infrastructure is already recorded as configured.
 
 ## Retry Setup
 

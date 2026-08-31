@@ -309,7 +309,18 @@ function gitRepairableRemoteUrls(array $project, array $githubConfiguration): ar
 
 function gitRemoteUrlMatchesExpected(string $actualRemote, array $project, array $githubConfiguration): bool
 {
-    return in_array($actualRemote, gitRepairableRemoteUrls($project, $githubConfiguration), true);
+    if (in_array($actualRemote, gitRepairableRemoteUrls($project, $githubConfiguration), true)) {
+        return true;
+    }
+
+    [$actualOwner, $actualName] = gitParseGithubRepositoryUrl($actualRemote);
+    [$expectedOwner, $expectedName] = gitExpectedRemoteIdentity($project, $githubConfiguration);
+
+    return $actualOwner !== ''
+        && $expectedOwner !== ''
+        && strcasecmp($actualOwner, $expectedOwner) === 0
+        && $actualName !== ''
+        && $actualName === $expectedName;
 }
 
 function gitStatusClassName(string $status): string
@@ -796,8 +807,8 @@ function gitBootstrapMetadataMatches(array $project, array $githubConfiguration)
     return (string)($git['provider'] ?? '') === 'github'
         && (string)($git['repository_owner'] ?? '') === $owner
         && (string)($git['repository_name'] ?? '') === $name
-        && (string)($git['remote_url'] ?? '') === gitExpectedRemoteUrl($project, $githubConfiguration)
-        && (string)($git['clone_url'] ?? '') === gitExpectedCloneUrl($project, $githubConfiguration);
+        && gitRemoteUrlMatchesExpected((string)($git['remote_url'] ?? ''), $project, $githubConfiguration)
+        && gitRemoteUrlMatchesExpected((string)($git['clone_url'] ?? ''), $project, $githubConfiguration);
 }
 
 function gitBootstrapAttemptedByDevConsole(array $project): bool
@@ -860,20 +871,32 @@ function gitEnsureExpectedOrigin(array $project, array $githubConfiguration, arr
 
     $actualRemote = trim((string)$remote['stdout']);
     $expectedRemote = gitExpectedRemoteUrl($project, $githubConfiguration);
-    if ($actualRemote === $expectedRemote) {
+    if ($actualRemote === $expectedRemote || gitRemoteUrlMatchesExpected($actualRemote, $project, $githubConfiguration)) {
         return null;
     }
-    if (!gitRemoteUrlMatchesExpected($actualRemote, $project, $githubConfiguration)) {
-        return 'Repository origin no longer matches the GitHub repository.';
+    return 'Repository origin no longer matches the GitHub repository.';
+}
+
+function gitCurrentOriginUrl(string $path): string
+{
+    $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5, [], false);
+    return $remote['exit_code'] === 0 ? trim((string)$remote['stdout']) : '';
+}
+
+function gitRepositoryMetadataRemoteUrl(array $project, array $githubConfiguration): string
+{
+    $path = gitProjectRepositoryPath($project);
+    $actualRemote = $path !== '' ? gitCurrentOriginUrl($path) : '';
+    if ($actualRemote !== '' && gitRemoteUrlMatchesExpected($actualRemote, $project, $githubConfiguration)) {
+        return $actualRemote;
     }
 
-    $remoteSet = gitRunFixedCommand(['git', '-C', $path, 'remote', 'set-url', 'origin', $expectedRemote], 10, [], false);
-    gitAppendCommandLog($log, $remoteSet);
-    if ($remoteSet['exit_code'] !== 0) {
-        return 'Git remote configuration failed';
+    $storedRemote = (string)($project['git']['remote_url'] ?? '');
+    if ($storedRemote !== '' && gitRemoteUrlMatchesExpected($storedRemote, $project, $githubConfiguration)) {
+        return $storedRemote;
     }
 
-    return null;
+    return gitExpectedRemoteUrl($project, $githubConfiguration);
 }
 
 function gitGithubRepositoryMetadata(string $fullName, array $githubConfiguration, array &$log): array
@@ -1109,7 +1132,7 @@ function gitVerifyInitializedRepository(array $project, array $githubConfigurati
     }
     $remote = gitRunFixedCommand(['git', '-C', $path, 'remote', 'get-url', 'origin'], 5, [], false);
     gitAppendCommandLog($log, $remote);
-    if ($remote['exit_code'] !== 0 || trim((string)$remote['stdout']) !== gitExpectedRemoteUrl($project, $githubConfiguration)) {
+    if ($remote['exit_code'] !== 0 || !gitRemoteUrlMatchesExpected(trim((string)$remote['stdout']), $project, $githubConfiguration)) {
         return 'Repository verification failed';
     }
     $originHead = gitRunFixedCommand(['git', '-C', $path, 'rev-parse', 'origin/main'], 5, [], false);
@@ -1354,12 +1377,18 @@ function gitInitializeRepository(array $configuration, string $projectId, string
             throw new RuntimeException('Git remote configuration failed');
         }
         $remoteCommand = $existingOrigin['exit_code'] === 0
-            ? ['git', '-C', $path, 'remote', 'set-url', 'origin', $remoteUrl]
+            ? []
             : ['git', '-C', $path, 'remote', 'add', 'origin', $remoteUrl];
-        $remoteSet = gitRunFixedCommand($remoteCommand, 10, [], false);
-        gitAppendCommandLog($log, $remoteSet);
-        if ($remoteSet['exit_code'] !== 0) {
-            throw new RuntimeException('Git remote configuration failed');
+        if (!empty($remoteCommand)) {
+            $remoteSet = gitRunFixedCommand($remoteCommand, 10, [], false);
+            gitAppendCommandLog($log, $remoteSet);
+            if ($remoteSet['exit_code'] !== 0) {
+                throw new RuntimeException('Git remote configuration failed');
+            }
+        } else {
+            $remoteUrl = trim((string)$existingOrigin['stdout']);
+            $cloneUrl = $remoteUrl;
+            $log[] = 'Existing origin remote matches the configured repository.';
         }
         $phase = 'push';
         $push = gitRunAuthenticatedGitCommand(['git', '-C', $path, 'push', '-u', 'origin', 'main'], $github, 120);
@@ -1434,6 +1463,7 @@ function gitFetchRepository(array $configuration, string $projectId): array
     if ($error = gitAssertConnectedRepository($project, $github)) return gitActionResult(false, $error);
     $log = [];
     if ($originError = gitEnsureExpectedOrigin($project, $github, $log)) return gitActionResult(false, $originError, $log);
+    $metadataRemoteUrl = gitRepositoryMetadataRemoteUrl($project, $github);
     $fetch = gitRunAuthenticatedCommand(['git', '-C', gitProjectRepositoryPath($project), 'fetch', '--prune', 'origin'], $github, 120);
     gitAppendCommandLog($log, $fetch);
     if ($fetch['exit_code'] !== 0) {
@@ -1444,8 +1474,8 @@ function gitFetchRepository(array $configuration, string $projectId): array
         'provider' => 'github',
         'repository_owner' => (string)(gitExpectedRemoteIdentity($project, $github)[0] ?? ''),
         'repository_name' => (string)(gitExpectedRemoteIdentity($project, $github)[1] ?? ''),
-        'remote_url' => gitExpectedRemoteUrl($project, $github),
-        'clone_url' => gitExpectedCloneUrl($project, $github),
+        'remote_url' => $metadataRemoteUrl,
+        'clone_url' => $metadataRemoteUrl,
         'last_fetch_at' => date('c'),
         'connected' => false,
         'remote_verified' => false,
@@ -1478,6 +1508,7 @@ function gitPullRepository(array $configuration, string $projectId): array
 
     $log = [];
     if ($originError = gitEnsureExpectedOrigin($project, $github, $log)) return gitActionResult(false, $originError, $log);
+    $metadataRemoteUrl = gitRepositoryMetadataRemoteUrl($project, $github);
     $fetch = gitRunAuthenticatedCommand(['git', '-C', $path, 'fetch', '--prune', 'origin'], $github, 120);
     gitAppendCommandLog($log, $fetch);
     if ($fetch['exit_code'] !== 0) {
@@ -1495,8 +1526,8 @@ function gitPullRepository(array $configuration, string $projectId): array
         'provider' => 'github',
         'repository_owner' => (string)(gitExpectedRemoteIdentity($project, $github)[0] ?? ''),
         'repository_name' => (string)(gitExpectedRemoteIdentity($project, $github)[1] ?? ''),
-        'remote_url' => gitExpectedRemoteUrl($project, $github),
-        'clone_url' => gitExpectedCloneUrl($project, $github),
+        'remote_url' => $metadataRemoteUrl,
+        'clone_url' => $metadataRemoteUrl,
         'bootstrap_status' => 'ready',
         'connected' => true,
         'last_error_at' => null,
@@ -1518,6 +1549,7 @@ function gitPushRepository(array $configuration, string $projectId): array
 
     $log = [];
     if ($originError = gitEnsureExpectedOrigin($project, $github, $log)) return gitActionResult(false, $originError, $log);
+    $metadataRemoteUrl = gitRepositoryMetadataRemoteUrl($project, $github);
     $push = gitRunAuthenticatedCommand(['git', '-C', $path, 'push', 'origin', 'main'], $github, 120);
     gitAppendCommandLog($log, $push);
     if ($push['exit_code'] !== 0) {
@@ -1542,8 +1574,8 @@ function gitPushRepository(array $configuration, string $projectId): array
         'provider' => 'github',
         'repository_owner' => (string)(gitExpectedRemoteIdentity($project, $github)[0] ?? ''),
         'repository_name' => (string)(gitExpectedRemoteIdentity($project, $github)[1] ?? ''),
-        'remote_url' => gitExpectedRemoteUrl($project, $github),
-        'clone_url' => gitExpectedCloneUrl($project, $github),
+        'remote_url' => $metadataRemoteUrl,
+        'clone_url' => $metadataRemoteUrl,
         'bootstrap_status' => 'ready',
         'connected' => true,
         'last_error_at' => null,

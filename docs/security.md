@@ -120,12 +120,14 @@ Legacy/custom-key servers may still expose private key path information in advan
 
 Managed server tests execute only a fixed diagnostic command. The browser cannot supply remote shell commands.
 
-Preview and Production deployment remote commands are constructed by backend code from validated project and server configuration. Remote paths come from generated project path rules such as:
+Preview and Production deployment remote commands are constructed by backend code from validated project and server configuration. New Projects default to generated paths such as:
 
 ```text
 /var/www/projects/<project-id>/preview
 /var/www/projects/<project-id>/production
 ```
+
+Adopted Projects may use explicitly configured existing paths instead. Deployment code uses the stored Project paths rather than deriving paths from the Project ID.
 
 Remote path values are shell-escaped before being embedded in remote commands.
 

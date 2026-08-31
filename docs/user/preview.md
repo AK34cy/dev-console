@@ -7,7 +7,7 @@ Preview is the remote environment used to review the current Project version bef
 - Project repository is initialized.
 - GitHub repository is configured.
 - Managed Server is reachable.
-- Preview path matches the generated Project path.
+- Preview path is configured for the Project. New Projects use a generated default path; adopted Projects may use an existing Preview path.
 - SSH and rsync are available from Dev Console.
 - For PHP projects with `composer.json`, `composer.lock` must be committed and PHP plus Composer must be installed on the Managed Server.
 

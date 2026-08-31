@@ -253,7 +253,7 @@ Internal operations:
 
 - Project ID is generated from the name.
 - Preview domain is generated as `preview.<production-domain>`.
-- Paths are generated server-side:
+- Default paths are generated server-side:
   - `/var/www/projects/<project-id>/production`
   - `/var/www/projects/<project-id>/preview`
   - `/var/www/git/<project-id>` on the Dev Console host
@@ -282,6 +282,69 @@ Possible failures:
 Recovery:
 
 - Choose a different name/domain or configure a managed server.
+
+## Add Existing Project
+
+Purpose: adopt an already-hosted project into Dev Console without moving or modifying the existing Preview, Production, or Apache configuration.
+
+Prerequisites:
+
+- A Managed Server is registered and reachable.
+- The existing source path, Production path, and optional Preview path are readable directories on the selected Managed Server.
+- The proposed Project ID is not already registered.
+- `/var/www/git/<project-id>` on the Dev Console host does not already exist.
+- If the existing source contains GitHub remotes, the repository owner must be compatible with the global GitHub account configured in Settings.
+
+User actions:
+
+1. Open Projects.
+2. Use Add Existing Project to scan a Managed Server.
+3. Inspect a discovered site or project source.
+4. Review the adoption plan.
+5. Confirm Adopt Project.
+
+Internal operations:
+
+- `console/index.php` handles `adopt_existing_project`.
+- `console/project-adoption.php` validates the submitted confirmation values.
+- Dev Console re-inspects the selected remote source and environment paths over SSH before mutating local state.
+- The selected source is copied to `/var/www/git/<project-id>` on the Dev Console host with `rsync`.
+- If the source contains a Git repository, its `.git` history and compatible GitHub remote metadata are preserved.
+- If the source has no Git repository, Dev Console initializes a local baseline repository and commits `Adopt existing project baseline`.
+- Compatible existing `TASKS` history is preserved. If no `TASKS` directory exists, Dev Console initializes the normal task documentation.
+- Project registration is saved only after the source import succeeds.
+
+Files modified:
+
+- `/var/www/git/<project-id>` on the Dev Console host.
+- `config/projects.json` after successful import.
+
+Remote operations:
+
+- Read-only SSH inspection commands.
+- Read-only source transfer from the Managed Server to the Dev Console host.
+
+Result:
+
+- The existing project is registered as a normal Dev Console Project.
+- Preview and Production paths/domains are adopted in place.
+- Existing Apache configuration is left unchanged.
+- No GitHub repository is created or pushed.
+- No Preview or Production deployment runs.
+
+Possible failures:
+
+- Project ID already registered.
+- Local target path already exists.
+- Managed Server missing or unreachable.
+- Source, Preview, or Production path missing or unreadable.
+- Source Git HEAD, remote, or TASKS history changed since discovery.
+- Existing GitHub remote is incompatible with the global GitHub account.
+- Source import or local baseline Git initialization fails.
+
+Recovery:
+
+- Re-run discovery, correct the confirmation values, or resolve the local target/configuration conflict, then adopt again.
 
 ## Select Current Project
 
@@ -509,7 +572,7 @@ Prerequisites:
 
 - Project exists.
 - Managed server exists and is reachable for managed projects.
-- Generated environment paths are valid.
+- Configured Preview and Production paths are valid. New projects use generated paths; adopted-in-place projects may preserve existing paths.
 - Apache command capabilities are available remotely or locally.
 - Non-root managed server users have passwordless sudo.
 
@@ -520,15 +583,16 @@ User actions:
 Internal operations:
 
 - For managed-server projects, Dev Console checks SSH capabilities.
-- It creates Preview and Production directories.
-- It writes managed Apache virtual host configuration.
+- For Dev Console-managed infrastructure, it creates Preview and Production directories.
+- For Dev Console-managed infrastructure, it writes managed Apache virtual host configuration.
 - It enables sites, runs Apache configtest, and reloads Apache.
 - It stores setup and provisioning metadata.
+- For adopted-in-place infrastructure already marked configured, it preserves existing Preview, Production, and Apache state instead of rewriting it.
 
 Files modified:
 
 - `config/projects.json`
-- Remote or local `/var/www/projects/<project-id>/...`
+- Remote or local configured Preview and Production paths.
 - Remote or local Apache `sites-available` and `sites-enabled`
 
 Remote operations:
@@ -601,7 +665,7 @@ Purpose: re-apply project infrastructure after infrastructure-affecting settings
 Prerequisites:
 
 - Project was previously set up.
-- Production domain, generated Preview domain, Managed Server assignment, or generated paths changed.
+- Production domain, Preview domain, Managed Server assignment, or configured environment paths changed.
 - Managed server and Apache prerequisites are satisfied.
 
 User actions:
@@ -829,7 +893,7 @@ Prerequisites:
 
 - Project repository is connected.
 - Managed server is reachable.
-- Preview path matches `/var/www/projects/<project-id>/preview`.
+- Preview path is configured for the Project. New projects default to `/var/www/projects/<project-id>/preview`; adopted projects may use an existing path.
 - `rsync` and `ssh` are available locally.
 
 User actions:
@@ -900,21 +964,32 @@ Prerequisites:
 
 - Preview has been deployed successfully.
 - Managed server is reachable.
-- Preview and Production paths match generated project paths.
+- Preview and Production paths are configured for the Project. New projects default to `/var/www/projects/<project-id>/...`; adopted projects may use existing paths.
 - Remote Preview directory is readable and non-empty.
 - Remote `rsync` is available.
+- Production preflight has been run for the current Preview commit.
+- The preflight has no unmanaged deletion candidates, those paths have been explicitly added to Project preserve rules, or the remaining deletion set has been explicitly approved for the current preflight.
 
 User actions:
 
-1. Press Deploy Production.
-2. Confirm the modal.
+1. Press Refresh Preflight.
+2. Review adds, updates, deletes, and preserved paths.
+3. If Production-local paths must be retained, add explicit preserve rules from the preflight result.
+4. If the remaining deletion candidates are intentionally obsolete, press Approve deletions.
+5. Press Deploy Production.
+6. Confirm the modal.
 
 Internal operations:
 
+- Runs a read-only remote `rsync --dry-run --delete` comparison from Preview to Production before deployment.
+- Stores preflight metadata in Project configuration.
+- Blocks deployment when the current preflight contains unreviewed deletion candidates.
+- Stores deletion approval as a fingerprint of the current preflight delete set. Refreshing preflight clears the approval; a changed Preview commit, path, preserve rule set, or deletion set requires review again.
 - Starts an asynchronous Production deployment.
 - Checks remote Preview.
 - Ensures remote Production directory exists and is writable.
-- Runs remote `rsync --delete --no-owner --no-group` from Preview to Production.
+- Removes explicitly approved Production deletion candidates with managed privileges when required. Non-root deployment users use `sudo -n`; root runs directly.
+- Runs remote `rsync --delete --no-owner --no-group` from Preview to Production as the configured deployment user, excluding `.git/` and `TASKS/` and applying configured Production preserve rules.
 - Verifies remote Production directory exists, is readable, and contains files.
 - Stores Production deployment metadata.
 
@@ -935,14 +1010,16 @@ Result:
 Possible failures:
 
 - Preview not deployed.
+- Preflight not run for the current Preview commit.
+- Preflight finds unmanaged Production deletion candidates.
 - Remote `rsync` missing.
 - SSH failure.
-- Remote path permission failure.
+- Remote path permission failure. If rsync fails after synchronization starts, Production may have been partially updated and should be checked before retrying.
 - Verification failure.
 
 Recovery:
 
-- Deploy Preview first, install rsync remotely, or fix permissions.
+- Deploy Preview first, run preflight, add preserve rules for intentional Production-local files, approve intentional deletions, install rsync remotely, or fix permissions.
 
 ## Delete Project
 
@@ -1132,6 +1209,7 @@ Prerequisites:
 
 - Dev Console service has permission to run package manager commands.
 - Ubuntu/Debian-compatible package environment for supported installs.
+- Administrator-managed Codex CLI updates require `sudo -n true` for the Dev Console service user. Dev Console fails before running npm if non-interactive sudo is unavailable.
 
 User actions:
 
@@ -1142,7 +1220,10 @@ Internal operations:
 
 - Starts asynchronous server tool operation.
 - Runs predefined commands only.
+- Updates an administrator-managed/system-wide Codex CLI with `sudo -n npm install -g @openai/codex` when the existing global install path requires elevated privileges.
+- Updates writable user-managed Codex CLI installs with `npm install -g @openai/codex`.
 - Refreshes diagnostics after success.
+- Verifies the installed Codex CLI version after a successful update.
 - Writes operation history and logs.
 
 Files modified:

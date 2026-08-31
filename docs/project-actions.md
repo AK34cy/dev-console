@@ -236,6 +236,32 @@ Success conditions: push succeeds and remote metadata verifies.
 
 Failure conditions: repository not connected, authentication failure, remote rejection, or Git failure.
 
+## Adopt Project
+
+Purpose: register an existing website/project as a Dev Console Project while preserving its current source, Preview, Production, Apache, TASKS, and Git history.
+
+When to use: after Add Existing Project discovery has produced a reviewed adoption plan.
+
+Safe to repeat: No after success. A second adoption with the same Project ID or local target path is rejected.
+
+Changes local filesystem: Yes, creates `/var/www/git/<project-id>` on the Dev Console host and updates `config/projects.json` only after source import succeeds.
+
+Changes remote server: No. The remote server is inspected and read as the source of the import, but Preview, Production, Apache, and permissions are not modified.
+
+Changes Git: Yes on the Dev Console host. Existing Git history is preserved when present. For non-Git sources, Dev Console initializes a local baseline repository and commits `Adopt existing project baseline`.
+
+Changes GitHub: No.
+
+Changes Apache: No.
+
+Requires sudo: No.
+
+Operation log: Yes.
+
+Success conditions: confirmation values validate, the selected remote paths are still readable, stale discovery checks pass, the local repository target does not already exist, the source imports successfully, compatible TASKS are preserved or initialized, and Project configuration saves successfully.
+
+Failure conditions: duplicate Project ID/domain/path, existing local target path, unreachable Managed Server, unreadable source or environment path, stale source HEAD/remote/TASKS data, incompatible GitHub remote owner, rsync failure, baseline Git failure, or configuration write failure.
+
 ## Set Up
 
 Purpose: create managed environment directories and Apache virtual hosts.
@@ -292,9 +318,9 @@ Failure conditions: same as Set Up.
 
 Purpose: re-apply setup after infrastructure-affecting Project settings changed.
 
-When to use: after changing Production domain, generated Preview domain, Managed Server assignment, or generated environment paths.
+When to use: after changing Production domain, Preview domain, Managed Server assignment, or configured environment paths.
 
-Safe to repeat: Yes for Dev Console-managed infrastructure; it is still a mutating setup operation.
+Safe to repeat: Yes for Dev Console-managed infrastructure; it is still a mutating setup operation. Adopted-in-place infrastructure marked configured is preserved rather than rewritten.
 
 Changes local filesystem: Yes, updates `config/projects.json`; local setup path also writes local Apache/project files.
 
@@ -344,13 +370,13 @@ Failure conditions: Git failure, missing rsync, SSH failure, missing `composer.l
 
 Purpose: promote remote Preview contents to remote Production.
 
-When to use: after Preview has the version that should become Production.
+When to use: after Preview has the version that should become Production and Production preflight has been reviewed.
 
-Safe to repeat: Yes; it uses remote `rsync --delete`.
+Safe to repeat: Yes after a clean/current preflight; it uses remote `rsync --delete` with `.git/` and `TASKS/` excluded, explicit preserve rules applied, and any remaining deletion set explicitly approved.
 
 Changes local filesystem: Yes, runtime logs/state and project metadata.
 
-Changes remote server: Yes, replaces Production directory contents from Preview, including `vendor/` when Preview was prepared for a Composer project.
+Changes remote server: Yes, replaces Production directory contents from Preview, including `vendor/` when Preview was prepared for a Composer project. Relative preserve rules prevent selected Production-local paths from being deleted or overwritten.
 
 Changes Git: No.
 
@@ -358,13 +384,13 @@ Changes GitHub: No.
 
 Changes Apache: No.
 
-Requires sudo: No in the deployment module; remote Production path must be writable by the deployment user. Production does not run Composer.
+Requires sudo: Sometimes. The normal Preview-to-Production rsync runs as the configured deployment user. Exact deletion candidates that were explicitly approved in the current preflight may be removed with managed privileges (`sudo -n` for non-root deployment users, direct execution for root) when required. This privilege use does not bypass deletion approval or preserve rules. Production does not run Composer.
 
-Operation log: Yes.
+Operation log: Yes. The preflight result is stored in Project metadata and displayed before deployment. Deletion approval is stored as a fingerprint of the current preflight deletion set, not as a permanent rule.
 
-Success conditions: Preview is deployed, remote Preview is readable/non-empty, remote rsync succeeds, Production verifies, and metadata is saved.
+Success conditions: Preview is deployed, preflight has run for that Preview commit, no unreviewed deletion candidates remain, remote Preview is readable/non-empty, remote rsync succeeds, Production verifies, and metadata is saved.
 
-Failure conditions: no Preview deployment, remote rsync missing, SSH failure, permission failure, or verification failure.
+Failure conditions: no Preview deployment, missing or stale preflight, unreviewed deletion candidates, changed deletion set after approval, remote rsync missing, SSH failure, permission failure, or verification failure.
 
 ## Use in Workflow
 

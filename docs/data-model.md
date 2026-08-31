@@ -51,18 +51,20 @@ Fields:
 - `id`: generated project slug.
 - `name`: display name.
 - `managed_server_id`: ID of the assigned managed server.
-- `repository_path`: local Git working copy path on the Dev Console host. New projects use `/var/www/git/<project-id>`.
+- `repository_path`: local Git working copy path on the Dev Console host. New projects and adopted projects use `/var/www/git/<project-id>`.
 - `branch`: stored Project branch metadata. It currently defaults to `main`; branch selection is not exposed in the UI, and several v1 operational workflows are `main`-specific.
 - `production.domain`: Production domain.
-- `production.path`: generated Production directory.
+- `production.path`: Production directory. New projects use a generated path under `/var/www/projects/<project-id>/production`; adopted projects may preserve an existing in-place Production path.
 - `preview.domain`: generated Preview domain.
-- `preview.path`: generated Preview directory.
+- `preview.path`: Preview directory. New projects use a generated path under `/var/www/projects/<project-id>/preview`; adopted projects may preserve an existing in-place Preview path.
 - `preview_deployment`: Preview deployment metadata.
 - `production_deployment`: Production deployment metadata.
 - `git`: Git and GitHub metadata.
 - `last_activity_at`: timestamp for recent project activity.
 - `provisioning`: historical/internal setup metadata.
 - `setup`: current user-facing setup metadata.
+
+Adopted projects are registered only after source import succeeds. Their `setup.infrastructure.adopted_in_place` value may be true, and `setup.infrastructure.source_imported_from` records the read-only Managed Server source path that was copied into the Dev Console host repository.
 
 ## Git Metadata
 
@@ -94,9 +96,9 @@ Fields:
 
 - `provider`: currently `github`.
 - `repository_owner`: GitHub user or organization.
-- `repository_name`: GitHub repository name. It may differ from project ID after collision handling.
-- `remote_url`: configured Git origin URL.
-- `clone_url`: expected clone URL for the repository.
+- `repository_name`: GitHub repository name. It may differ from project ID after collision handling or existing-project adoption.
+- `remote_url`: configured Git origin URL. Adopted repositories preserve the detected compatible GitHub remote, including SSH host aliases.
+- `clone_url`: clone URL for the repository. It may match the preserved origin rather than a Dev Console-generated default URL.
 - `bootstrap_status`: initialization lifecycle state. Values include `not_started`, `local_created`, `remote_created`, `ready`, and `failed`.
 - `remote_created_at`: timestamp when GitHub repository creation succeeded.
 - `last_error_at`: timestamp of last bootstrap error.
@@ -150,7 +152,10 @@ Default fields include the Preview deployment fields plus:
   "last_attempt_status": "",
   "last_attempt_at": null,
   "last_attempt_commit": "",
-  "last_attempt_message": ""
+  "last_attempt_message": "",
+  "preserve_paths": [],
+  "preflight": null,
+  "deletion_approval": null
 }
 ```
 
@@ -161,6 +166,12 @@ Fields:
 - `last_attempt_at`: timestamp of the most recent attempt.
 - `last_attempt_commit`: commit involved in the most recent attempt.
 - `last_attempt_message`: message from the most recent attempt.
+- `preserve_paths`: relative Production paths that Dev Console must preserve during Preview-to-Production promotion.
+- `preflight`: latest read-only Production preflight result, including the checked Preview commit, source/target paths, add/update/delete/preserved counts, and any blocking deletion candidates.
+- `deletion_approval`: one-preflight approval for the current deletion candidate set. It stores a deterministic fingerprint, approval timestamp, Preview commit, and approved paths. It is cleared when preflight is refreshed or preserve rules change.
+
+Production preserve paths are Project metadata, not global deployment exclusions. They are relative to the Production root and are applied only during Production promotion.
+Deletion approval is not a preserve rule. It authorizes deletion only when the currently checked deletion set still matches the stored fingerprint.
 
 ## Provisioning Metadata
 

@@ -646,6 +646,88 @@ function serverToolsRunOperationCommand(array $arguments, array &$log, int $time
     return $result;
 }
 
+function serverToolsRunningAsRoot(): bool
+{
+    return function_exists('posix_geteuid') && posix_geteuid() === 0;
+}
+
+function serverToolsPathLooksAdministratorManaged(string $path): bool
+{
+    $path = trim($path);
+    if ($path === '') {
+        return false;
+    }
+    $realPath = realpath($path) ?: $path;
+    foreach ([$path, $realPath] as $candidate) {
+        foreach (['/usr/bin/', '/usr/sbin/', '/usr/local/bin/', '/usr/local/sbin/', '/usr/lib/', '/usr/local/lib/', '/opt/'] as $prefix) {
+            if (str_starts_with($candidate, $prefix)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+function serverToolsNpmGlobalPrefix(array &$log, ?string $operationId = null): string
+{
+    $result = serverToolsRunOperationCommand(['npm', 'prefix', '-g'], $log, 30, [], $operationId, 'Checking prerequisites');
+
+    return trim((string)($result['stdout'] ?? ''));
+}
+
+function serverToolsNpmGlobalInstallNeedsSudo(string $toolAction, array $diagnostics, array &$log, ?string $operationId = null): bool
+{
+    if (serverToolsRunningAsRoot()) {
+        return false;
+    }
+    $codexPath = (string)($diagnostics['tools']['codex']['executable_path'] ?? '');
+    if (in_array($toolAction, ['update', 'reinstall'], true) && serverToolsPathLooksAdministratorManaged($codexPath)) {
+        return true;
+    }
+    $prefix = serverToolsNpmGlobalPrefix($log, $operationId);
+    if ($prefix === '') {
+        return false;
+    }
+    foreach ([$prefix . '/lib/node_modules', $prefix . '/bin', $prefix] as $path) {
+        if (is_dir($path)) {
+            return !is_writable($path);
+        }
+    }
+
+    return serverToolsPathLooksAdministratorManaged($prefix);
+}
+
+function serverToolsAssertNonInteractiveSudo(array &$log, ?string $operationId = null): void
+{
+    $log[] = 'Administrator-managed Codex CLI detected; checking non-interactive sudo.';
+    serverToolsAppendOperationLog($operationId ?? '', 'Administrator-managed Codex CLI detected; checking non-interactive sudo.');
+    $sudo = serverToolsRunDiagnosticCommand(['sudo', '-n', 'true'], 10);
+    $log[] = '$ ' . $sudo['command'];
+    if ((string)$sudo['output'] !== '') {
+        $log[] = (string)$sudo['output'];
+        serverToolsAppendOperationLog($operationId ?? '', (string)$sudo['output']);
+    }
+    $log[] = 'Exit code: ' . (string)$sudo['exit_code'];
+    serverToolsAppendOperationLog($operationId ?? '', '$ ' . $sudo['command']);
+    serverToolsAppendOperationLog($operationId ?? '', 'Exit code: ' . (string)$sudo['exit_code']);
+    if (empty($sudo['success'])) {
+        throw new RuntimeException('Administrator-managed Codex CLI requires passwordless sudo. Configure non-interactive sudo for the Dev Console service user, then retry the update.');
+    }
+}
+
+function serverToolsCodexNpmCommand(string $toolAction, array $diagnostics, array &$log, ?string $operationId = null): array
+{
+    $needsSudo = serverToolsNpmGlobalInstallNeedsSudo($toolAction, $diagnostics, $log, $operationId);
+    if (!$needsSudo) {
+        return ['npm', 'install', '-g', '@openai/codex'];
+    }
+
+    serverToolsAssertNonInteractiveSudo($log, $operationId);
+
+    return ['sudo', '-n', 'npm', 'install', '-g', '@openai/codex'];
+}
+
 function serverToolsReadableCommandError(array $result): string
 {
     $output = strtolower((string)($result['output'] ?? ''));
@@ -731,14 +813,26 @@ function serverToolsUpdateComposer(array &$log, ?string $operationId = null): vo
     serverToolsRunOperationCommand(['composer', '--version'], $log, 60, $environment, $operationId, 'Verifying');
 }
 
-function serverToolsInstallCodex(array &$log, ?string $operationId = null): void
+function serverToolsInstallCodex(string $toolAction, array &$log, ?string $operationId = null): void
 {
     serverToolsSetOperationStage($operationId, 'Checking prerequisites');
     $diagnostics = serverToolsDiagnostics();
     if (empty($diagnostics['tools']['node']['available_to_service_user']) || empty($diagnostics['tools']['npm']['available_to_service_user'])) {
         throw new RuntimeException('Install Node.js and npm before installing Codex CLI.');
     }
-    serverToolsRunOperationCommand(['npm', 'install', '-g', '@openai/codex'], $log, 240, [], $operationId, 'Installing');
+    $expectedVersion = (string)($diagnostics['tools']['codex']['latest_version'] ?? '');
+    $command = serverToolsCodexNpmCommand($toolAction, $diagnostics, $log, $operationId);
+    serverToolsRunOperationCommand($command, $log, 240, [], $operationId, 'Installing');
+    $after = serverToolsDiagnostics(false);
+    $installedVersion = (string)($after['tools']['codex']['version'] ?? '');
+    if ($installedVersion === '') {
+        throw new RuntimeException('Codex CLI operation completed, but the installed version could not be verified.');
+    }
+    if ($expectedVersion !== '' && version_compare(serverToolsNormalizeVersion($installedVersion), serverToolsNormalizeVersion($expectedVersion), '<')) {
+        throw new RuntimeException('Codex CLI operation completed, but the installed version is still older than expected.');
+    }
+    $log[] = 'Codex CLI version verified: ' . $installedVersion;
+    serverToolsAppendOperationLog($operationId ?? '', 'Codex CLI version verified: ' . $installedVersion);
 }
 
 function serverToolsRunManagedAction(string $toolId, string $toolAction, ?string $operationId = null): array
@@ -779,7 +873,7 @@ function serverToolsRunManagedAction(string $toolId, string $toolAction, ?string
         } elseif ($toolId === 'composer') {
             $toolAction === 'update' ? serverToolsUpdateComposer($log, $operationId) : serverToolsInstallComposer($log, $operationId);
         } elseif ($toolId === 'codex') {
-            serverToolsInstallCodex($log, $operationId);
+            serverToolsInstallCodex($toolAction, $log, $operationId);
         } else {
             throw new RuntimeException('Action is diagnostics-only for this tool.');
         }

@@ -123,7 +123,9 @@ function previewDeploymentExpectedPath(array $project): string
 function previewDeploymentPathIsAllowed(array $project): bool
 {
     $path = (string)($project['preview']['path'] ?? '');
-    return $path !== '' && $path === previewDeploymentExpectedPath($project);
+    $productionPath = (string)($project['production']['path'] ?? '');
+    return devConsoleIsAbsoluteUnixPath($path)
+        && ($productionPath === '' || $path !== $productionPath);
 }
 
 function previewDeploymentLocalRsync(): string
@@ -134,10 +136,10 @@ function previewDeploymentLocalRsync(): string
 function previewDeploymentOverview(array $project, ?array $server): array
 {
     $deployment = is_array($project['preview_deployment'] ?? null) ? $project['preview_deployment'] : devConsoleEmptyProject()['preview_deployment'];
-    $status = (string)($deployment['status'] ?? 'never_deployed');
+    $status = previewDeploymentEffectiveStatus($deployment);
     $lastAttemptStatus = (string)($deployment['last_attempt_status'] ?? '');
-    if (in_array($lastAttemptStatus, ['running', 'failed'], true)) {
-        $status = $lastAttemptStatus;
+    if ($status === 'deployed' && $lastAttemptStatus === 'failed') {
+        $lastAttemptStatus = '';
     }
 
     return [
@@ -159,6 +161,24 @@ function previewDeploymentOverview(array $project, ?array $server): array
         'last_attempt_commit' => (string)($deployment['last_attempt_commit'] ?? ''),
         'last_attempt_message' => (string)($deployment['last_attempt_message'] ?? ''),
     ];
+}
+
+function previewDeploymentEffectiveStatus(array $deployment): string
+{
+    $status = (string)($deployment['status'] ?? 'never_deployed');
+    $lastAttemptStatus = (string)($deployment['last_attempt_status'] ?? '');
+    if ($lastAttemptStatus === 'running') {
+        return 'running';
+    }
+    if ($lastAttemptStatus === 'failed') {
+        $deployedAt = strtotime((string)($deployment['deployed_at'] ?? '')) ?: 0;
+        $lastAttemptAt = strtotime((string)($deployment['last_attempt_at'] ?? '')) ?: 0;
+        if ($status !== 'deployed' || $deployedAt === 0 || $lastAttemptAt > $deployedAt) {
+            return 'failed';
+        }
+    }
+
+    return $status;
 }
 
 function previewDeploymentConfiguredRemote(array $project): string
@@ -218,7 +238,7 @@ function previewDeploymentReadiness(?array $project, array $managedServers): arr
             }
         }
         if (!previewDeploymentPathIsAllowed($project)) {
-            $reasons[] = 'Preview path is not a supported managed Project path.';
+            $reasons[] = 'Preview path is not a valid configured Project path.';
         }
         if (previewDeploymentLocalRsync() === '') {
             $reasons[] = 'rsync is not installed on Dev Console.';
@@ -659,13 +679,19 @@ function previewDeploymentRun(string $operationId, string $projectId): void
             throw new RuntimeException('Remote Preview directory cannot be created or used by the SSH user.');
         }
 
-        $vhostCheck = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, projectRemoteVhostDocumentRootMatchesCommand($project, 'preview', $documentRoot)), [
+        $vhostCommand = devConsoleProjectAdoptedInPlace($project)
+            ? projectRemoteAdoptedVhostDocumentRootMatchesCommand($project, 'preview', $documentRoot)
+            : projectRemoteVhostDocumentRootMatchesCommand($project, 'preview', $documentRoot);
+        $vhostCheck = previewDeploymentRunCommand($operationId, previewDeploymentSshArguments($server, $vhostCommand), [
             'timeout' => 30,
             'env' => ['PATH' => serverToolsDefaultPath()],
             'inherit_env' => false,
         ]);
         if ($vhostCheck['exit_code'] !== 0) {
-            throw new RuntimeException('Preview Apache DocumentRoot does not match the deployed web root. Run Update Infrastructure before deploying Preview.');
+            $message = devConsoleProjectAdoptedInPlace($project)
+                ? 'Preview Apache configuration does not map ' . (string)($project['preview']['domain'] ?? '') . ' to ' . $documentRoot . '.'
+                : 'Preview Apache DocumentRoot does not match the deployed web root. Run Update Infrastructure before deploying Preview.';
+            throw new RuntimeException($message);
         }
 
         previewDeploymentSetStage($operationId, 'Transferring Files', 'Synchronizing the GitHub commit to remote Preview with delete semantics.');

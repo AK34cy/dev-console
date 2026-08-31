@@ -503,6 +503,15 @@ function operationalDashboard(): array
     $load = $metric('cpu', static fn (): array => sys_getloadavg() ?: [], $previous['server']['load'] ?? []);
     $processes = $metric('top processes', static fn (): array => topCpuProcesses(), $previous['processes'] ?? []);
     $cpuCount = max(1, (int)(statusCommand(['nproc']) ?: 1));
+    $managedServer = null;
+    $activeProject = deploymentActiveProject();
+    if ($activeProject !== null && function_exists('managedServersLoad') && function_exists('managedServersFind')) {
+        $managedServerId = (string)($activeProject['managed_server_id'] ?? '');
+        $managedServer = $managedServerId === '' ? null : managedServersFind(managedServersLoad(), $managedServerId);
+    }
+    $managedServerDashboard = $managedServer === null || !function_exists('managedServerDashboardDiagnostics')
+        ? ['available' => false, 'message' => 'Managed Server is not configured.', 'server' => null, 'processes' => []]
+        : $metric('managed server dashboard', static fn (): array => managedServerDashboardDiagnostics($managedServer, $activeProject), $previous['managed_server'] ?? []);
 
     $dashboard = [
         'generated_at' => date('c'),
@@ -530,6 +539,14 @@ function operationalDashboard(): array
             'memory' => $memory,
             'disk' => $disk,
         ],
+        'managed_server' => array_merge([
+            'available' => false,
+            'message' => '',
+            'name' => $managedServer === null ? '' : (string)($managedServer['name'] ?? ''),
+            'status' => $managedServer === null ? 'unknown' : (string)($managedServer['status'] ?? 'never_tested'),
+            'apache' => $managedServer === null ? [] : (is_array($managedServer['apache'] ?? null) ? $managedServer['apache'] : []),
+            'apache_sites' => $managedServer === null ? [] : (is_array($managedServer['apache_sites'] ?? null) ? $managedServer['apache_sites'] : []),
+        ], is_array($managedServerDashboard) ? $managedServerDashboard : []),
         'statistics' => $slow['statistics'] ?? ($previous['statistics'] ?? []),
         'processes' => $processes,
         '_slow' => $slow, '_preview' => $preview, '_production' => $production,

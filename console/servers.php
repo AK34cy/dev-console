@@ -1147,6 +1147,148 @@ function managedServerOperationRunRemoteCommand(string $operationId, array $serv
     return $result;
 }
 
+function managedServerDashboardDiagnostics(array $server, ?array $project = null): array
+{
+    $empty = [
+        'available' => false,
+        'message' => '',
+        'server' => [
+            'load' => [],
+            'load_percentage' => 0,
+            'memory' => ['total' => 0, 'used' => 0, 'free' => 0, 'percentage' => 0],
+            'disk' => ['total' => 0, 'used' => 0, 'free' => 0, 'percentage' => 0],
+        ],
+        'storage' => [
+            'preview' => ['status' => 'not_available', 'files' => 0, 'bytes' => 0],
+            'production' => ['status' => 'not_available', 'files' => 0, 'bytes' => 0],
+        ],
+        'processes' => [],
+    ];
+
+    $ssh = managedServersSshExecutable();
+    if ($ssh === '') {
+        $empty['message'] = 'SSH executable missing.';
+        return $empty;
+    }
+    $key = (string)($server['key'] ?? '');
+    if ($key === '' || !is_file($key) || !is_readable($key)) {
+        $empty['message'] = 'SSH key file missing.';
+        return $empty;
+    }
+
+    $previewPath = is_array($project) ? (string)($project['preview']['path'] ?? '') : '';
+    $productionPath = is_array($project) ? (string)($project['production']['path'] ?? '') : '';
+    $storageCommand = '';
+    foreach (['preview' => $previewPath, 'production' => $productionPath] as $environment => $path) {
+        if ($path === '') {
+            continue;
+        }
+        $quotedPath = managedServersShellQuote($path);
+        $quotedEnvironment = managedServersShellQuote($environment);
+        $storageCommand .= 'path=' . $quotedPath . '; env_name=' . $quotedEnvironment . '; '
+            . 'if [ -d "$path" ] && [ -r "$path" ]; then '
+            . 'stats="$(find "$path" -type f -printf "." 2>/dev/null | wc -c | tr -d " ") $(du -sb "$path" 2>/dev/null | awk \'{print $1}\' || printf "0")"; '
+            . 'set -- $stats; printf "__STORAGE__=%s\tavailable\t%s\t%s\n" "$env_name" "${1:-0}" "${2:-0}"; '
+            . 'elif [ -d "$path" ]; then printf "__STORAGE__=%s\tnot_readable\t0\t0\n" "$env_name"; '
+            . 'else printf "__STORAGE__=%s\tnot_deployed\t0\t0\n" "$env_name"; fi; ';
+    }
+
+    $command = 'printf "__DEV_CONSOLE_DASHBOARD__\n"; '
+        . 'cpu_count="$(command -v nproc >/dev/null 2>&1 && nproc || printf "1")"; printf "__CPU_COUNT__=%s\n" "$cpu_count"; '
+        . 'if [ -r /proc/loadavg ]; then read l1 l5 l15 rest < /proc/loadavg; printf "__LOAD__=%s %s %s\n" "$l1" "$l5" "$l15"; fi; '
+        . 'if [ -r /proc/meminfo ]; then awk \'/^(MemTotal|MemAvailable|MemFree):/ {print "__MEM__="$1" "$2}\' /proc/meminfo; fi; '
+        . 'df -P / 2>/dev/null | awk \'NR==2 {printf "__DISK__=%s %s %s\n", $2 * 1024, $3 * 1024, $4 * 1024}\'; '
+        . $storageCommand
+        . 'ps -eo pid=,user=,pcpu=,pmem=,comm= --sort=-pcpu 2>/dev/null | head -n 5 | while read -r pid user cpu mem command_name; do printf "__PROC__=%s\t%s\t%s\t%s\t%s\n" "$pid" "$user" "$cpu" "$mem" "$command_name"; done';
+
+    $result = processRunCommand(managedServerRemoteSshArguments($server, $command), [
+        'timeout' => 8,
+        'env' => ['PATH' => serverToolsDefaultPath()],
+        'inherit_env' => false,
+    ]);
+    if ((int)($result['exit_code'] ?? 1) !== 0) {
+        $empty['message'] = managedServerConnectionResultMessage((string)($result['stderr'] ?? '') . "\n" . (string)($result['stdout'] ?? ''));
+        return $empty;
+    }
+
+    $load = [];
+    $cpuCount = 1;
+    $memTotal = 0;
+    $memAvailable = 0;
+    $disk = $empty['server']['disk'];
+    $storage = $empty['storage'];
+    $processes = [];
+    foreach (preg_split('/\r\n|\r|\n/', (string)($result['stdout'] ?? '')) ?: [] as $line) {
+        if (str_starts_with($line, '__CPU_COUNT__=')) {
+            $cpuCount = max(1, (int)substr($line, 14));
+            continue;
+        }
+        if (str_starts_with($line, '__LOAD__=')) {
+            $load = array_map(static fn(string $value): float => round((float)$value, 2), preg_split('/\s+/', trim(substr($line, 9))) ?: []);
+            continue;
+        }
+        if (str_starts_with($line, '__MEM__=')) {
+            [$field, $value] = array_pad(preg_split('/\s+/', trim(substr($line, 8))) ?: [], 2, '');
+            $bytes = (int)$value * 1024;
+            if ($field === 'MemTotal:') $memTotal = $bytes;
+            if ($field === 'MemAvailable:') $memAvailable = $bytes;
+            if ($field === 'MemFree:' && $memAvailable === 0) $memAvailable = $bytes;
+            continue;
+        }
+        if (str_starts_with($line, '__DISK__=')) {
+            [$total, $used, $free] = array_pad(preg_split('/\s+/', trim(substr($line, 9))) ?: [], 3, 0);
+            $disk = [
+                'total' => (int)$total,
+                'used' => (int)$used,
+                'free' => (int)$free,
+                'percentage' => (int)$total > 0 ? round(((int)$used) / ((int)$total) * 100, 1) : 0,
+            ];
+            continue;
+        }
+        if (str_starts_with($line, '__PROC__=')) {
+            [$pid, $user, $cpu, $memory, $commandName] = array_pad(explode("\t", substr($line, 9), 5), 5, '');
+            if ($pid === '') continue;
+            $processes[] = [
+                'pid' => (int)$pid,
+                'user' => $user,
+                'cpu' => (float)$cpu,
+                'memory' => (float)$memory,
+                'command' => $commandName,
+            ];
+            continue;
+        }
+        if (str_starts_with($line, '__STORAGE__=')) {
+            [$environment, $status, $files, $bytes] = array_pad(explode("\t", substr($line, 12), 4), 4, '');
+            if (isset($storage[$environment])) {
+                $storage[$environment] = [
+                    'status' => $status === '' ? 'not_available' : $status,
+                    'files' => (int)$files,
+                    'bytes' => (int)$bytes,
+                ];
+            }
+        }
+    }
+
+    $usedMemory = max(0, $memTotal - $memAvailable);
+    return [
+        'available' => true,
+        'message' => '',
+        'server' => [
+            'load' => $load,
+            'load_percentage' => isset($load[0]) ? round(((float)$load[0]) / $cpuCount * 100, 1) : 0,
+            'memory' => [
+                'total' => $memTotal,
+                'used' => $usedMemory,
+                'free' => $memAvailable,
+                'percentage' => $memTotal > 0 ? round($usedMemory / $memTotal * 100, 1) : 0,
+            ],
+            'disk' => $disk,
+        ],
+        'storage' => $storage,
+        'processes' => $processes,
+    ];
+}
+
 function managedServerComposerInstallCheckCommand(): string
 {
     return 'printf "__DEV_CONSOLE_SERVER_CHECK__\n"; '

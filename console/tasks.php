@@ -470,7 +470,7 @@ function groupedTaskEntries(array $tasks, string $runsDir): array
 
     foreach ($groups as &$groupTasks) {
         usort($groupTasks, static function (array $left, array $right): int {
-            return ((int)$left['number']) <=> ((int)$right['number']);
+            return ((int)$right['number']) <=> ((int)$left['number']);
         });
     }
     unset($groupTasks);

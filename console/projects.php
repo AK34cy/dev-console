@@ -535,6 +535,59 @@ function projectRemoteVhostDocumentRootMatchesCommand(array $project, string $en
         . ' && grep -F ' . $documentRootPattern . ' ' . $quotedPath . ' >/dev/null';
 }
 
+function projectRemoteAdoptedVhostDocumentRootMatchesCommand(array $project, string $environment, string $documentRoot, string $enabledDir = '/etc/apache2/sites-enabled'): string
+{
+    $domain = devConsoleNormalizeDomain((string)($project[$environment]['domain'] ?? ''));
+    $expectedDomain = projectRemoteShellValue($domain);
+    $expectedRoot = projectRemoteShellValue(rtrim(projectNormalizePath($documentRoot), '/'));
+    $quotedEnabledDir = projectRemoteShellPath($enabledDir);
+
+    return 'expected_domain=' . $expectedDomain . '; expected_root=' . $expectedRoot . '; enabled_dir=' . $quotedEnabledDir . '; '
+        . <<<'SH'
+if [ "$expected_domain" = "" ] || [ "$expected_root" = "" ]; then
+  printf "__DEV_CONSOLE_APACHE_ERROR__=missing_expected_mapping\n"
+  exit 20
+fi
+if [ ! -d "$enabled_dir" ]; then
+  printf "__DEV_CONSOLE_APACHE_ERROR__=sites_enabled_missing\n"
+  exit 21
+fi
+domain_found=0
+root_seen=""
+root_file=""
+for conf in "$enabled_dir"/*.conf; do
+  [ -f "$conf" ] || continue
+  server_name="$(sed -n 's/^[[:space:]]*ServerName[[:space:]]\{1,\}//Ip' "$conf" | head -n 1 | sed 's/[[:space:]]#.*$//' | sed 's/^["'\'']//;s/["'\'']$//' | tr '\t' ' ')"
+  aliases="$(sed -n 's/^[[:space:]]*ServerAlias[[:space:]]\{1,\}//Ip' "$conf" | sed 's/[[:space:]]#.*$//' | tr '\n\t' '  ')"
+  document_root="$(sed -n 's/^[[:space:]]*DocumentRoot[[:space:]]\{1,\}//Ip' "$conf" | head -n 1 | sed 's/[[:space:]]#.*$//' | sed 's/^["'\'']//;s/["'\'']$//' | tr '\t' ' ')"
+  for host in $server_name $aliases; do
+    host="${host%.}"
+    if [ "$host" = "$expected_domain" ]; then
+      domain_found=1
+      root_seen="${document_root%/}"
+      root_file="$conf"
+      if [ "$root_seen" = "$expected_root" ]; then
+        printf "__DEV_CONSOLE_APACHE_MATCH__=%s\n" "$conf"
+        printf "__DEV_CONSOLE_APACHE_DOMAIN__=%s\n" "$expected_domain"
+        printf "__DEV_CONSOLE_APACHE_DOCUMENT_ROOT__=%s\n" "$root_seen"
+        exit 0
+      fi
+    fi
+  done
+done
+if [ "$domain_found" = 1 ]; then
+  printf "__DEV_CONSOLE_APACHE_ERROR__=document_root_mismatch\n"
+  printf "__DEV_CONSOLE_APACHE_DOMAIN__=%s\n" "$expected_domain"
+  printf "__DEV_CONSOLE_APACHE_DOCUMENT_ROOT__=%s\n" "$root_seen"
+  printf "__DEV_CONSOLE_APACHE_MATCH__=%s\n" "$root_file"
+  exit 22
+fi
+printf "__DEV_CONSOLE_APACHE_ERROR__=domain_not_found\n"
+printf "__DEV_CONSOLE_APACHE_DOMAIN__=%s\n" "$expected_domain"
+exit 23
+SH;
+}
+
 function projectInfrastructureSnapshot(array $project): array
 {
     $remote = (string)($project['managed_server_id'] ?? '') !== '';
@@ -916,6 +969,12 @@ function projectRemoteSetup(array $configuration, string $projectId, array $opti
             throw new RuntimeException('Managed Server not found.');
         }
         projectRemoteValidateServer($server);
+        if (devConsoleProjectAdoptedInPlace($project)) {
+            $log[] = 'Project infrastructure was adopted in place.';
+            $log[] = 'Existing Preview and Production paths are preserved.';
+            $log[] = 'No directories or Apache configuration were changed.';
+            return projectActionResult(true, 'Project infrastructure is already adopted in place.', $log);
+        }
         if (!devConsoleProjectUsesGeneratedEnvironmentPaths($project)) {
             throw new RuntimeException('This project uses custom environment paths and cannot be set up automatically.');
         }
@@ -1267,8 +1326,9 @@ function projectStatus(array $project, string $availableDir = '/etc/apache2/site
 {
     if ((string)($project['managed_server_id'] ?? '') !== '') {
         $setup = projectRemoteSetupMetadata($project);
-        $configured = $setup['status'] === 'Configured' && projectInfrastructureSnapshotMatches($project);
-        $updateRequired = $setup['status'] === 'Update required' || ($setup['status'] === 'Configured' && !projectInfrastructureSnapshotMatches($project));
+        $adoptedInPlace = devConsoleProjectAdoptedInPlace($project);
+        $configured = $setup['status'] === 'Configured' && ($adoptedInPlace || projectInfrastructureSnapshotMatches($project));
+        $updateRequired = $setup['status'] === 'Update required' || ($setup['status'] === 'Configured' && !$adoptedInPlace && !projectInfrastructureSnapshotMatches($project));
         $failed = $setup['status'] === 'Failed';
         $environmentStatus = static function (string $environment) use ($project, $setup, $configured): array {
             $siteField = $environment === 'production' ? 'production_site' : 'preview_site';

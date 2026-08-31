@@ -1,4 +1,39 @@
 <?php
+$requestMethod = (string)($_SERVER['REQUEST_METHOD'] ?? 'GET');
+$requestPath = parse_url((string)($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/';
+
+if (PHP_SAPI === 'cli-server' && str_starts_with($requestPath, '/assets/')) {
+    $assetRoot = realpath(__DIR__ . '/assets');
+    $decodedPath = rawurldecode($requestPath);
+    $assetPath = realpath(__DIR__ . $decodedPath);
+    $publicAssetExtensions = [
+        'css' => true,
+        'gif' => true,
+        'ico' => true,
+        'jpeg' => true,
+        'jpg' => true,
+        'js' => true,
+        'map' => true,
+        'png' => true,
+        'svg' => true,
+        'txt' => true,
+        'webp' => true,
+        'woff' => true,
+        'woff2' => true,
+    ];
+    $extension = strtolower(pathinfo($decodedPath, PATHINFO_EXTENSION));
+
+    if (
+        $assetRoot !== false
+        && $assetPath !== false
+        && is_file($assetPath)
+        && str_starts_with($assetPath, $assetRoot . DIRECTORY_SEPARATOR)
+        && isset($publicAssetExtensions[$extension])
+    ) {
+        return false;
+    }
+}
+
 require __DIR__ . '/config.php';
 require __DIR__ . '/process.php';
 require __DIR__ . '/server-tools.php';
@@ -8,6 +43,7 @@ require __DIR__ . '/production-deployment.php';
 require __DIR__ . '/deployment.php';
 require __DIR__ . '/apache.php';
 require __DIR__ . '/projects.php';
+require __DIR__ . '/project-adoption.php';
 require __DIR__ . '/git.php';
 require __DIR__ . '/tasks.php';
 require __DIR__ . '/task-lifecycle.php';
@@ -16,8 +52,6 @@ require __DIR__ . '/runtime.php';
 
 const DEV_CONSOLE_VERSION = '0.1';
 
-$requestMethod = (string)($_SERVER['REQUEST_METHOD'] ?? 'GET');
-$requestPath = parse_url((string)($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/';
 $devConsoleRoot = dirname(__DIR__);
 
 function commandOutputOrNull(array $arguments, string $cwd): ?string
@@ -146,6 +180,626 @@ function configuredDisplayValue($value): string
 {
     $text = is_array($value) ? implode(', ', array_map('strval', $value)) : (string)$value;
     return trim($text) === '' ? 'Not configured' : $text;
+}
+
+function serverToolsStoredDiagnosticsPlaceholder(): array
+{
+    $context = [
+        'service_name' => DEV_CONSOLE_SERVICE_NAME,
+        'user' => 'Not refreshed',
+        'group' => 'Not refreshed',
+        'path' => 'Not refreshed',
+        'working_directory' => 'Not refreshed',
+        'php_executable' => PHP_BINARY,
+        'status' => 'Not refreshed',
+    ];
+    $tools = [];
+    foreach (serverToolsDefinitions() as $id => $definition) {
+        $tools[$id] = [
+            'display_name' => (string)$definition['display_name'],
+            'purpose' => (string)$definition['purpose'],
+            'installed' => false,
+            'version' => '',
+            'executable_path' => '',
+            'available_to_service_user' => false,
+            'diagnostic_status' => 'Not refreshed',
+            'last_checked_at' => '',
+            'latest_version' => '',
+            'outdated' => false,
+            'package_source' => (string)$definition['source'],
+            'dependency_relationship' => (string)$definition['dependency'],
+            'requirement' => (string)$definition['requirement'],
+            'required_group' => (string)$definition['required_group'],
+            'log' => (string)$definition['display_name'] . ': not refreshed during page load.',
+        ];
+    }
+
+    return [
+        'context' => $context,
+        'tools' => $tools,
+        'generated_at' => '',
+        'log' => 'Diagnostics were not refreshed during page load.',
+    ];
+}
+
+function projectAdoptionDisplayBytes($bytes): string
+{
+    if ($bytes === null || !is_numeric($bytes)) {
+        return 'Not available';
+    }
+    $value = (float)$bytes;
+    foreach (['B', 'KB', 'MB', 'GB', 'TB'] as $unit) {
+        if ($value < 1024 || $unit === 'TB') {
+            return ($unit === 'B' ? (string)(int)$value : number_format($value, 1)) . ' ' . $unit;
+        }
+        $value /= 1024;
+    }
+
+    return (string)$bytes . ' B';
+}
+
+function renderProjectAdoptionDetails(array $rows): void
+{
+    ?>
+    <dl class="project-detail-grid">
+      <?php foreach ($rows as $label => $value): ?>
+        <div><dt><?= h((string)$label) ?></dt><dd><?= is_string($value) ? h($value) : $value ?></dd></div>
+      <?php endforeach; ?>
+    </dl>
+    <?php
+}
+
+function renderProjectAdoptionPlan(array $plan, string $csrfToken): void
+{
+    $project = is_array($plan['project'] ?? null) ? $plan['project'] : [];
+    $current = is_array($plan['current'] ?? null) ? $plan['current'] : [];
+    $currentSource = is_array($current['source'] ?? null) ? $current['source'] : [];
+    $currentPreview = is_array($current['preview'] ?? null) ? $current['preview'] : [];
+    $currentProduction = is_array($current['production'] ?? null) ? $current['production'] : [];
+    $proposed = is_array($plan['proposed'] ?? null) ? $plan['proposed'] : [];
+    $github = is_array($plan['github'] ?? null) ? $plan['github'] : [];
+    $tasks = is_array($plan['tasks'] ?? null) ? $plan['tasks'] : [];
+    $actions = is_array($plan['actions'] ?? null) ? $plan['actions'] : [];
+    $productionOnly = is_array($plan['production_only'] ?? null) ? $plan['production_only'] : [];
+    $productionOnlyFiles = is_array($productionOnly['files'] ?? null) ? $productionOnly['files'] : [];
+    $manual = is_array($plan['manual_corrections'] ?? null) ? $plan['manual_corrections'] : [];
+    $canAdopt = !empty($plan['can_adopt']);
+    $adoptionBlockers = is_array($plan['adoption_blockers'] ?? null) ? $plan['adoption_blockers'] : [];
+    ?>
+    <section class="result-block project-adoption-plan">
+      <div class="dashboard-header">
+        <div>
+          <h3>Adoption Plan</h3>
+          <p class="field-help">Review the import plan before adopting this Project. Existing Preview, Production, and Apache configuration will not be modified.</p>
+        </div>
+        <span class="status-pill warning">Review required</span>
+      </div>
+      <div class="project-adoption-report">
+        <section class="environment-block">
+          <h4>Project</h4>
+          <?php renderProjectAdoptionDetails([
+              'Proposed name' => configuredDisplayValue($project['name'] ?? ''),
+              'Proposed Project ID' => configuredDisplayValue($project['id'] ?? ''),
+              'Managed Server' => configuredDisplayValue($project['managed_server'] ?? ''),
+          ]); ?>
+        </section>
+        <section class="environment-block">
+          <h4>GitHub</h4>
+          <?php renderProjectAdoptionDetails([
+              'Existing repository' => configuredDisplayValue($github['identity'] ?? ''),
+              'Compatibility' => configuredDisplayValue($github['status'] ?? ''),
+              'Adoption behavior' => !empty($currentSource['remote']) ? 'Preserve existing repository/history' : 'No existing repository to preserve',
+          ]); ?>
+        </section>
+        <section class="environment-block">
+          <h4>Current Project Source</h4>
+          <?php renderProjectAdoptionDetails([
+              'Path' => configuredDisplayValue($currentSource['path'] ?? ''),
+              'Git repository' => configuredDisplayValue($currentSource['git_status'] ?? ''),
+              'Git remote' => configuredDisplayValue($currentSource['remote'] ?? ''),
+              'Branch' => configuredDisplayValue($currentSource['branch'] ?? ''),
+              'HEAD' => configuredDisplayValue($currentSource['head'] ?? ''),
+              'TASKS' => configuredDisplayValue($currentSource['tasks_status'] ?? ''),
+              'Task count' => (string)(int)($currentSource['task_count'] ?? 0),
+              'Highest task' => configuredDisplayValue($currentSource['highest_task_number'] ?? ''),
+          ]); ?>
+        </section>
+        <section class="environment-block">
+          <h4>Current Preview / Production</h4>
+          <?php renderProjectAdoptionDetails([
+              'Preview domain' => configuredDisplayValue($currentPreview['domain'] ?? ''),
+              'Preview path' => configuredDisplayValue($currentPreview['path'] ?? ''),
+              'Preview evidence' => configuredDisplayValue($currentPreview['evidence'] ?? ''),
+              'Production domain' => configuredDisplayValue($currentProduction['domain'] ?? ''),
+              'Production path' => configuredDisplayValue($currentProduction['path'] ?? ''),
+          ]); ?>
+        </section>
+        <section class="environment-block">
+          <h4>Proposed Dev Console Structure</h4>
+          <?php renderProjectAdoptionDetails([
+              'Source repository' => configuredDisplayValue($proposed['source_repository'] ?? '') . "\nLocated on Dev Console Host",
+              'Preview' => configuredDisplayValue(($proposed['preview_domain'] ?? '') . "\n" . ($proposed['preview_path'] ?? '')) . "\n" . configuredDisplayValue($proposed['preview_classification'] ?? '') . "\nLocated on Managed Server",
+              'Production' => configuredDisplayValue(($proposed['production_domain'] ?? '') . "\n" . ($proposed['production_path'] ?? '')) . "\n" . configuredDisplayValue($proposed['production_classification'] ?? '') . "\nLocated on Managed Server",
+          ]); ?>
+        </section>
+        <section class="environment-block">
+          <h4>TASKS</h4>
+          <?php renderProjectAdoptionDetails([
+              'Classification' => configuredDisplayValue($tasks['classification'] ?? ''),
+              'Task count' => (string)(int)($tasks['task_count'] ?? 0),
+              'Highest task' => configuredDisplayValue($tasks['highest_task_number'] ?? ''),
+              'Renumbering' => 'Historical tasks will not be renumbered',
+          ]); ?>
+        </section>
+        <section class="environment-block wide">
+          <h4>Action Classification</h4>
+          <div class="table-scroll">
+            <table class="settings-table project-adoption-actions">
+              <thead><tr><th>Component</th><th>Classification</th><th>Adoption behavior</th></tr></thead>
+              <tbody>
+                <?php foreach ($actions as $action): ?>
+                  <tr>
+                    <td><?= h(configuredDisplayValue($action['component'] ?? '')) ?></td>
+                    <td><span class="status-pill warning"><?= h(configuredDisplayValue($action['classification'] ?? 'NEEDS REVIEW')) ?></span></td>
+                    <td><?= h(configuredDisplayValue($action['detail'] ?? '')) ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="environment-block">
+          <h4>Production Safety</h4>
+          <ul class="operation-summary">
+            <?php foreach (($plan['safety'] ?? []) as $safety): ?>
+              <li><?= h((string)$safety) ?></li>
+            <?php endforeach; ?>
+          </ul>
+        </section>
+        <section class="environment-block">
+          <h4>Special / Unmanaged Production Files</h4>
+          <?php if ((int)($productionOnly['count'] ?? 0) > 0): ?>
+            <p class="field-help">Production contains files not detected in the proposed Project Source. Review before adoption; Dev Console will not copy them automatically.</p>
+            <ul class="compact-list">
+              <?php foreach ($productionOnlyFiles as $file): ?>
+                <li><code><?= h((string)$file) ?></code></li>
+              <?php endforeach; ?>
+            </ul>
+            <?php if ((int)$productionOnly['count'] > count($productionOnlyFiles)): ?>
+              <p class="field-help">Showing <?= h((string)count($productionOnlyFiles)) ?> of <?= h((string)(int)$productionOnly['count']) ?> files.</p>
+            <?php endif; ?>
+          <?php elseif ((string)($productionOnly['error'] ?? '') !== ''): ?>
+            <p class="field-help"><?= h((string)$productionOnly['error']) ?></p>
+          <?php else: ?>
+            <p class="field-help">No production-only files were identified from the available discovery data.</p>
+          <?php endif; ?>
+        </section>
+        <section class="environment-block wide project-adoption-confirmation">
+          <h4>Confirmation</h4>
+          <p class="field-help">Review or correct these values before adoption. Existing Preview, Production, and Apache configuration will not be modified, and no deployment will occur.</p>
+          <?php if (!$canAdopt && !empty($adoptionBlockers)): ?>
+            <ul class="operation-summary">
+              <?php foreach ($adoptionBlockers as $blocker): ?>
+                <li>Needs review: <?= h((string)$blocker) ?></li>
+              <?php endforeach; ?>
+            </ul>
+          <?php endif; ?>
+          <form method="post" action="/?tab=projects&amp;adoption=1#addExistingProject" data-preserve-settings-scroll="1" onsubmit="return confirm('Adopt this Project into Dev Console? Existing Preview, Production, and Apache configuration will not be modified, and no deployment will occur.');">
+            <input type="hidden" name="action" value="adopt_existing_project">
+            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+            <input type="hidden" name="managed_server_id" value="<?= h((string)($project['managed_server_id'] ?? '')) ?>">
+            <input type="hidden" name="expected_source_head" value="<?= h((string)($currentSource['head'] ?? '')) ?>">
+            <input type="hidden" name="expected_source_remote" value="<?= h((string)($currentSource['remote'] ?? '')) ?>">
+            <input type="hidden" name="expected_highest_task_number" value="<?= h((string)($currentSource['highest_task_number'] ?? '')) ?>">
+            <input type="hidden" name="expected_task_fingerprint" value="<?= h((string)($currentSource['task_fingerprint'] ?? '')) ?>">
+            <div class="project-adoption-form-grid">
+            <div>
+              <label for="adoption_plan_project_name">Project name</label>
+              <input id="adoption_plan_project_name" name="project_name" type="text" required maxlength="255" value="<?= h((string)($manual['project_name'] ?? '')) ?>">
+            </div>
+            <div>
+              <label for="adoption_plan_project_id">Project ID</label>
+              <input id="adoption_plan_project_id" name="project_id" type="text" required maxlength="120" value="<?= h((string)($manual['project_id'] ?? '')) ?>">
+            </div>
+            <div>
+              <label for="adoption_plan_source_path">Selected Project Source</label>
+              <input id="adoption_plan_source_path" name="source_path" type="text" required maxlength="4096" value="<?= h((string)($manual['source_path'] ?? '')) ?>">
+            </div>
+            <div aria-hidden="true"></div>
+            <div>
+              <label for="adoption_plan_preview_path">Preview path</label>
+              <input id="adoption_plan_preview_path" name="preview_path" type="text" maxlength="4096" value="<?= h((string)($manual['preview_path'] ?? '')) ?>">
+            </div>
+            <div>
+              <label for="adoption_plan_preview_domain">Preview domain</label>
+              <input id="adoption_plan_preview_domain" name="preview_domain" type="text" maxlength="253" value="<?= h((string)($manual['preview_domain'] ?? '')) ?>">
+            </div>
+            <div>
+              <label for="adoption_plan_production_path">Production path</label>
+              <input id="adoption_plan_production_path" name="production_path" type="text" required maxlength="4096" value="<?= h((string)($manual['production_path'] ?? '')) ?>">
+            </div>
+            <div>
+              <label for="adoption_plan_production_domain">Production domain</label>
+              <input id="adoption_plan_production_domain" name="production_domain" type="text" required maxlength="253" value="<?= h((string)($manual['production_domain'] ?? '')) ?>">
+            </div>
+            </div>
+            <div class="project-adoption-manual-actions">
+              <button type="submit"<?= $canAdopt ? '' : ' disabled title="Resolve adoption plan blockers before adopting this Project."' ?>>Adopt Project</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </section>
+    <?php
+}
+
+function renderProjectAdoptionResult(array $result, string $csrfToken): void
+{
+    $status = (string)($result['status'] ?? 'NEEDS REVIEW');
+    $identity = is_array($result['identity'] ?? null) ? $result['identity'] : [];
+    $webServer = is_array($result['web_server'] ?? null) ? $result['web_server'] : [];
+    $filesystem = is_array($result['filesystem'] ?? null) ? $result['filesystem'] : [];
+    $technology = is_array($result['technology'] ?? null) ? $result['technology'] : [];
+    $configuration = is_array($result['configuration'] ?? null) ? $result['configuration'] : [];
+    $git = is_array($result['git'] ?? null) ? $result['git'] : [];
+    $tasks = is_array($result['tasks'] ?? null) ? $result['tasks'] : [];
+    $history = is_array($result['history'] ?? null) ? $result['history'] : [];
+    $matches = is_array($webServer['matches'] ?? null) ? $webServer['matches'] : [];
+    $selectedVhost = is_array($webServer['selected_vhost'] ?? null) ? $webServer['selected_vhost'] : null;
+    $technologyMarkers = is_array($technology['markers'] ?? null) ? $technology['markers'] : [];
+    $taskDirs = is_array($tasks['directories'] ?? null) ? $tasks['directories'] : [];
+    $remotes = is_array($git['remotes'] ?? null) ? $git['remotes'] : [];
+    $sshError = is_array($result['ssh_error'] ?? null) ? $result['ssh_error'] : null;
+    $relatedSites = is_array($result['related_sites'] ?? null) ? $result['related_sites'] : [];
+    $proposal = is_array($result['proposed_structure'] ?? null) ? $result['proposed_structure'] : null;
+    $adoptionPlan = is_array($result['adoption_plan'] ?? null) ? $result['adoption_plan'] : null;
+    $directoryCounts = is_array($tasks['directory_counts'] ?? null) ? $tasks['directory_counts'] : [];
+    $missingTasks = is_array($tasks['missing_task_numbers'] ?? null) ? $tasks['missing_task_numbers'] : [];
+    $nonstandardTasks = is_array($tasks['nonstandard_task_files'] ?? null) ? $tasks['nonstandard_task_files'] : [];
+    $duplicateTasks = is_array($tasks['duplicate_task_numbers'] ?? null) ? $tasks['duplicate_task_numbers'] : [];
+    ?>
+    <section class="result-block project-adoption-result <?= h(projectAdoptionStatusClass($status)) ?>">
+      <h3>Existing Project Discovery</h3>
+      <div class="project-adoption-report">
+      <section class="environment-block project-adoption-overview">
+        <h4>Overall Result</h4>
+        <p><span class="status-pill <?= h(projectAdoptionStatusClass($status)) ?>"><?= h($status) ?></span></p>
+        <?php if (!empty($result['errors']) && is_array($result['errors'])): ?>
+          <ul class="operation-summary">
+            <?php foreach ($result['errors'] as $error): ?><li>Error: <?= h((string)$error) ?></li><?php endforeach; ?>
+          </ul>
+        <?php endif; ?>
+        <?php if (!empty($result['warnings']) && is_array($result['warnings'])): ?>
+          <ul class="operation-summary">
+            <?php foreach ($result['warnings'] as $warning): ?><li>Needs review: <?= h((string)$warning) ?></li><?php endforeach; ?>
+          </ul>
+        <?php endif; ?>
+        <?php if (!empty($result['notes']) && is_array($result['notes'])): ?>
+          <ul class="operation-summary">
+            <?php foreach ($result['notes'] as $note): ?><li>Note: <?= h((string)$note) ?></li><?php endforeach; ?>
+          </ul>
+        <?php endif; ?>
+        <?php if ($sshError !== null): ?>
+          <section class="environment-block project-adoption-ssh-detail">
+            <h4>SSH Diagnostic</h4>
+            <?php renderProjectAdoptionDetails([
+                'Exit code' => ($sshError['exit_code'] ?? null) === null ? 'Not available' : (string)$sshError['exit_code'],
+            ]); ?>
+            <pre class="tool-operation-log"><?= h((string)($sshError['detail'] ?? 'No SSH output was returned.')) ?></pre>
+          </section>
+        <?php endif; ?>
+      </section>
+      <section class="environment-block">
+        <h4>Identity</h4>
+        <?php renderProjectAdoptionDetails([
+            'Project name' => configuredDisplayValue($identity['project_name'] ?? ''),
+            'Managed Server' => configuredDisplayValue($identity['managed_server'] ?? ''),
+            'Production domain' => configuredDisplayValue($identity['production_domain'] ?? ''),
+            'Production path' => configuredDisplayValue($identity['production_path'] ?? ''),
+        ]); ?>
+      </section>
+      <?php if ($proposal !== null): ?>
+        <section class="environment-block wide">
+          <h4>Proposed Project Structure</h4>
+          <?php renderProjectAdoptionDetails([
+              'Project' => configuredDisplayValue($proposal['project_name'] ?? ''),
+              'Project Source' => configuredDisplayValue($proposal['source_path'] ?? ''),
+              'Source Git history' => !empty($proposal['source_git']) ? 'Detected' : 'Not detected',
+              'Source TASKS history' => !empty($proposal['source_tasks']) ? 'Detected' : 'Not detected',
+              'Production' => configuredDisplayValue((string)($proposal['production_domain'] ?? '') . "\n" . (string)($proposal['production_path'] ?? '')),
+              'Historical Preview / Development' => configuredDisplayValue((string)($proposal['historical_preview_domain'] ?? '') . "\n" . (string)($proposal['historical_preview_path'] ?? '')),
+          ]); ?>
+        </section>
+      <?php endif; ?>
+      <?php if (!empty($relatedSites)): ?>
+        <section class="environment-block wide">
+          <h4>Related Sites / Project Locations</h4>
+          <div class="table-scroll">
+            <table class="settings-table project-related-sites">
+              <thead><tr><th>Domain</th><th>Path</th><th>Possible role</th><th>Git</th><th>TASKS</th><th>History</th><th>Reason</th></tr></thead>
+              <tbody>
+                <?php foreach ($relatedSites as $site): ?>
+                  <tr>
+                    <td><?= h(configuredDisplayValue($site['domain'] ?? '')) ?></td>
+                    <td><code><?= h(configuredDisplayValue($site['path'] ?? '')) ?></code></td>
+                    <td><?= h(configuredDisplayValue($site['role'] ?? '')) ?></td>
+                    <td><?= !empty($site['git']) ? 'Yes' : 'No' ?></td>
+                    <td><?= !empty($site['tasks']) ? 'Yes' : 'No' ?><?= (string)($site['highest_task_number'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$site['highest_task_number']) . '</span>' : '' ?></td>
+                    <td><?= !empty($site['history']) ? 'Yes' : 'No' ?></td>
+                    <td><?= h(configuredDisplayValue($site['reason'] ?? '')) ?></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      <?php endif; ?>
+      <section class="environment-block wide">
+        <h4>Web Server</h4>
+        <?php renderProjectAdoptionDetails([
+            'Apache inventory' => ($webServer['apache_available'] ?? null) === null ? 'Not inspected' : (!empty($webServer['apache_available']) ? 'Available' : 'Not available'),
+            'Apache match' => configuredDisplayValue($webServer['match_status'] ?? ''),
+            'Selected vhost' => $selectedVhost === null ? 'Not selected' : (string)$selectedVhost['name'],
+            'DocumentRoot' => configuredDisplayValue($webServer['document_root'] ?? ''),
+        ]); ?>
+        <?php if (!empty($matches)): ?>
+          <details class="compact-details">
+            <summary>Matching Apache vhosts</summary>
+            <table class="compact-table">
+              <thead><tr><th>Vhost</th><th>Status</th><th>ServerName</th><th>Aliases</th><th>DocumentRoot</th></tr></thead>
+              <tbody>
+                <?php foreach ($matches as $site): ?>
+                  <tr>
+                    <td><?= h((string)($site['name'] ?? '')) ?></td>
+                    <td><?= !empty($site['enabled']) ? 'Enabled' : 'Disabled' ?></td>
+                    <td><?= h(configuredDisplayValue($site['server_name'] ?? '')) ?></td>
+                    <td><?= h(configuredDisplayValue($site['server_aliases'] ?? '')) ?></td>
+                    <td><code><?= h(configuredDisplayValue($site['document_root'] ?? '')) ?></code></td>
+                  </tr>
+                <?php endforeach; ?>
+              </tbody>
+            </table>
+          </details>
+        <?php endif; ?>
+      </section>
+      <section class="environment-block">
+        <h4>Filesystem</h4>
+        <?php renderProjectAdoptionDetails([
+            'Path' => configuredDisplayValue($filesystem['path'] ?? ''),
+            'Exists' => !empty($filesystem['exists']) ? 'Yes' : 'No',
+            'Readable' => !empty($filesystem['readable']) ? 'Yes' : 'No',
+            'Owner / Group' => trim((string)($filesystem['owner'] ?? '') . ' / ' . (string)($filesystem['group'] ?? '')) === '/' ? 'Not available' : configuredDisplayValue((string)($filesystem['owner'] ?? '') . ' / ' . (string)($filesystem['group'] ?? '')),
+            'Size' => projectAdoptionDisplayBytes($filesystem['size_bytes'] ?? null),
+            'File count' => isset($filesystem['file_count']) ? number_format((int)$filesystem['file_count']) : 'Not available',
+        ]); ?>
+      </section>
+      <section class="environment-block">
+        <h4>Technology</h4>
+        <?php renderProjectAdoptionDetails([
+            'PHP files' => !empty($technology['php_files']) ? 'Detected' : 'Not detected',
+            'Composer' => (!empty($technology['composer_json']) ? 'composer.json' : 'Not detected') . (!empty($technology['composer_lock']) ? ' + composer.lock' : ''),
+            'Node/npm' => (!empty($technology['package_json']) ? 'package.json' : 'Not detected') . (!empty($technology['package_lock']) ? ' + package-lock.json' : '') . (!empty($technology['yarn_lock']) ? ' + yarn.lock' : '') . (!empty($technology['pnpm_lock']) ? ' + pnpm-lock.yaml' : ''),
+            'Project markers' => empty($technologyMarkers) ? 'Not detected' : implode(', ', $technologyMarkers),
+        ]); ?>
+      </section>
+      <section class="environment-block">
+        <h4>Configuration</h4>
+        <?php renderProjectAdoptionDetails([
+            '.env' => !empty($configuration['env_present']) ? 'Present' : 'Not detected',
+        ]); ?>
+      </section>
+      <section class="environment-block">
+        <h4>Git</h4>
+        <?php renderProjectAdoptionDetails([
+            'Repository' => configuredDisplayValue($git['inspection'] ?? ''),
+            'Branch' => configuredDisplayValue($git['branch'] ?? ''),
+            'HEAD' => configuredDisplayValue($git['head'] ?? ''),
+            'History' => !empty($git['history_available']) ? 'Available' : 'Not detected',
+            'Remote' => empty($remotes) ? 'Not configured' : implode("\n", array_map('strval', $remotes)),
+        ]); ?>
+      </section>
+      <section class="environment-block">
+        <h4>TASKS</h4>
+        <?php renderProjectAdoptionDetails([
+            'Status' => !empty($tasks['detected']) ? 'Detected' : 'Not detected at Production path',
+            'Lifecycle directories' => empty($taskDirs) ? 'Not detected' : implode(', ', $taskDirs),
+            'Task count' => (string)(int)($tasks['expected_task_count'] ?? ($tasks['task_count'] ?? 0)),
+            'Total files under TASKS' => (string)(int)($tasks['total_files'] ?? 0),
+            'Other task-like files' => (string)(int)($tasks['other_task_count'] ?? 0),
+            'Task range' => configuredDisplayValue(trim((string)($tasks['minimum_task_number'] ?? '') . ' - ' . (string)($tasks['maximum_task_number'] ?? ''), " -")),
+            'Highest task number' => configuredDisplayValue($tasks['highest_task_number'] ?? ''),
+            'Compatibility' => !empty($tasks['compatible']) ? 'Appears compatible' : (!empty($tasks['detected']) ? 'Needs review' : 'Not applicable'),
+        ]); ?>
+        <?php if (!empty($directoryCounts) || !empty($missingTasks) || !empty($nonstandardTasks) || !empty($duplicateTasks)): ?>
+          <details class="compact-details">
+            <summary>TASKS inventory details</summary>
+            <?php if (!empty($directoryCounts)): ?>
+              <h5>Files by directory</h5>
+              <table class="compact-table">
+                <tbody>
+                  <?php foreach ($directoryCounts as $directory => $count): ?>
+                    <tr><th><?= h((string)$directory) ?></th><td><?= h((string)(int)$count) ?></td></tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            <?php endif; ?>
+            <?php if (!empty($missingTasks)): ?>
+              <p class="field-help">Missing task numbers: <?= h(implode(', ', array_map('strval', array_slice($missingTasks, 0, 80)))) ?><?= count($missingTasks) > 80 ? ' ...' : '' ?></p>
+            <?php endif; ?>
+            <?php if (!empty($duplicateTasks)): ?>
+              <p class="field-help">Duplicate task numbers: <?= h(implode(', ', array_map(static fn(array $item): string => (string)($item['task_id'] ?? '') . ' (' . (string)($item['count'] ?? 0) . ')', $duplicateTasks))) ?></p>
+            <?php endif; ?>
+            <?php if (!empty($nonstandardTasks)): ?>
+              <p class="field-help">Non-standard task-like files:</p>
+              <ul class="compact-list">
+                <?php foreach ($nonstandardTasks as $taskFile): ?>
+                  <li><?= h((string)$taskFile) ?></li>
+                <?php endforeach; ?>
+              </ul>
+            <?php endif; ?>
+          </details>
+        <?php endif; ?>
+      </section>
+      <section class="environment-block">
+        <h4>Dev Console History</h4>
+        <?php renderProjectAdoptionDetails([
+            'History' => configuredDisplayValue($history['status'] ?? ''),
+        ]); ?>
+      </section>
+      <section class="environment-block">
+        <h4>Safety</h4>
+        <ul class="operation-summary">
+          <?php foreach (($result['safety'] ?? [projectAdoptionReadOnlyNotice()]) as $safety): ?>
+            <li><?= h((string)$safety) ?></li>
+          <?php endforeach; ?>
+        </ul>
+      </section>
+      </div>
+    </section>
+    <?php if ($adoptionPlan !== null): ?>
+      <?php renderProjectAdoptionPlan($adoptionPlan, $csrfToken); ?>
+    <?php endif; ?>
+    <?php
+}
+
+function renderProjectAdoptionActionResult(array $result): void
+{
+    ?>
+    <section class="result-block <?= !empty($result['success']) ? '' : 'error' ?>">
+      <h3><?= h((string)($result['message'] ?? 'Adoption result')) ?></h3>
+      <?php if (!empty($result['summary']) && is_array($result['summary'])): ?>
+        <ul class="operation-summary">
+          <?php foreach ($result['summary'] as $summary): ?>
+            <li><?= h((string)$summary) ?></li>
+          <?php endforeach; ?>
+        </ul>
+      <?php endif; ?>
+      <?php if (!empty($result['success']) && (string)($result['project_id'] ?? '') !== ''): ?>
+        <p><a class="button-link" href="/?tab=dashboard&amp;project=<?= h((string)$result['project_id']) ?>">Open adopted Project in Dev Console</a></p>
+      <?php endif; ?>
+      <?php if (trim((string)($result['output'] ?? '')) !== ''): ?>
+        <details class="compact-details">
+          <summary>Show adoption log</summary>
+          <pre class="tool-operation-log"><?= h(trim((string)$result['output'])) ?></pre>
+        </details>
+      <?php endif; ?>
+    </section>
+    <?php
+}
+
+function renderProjectAdoptionScanResult(array $result, string $csrfToken): void
+{
+    $sites = is_array($result['sites'] ?? null) ? $result['sites'] : [];
+    $sshError = is_array($result['ssh_error'] ?? null) ? $result['ssh_error'] : null;
+    $serverId = (string)($result['values']['managed_server_id'] ?? '');
+    ?>
+    <section class="result-block project-adoption-result <?= !empty($result['success']) ? '' : 'warning' ?>">
+      <h3>Discovered Sites &amp; Project Sources</h3>
+      <div class="project-adoption-report">
+        <section class="environment-block project-adoption-overview">
+          <h4>Overall Result</h4>
+          <p><span class="status-pill <?= !empty($result['success']) ? 'healthy' : 'warning' ?>"><?= h((string)($result['status'] ?? 'Scan result')) ?></span></p>
+          <?php if ((string)($result['generated_at'] ?? '') !== ''): ?>
+            <p class="field-help">Stored scan result from <?= h((string)$result['generated_at']) ?>. Reloading this page does not rescan the server.</p>
+          <?php endif; ?>
+          <?php if (!empty($result['errors']) && is_array($result['errors'])): ?>
+            <ul class="operation-summary">
+              <?php foreach ($result['errors'] as $error): ?><li>Error: <?= h((string)$error) ?></li><?php endforeach; ?>
+            </ul>
+          <?php endif; ?>
+          <?php if (!empty($result['warnings']) && is_array($result['warnings'])): ?>
+            <ul class="operation-summary">
+              <?php foreach ($result['warnings'] as $warning): ?><li>Needs review: <?= h((string)$warning) ?></li><?php endforeach; ?>
+            </ul>
+          <?php endif; ?>
+          <?php if ($sshError !== null): ?>
+            <section class="environment-block project-adoption-ssh-detail">
+              <h4>SSH Diagnostic</h4>
+              <?php renderProjectAdoptionDetails([
+                  'Exit code' => ($sshError['exit_code'] ?? null) === null ? 'Not available' : (string)$sshError['exit_code'],
+              ]); ?>
+              <pre class="tool-operation-log"><?= h((string)($sshError['detail'] ?? 'No SSH output was returned.')) ?></pre>
+            </section>
+          <?php endif; ?>
+        </section>
+        <?php if (!empty($sites)): ?>
+          <section class="environment-block wide">
+            <h4>Sites &amp; Project Sources</h4>
+            <div class="table-scroll">
+              <table class="settings-table project-adoption-sites">
+                <thead>
+                  <tr><th>Site / Source</th><th>Path</th><th>Apache</th><th>Git</th><th>TASKS</th><th>Status / Type</th><th>Action</th></tr>
+                </thead>
+                <tbody>
+                  <?php foreach ($sites as $site): ?>
+                    <?php
+                      $domain = (string)($site['domain'] ?? '');
+                      $path = (string)($site['document_root'] ?? '');
+                      $vhosts = is_array($site['vhosts'] ?? null) ? $site['vhosts'] : [];
+                      $vhostNames = array_map(static fn(array $vhost): string => (string)($vhost['name'] ?? ''), $vhosts);
+                      $inspectable = !empty($site['inspectable']);
+                      $existingProject = (string)($site['existing_project'] ?? '');
+                      $scanInspection = is_array($site['inspection'] ?? null) ? $site['inspection'] : [];
+                      $scanGit = is_array($scanInspection['git'] ?? null) ? $scanInspection['git'] : [];
+                      $scanTasks = is_array($scanInspection['tasks'] ?? null) ? $scanInspection['tasks'] : [];
+                      $highestTask = (string)($scanTasks['highest_task_number'] ?? '');
+                      $taskCount = (int)($scanTasks['expected_task_count'] ?? ($scanTasks['task_count'] ?? 0));
+                      $type = (string)($site['type'] ?? 'Apache site');
+                    ?>
+                    <tr>
+                      <td>
+                        <strong><?= h(configuredDisplayValue($domain !== '' ? $domain : $type)) ?></strong>
+                        <?php if (!empty($site['hosts']) && is_array($site['hosts'])): ?>
+                          <br><span class="meta"><?= h(implode(', ', array_map('strval', $site['hosts']))) ?></span>
+                        <?php endif; ?>
+                      </td>
+                      <td><code><?= h(configuredDisplayValue($path)) ?></code></td>
+                      <td>
+                        <?= h(empty($vhostNames) ? 'No active vhost' : implode(' + ', $vhostNames)) ?>
+                        <?php if (!empty($vhosts)): ?>
+                          <details class="compact-details">
+                            <summary>Details</summary>
+                            <ul class="compact-list">
+                              <?php foreach ($vhosts as $vhost): ?>
+                                <li><?= h((string)($vhost['name'] ?? '')) ?>: <?= !empty($vhost['enabled']) ? 'enabled' : 'disabled' ?>, <?= !empty($vhost['managed']) ? 'managed' : 'not managed' ?></li>
+                              <?php endforeach; ?>
+                            </ul>
+                          </details>
+                        <?php endif; ?>
+                      </td>
+                      <td><?= !empty($scanGit['repository_detected']) ? 'Yes' : 'No' ?><?= (string)($scanGit['branch'] ?? '') !== '' ? '<br><span class="meta">' . h((string)$scanGit['branch']) . '</span>' : '' ?></td>
+                      <td><?= !empty($scanTasks['detected']) ? 'Yes' : 'No' ?><?= $highestTask !== '' || $taskCount > 0 ? '<br><span class="meta">' . h(trim((string)$taskCount . ' files ' . $highestTask)) . '</span>' : '' ?></td>
+                      <td><?= h((string)($site['status'] ?? 'Needs review')) ?><br><span class="meta"><?= h($type) ?></span><?= $existingProject !== '' ? '<br><span class="meta">Already in Dev Console: ' . h($existingProject) . '</span>' : (!empty($site['managed']) ? '<br><span class="meta">Managed marker detected</span>' : '') ?></td>
+                      <td>
+                        <form method="post" action="/?tab=projects&amp;adoption=1#addExistingProject" data-preserve-settings-scroll="1">
+                          <input type="hidden" name="action" value="discover_existing_project">
+                          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+                          <input type="hidden" name="discovery_source" value="inspect">
+                          <input type="hidden" name="managed_server_id" value="<?= h($serverId) ?>">
+                          <input type="hidden" name="project_name" value="<?= h((string)($site['project_name'] ?? 'Existing Website')) ?>">
+                          <input type="hidden" name="production_domain" value="<?= h($domain) ?>">
+                          <input type="hidden" name="production_path" value="<?= h($path) ?>">
+                          <button type="submit" class="secondary"<?= $inspectable ? '' : ' disabled title="This site needs a hostname and DocumentRoot before it can be inspected."' ?>>Inspect</button>
+                        </form>
+                      </td>
+                    </tr>
+                  <?php endforeach; ?>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        <?php endif; ?>
+        <section class="environment-block wide">
+          <h4>Safety</h4>
+          <ul class="operation-summary">
+            <?php foreach (($result['safety'] ?? [projectAdoptionReadOnlyNotice()]) as $safety): ?>
+              <li><?= h((string)$safety) ?></li>
+            <?php endforeach; ?>
+          </ul>
+        </section>
+      </div>
+    </section>
+    <?php
 }
 
 function workflowStateClass(string $state): string
@@ -369,6 +1023,12 @@ $projectFormValues = [
     'production_domain' => '',
     'managed_server_id' => '',
 ];
+$existingProjectDiscoveryValues = projectAdoptionEmptyInput();
+$existingProjectDiscoveryResult = null;
+$existingProjectDiscoverySource = '';
+$existingProjectScanValues = projectAdoptionEmptyScanInput();
+$existingProjectScanResult = null;
+$existingProjectAdoptionResult = null;
 $generatedPathTemplates = [
     'repository' => devConsoleGeneratedRepositoryPath('__PROJECT_ID__'),
     'production' => devConsoleGeneratedEnvironmentPaths('__PROJECT_ID__')['production'],
@@ -587,6 +1247,42 @@ if ($action === 'deploy_production_managed') {
             }
             $operation = productionDeploymentStart(devConsoleLoadProjectConfiguration(), $activeProjectId);
             sendJson(['ok' => true, 'operation' => $operation]);
+        } catch (Throwable $exception) {
+            http_response_code(400);
+            sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+        }
+    }
+    exit;
+}
+
+if ($action === 'production_preflight_managed' || $action === 'production_add_preserve_path' || $action === 'production_approve_deletions') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        http_response_code(403);
+        sendJson(['ok' => false, 'error' => 'Invalid Production preflight request.']);
+    } else {
+        try {
+            if ($activeProject === null) {
+                throw new RuntimeException('Select a Project before checking Production.');
+            }
+            $configurationForPreflight = devConsoleLoadProjectConfiguration();
+            if ($action === 'production_add_preserve_path') {
+                productionDeploymentAddPreservePath($configurationForPreflight, $activeProjectId, is_scalar($_POST['path'] ?? null) ? (string)$_POST['path'] : '');
+                $configurationForPreflight = devConsoleLoadProjectConfiguration();
+            } elseif ($action === 'production_approve_deletions') {
+                productionDeploymentApproveDeletions($configurationForPreflight, $activeProjectId);
+                $configurationForPreflight = devConsoleLoadProjectConfiguration();
+            }
+            if ($action !== 'production_approve_deletions') {
+                productionDeploymentRunPreflight($configurationForPreflight, $activeProjectId);
+                $configurationForPreflight = devConsoleLoadProjectConfiguration();
+            }
+            $updatedProject = devConsoleFindProjectById($configurationForPreflight, $activeProjectId);
+            $updatedDeployment = is_array($updatedProject['production_deployment'] ?? null) ? $updatedProject['production_deployment'] : [];
+            $preflight = productionDeploymentPreflightForUi(
+                is_array($updatedDeployment['preflight'] ?? null) ? $updatedDeployment['preflight'] : null,
+                is_array($updatedDeployment['deletion_approval'] ?? null) ? $updatedDeployment['deletion_approval'] : []
+            );
+            sendJson(['ok' => true, 'preflight' => $preflight]);
         } catch (Throwable $exception) {
             http_response_code(400);
             sendJson(['ok' => false, 'error' => $exception->getMessage()]);
@@ -919,6 +1615,86 @@ if ($action === 'create_project') {
 
         $projectFormErrors = $projectResult['errors'] ?? ['Unable to create project.'];
     }
+}
+
+if ($action === 'discover_existing_project') {
+    foreach ($existingProjectDiscoveryValues as $field => $fallback) {
+        $value = $_POST[$field] ?? $fallback;
+        $existingProjectDiscoveryValues[$field] = is_scalar($value) ? trim((string)$value) : '';
+    }
+
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $_SESSION['project_adoption_result'] = [
+            'success' => false,
+            'status' => 'CANNOT ADOPT',
+            'values' => $existingProjectDiscoveryValues,
+            'errors' => ['Invalid discovery request.'],
+            'warnings' => [],
+            'notes' => [],
+            'safety' => [projectAdoptionReadOnlyNotice()],
+        ];
+    } else {
+        $_SESSION['project_adoption_result'] = projectAdoptionDiscover(
+            $existingProjectDiscoveryValues,
+            managedServersLoad(),
+            is_array($_SESSION['project_adoption_scan_state'] ?? null) ? $_SESSION['project_adoption_scan_state'] : null
+        );
+    }
+    $_SESSION['project_adoption_source'] = devConsoleScalarInput($_POST, 'discovery_source') === 'manual' ? 'manual' : 'inspect';
+    header('Location: /?tab=projects&adoption=1#addExistingProject');
+    exit;
+}
+
+if ($action === 'scan_existing_projects') {
+    foreach ($existingProjectScanValues as $field => $fallback) {
+        $value = $_POST[$field] ?? $fallback;
+        $existingProjectScanValues[$field] = is_scalar($value) ? trim((string)$value) : '';
+    }
+
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $_SESSION['project_adoption_scan_state'] = [
+            'success' => false,
+            'status' => 'Cannot scan',
+            'values' => $existingProjectScanValues,
+            'errors' => ['Invalid server scan request.'],
+            'warnings' => [],
+            'sites' => [],
+            'safety' => [projectAdoptionReadOnlyNotice()],
+        ];
+    } else {
+        $_SESSION['project_adoption_scan_state'] = projectAdoptionScanServer(
+            $existingProjectScanValues,
+            managedServersLoad(),
+            devConsoleProjects(devConsoleLoadProjectConfiguration())
+        );
+    }
+    unset($_SESSION['project_adoption_result'], $_SESSION['project_adoption_source'], $_SESSION['project_adoption_action_result']);
+    header('Location: /?tab=projects&adoption=1#addExistingProject');
+    exit;
+}
+
+if ($action === 'adopt_existing_project') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        $_SESSION['project_adoption_action_result'] = [
+            'success' => false,
+            'status' => 'FAILED',
+            'message' => 'Invalid adoption request.',
+            'summary' => ['CSRF validation failed.'],
+            'output' => '',
+        ];
+    } else {
+        $adoptionActionResult = projectAdoptionAdopt(
+            $_POST,
+            managedServersLoad(),
+            devConsoleLoadGithubConfiguration()
+        );
+        $_SESSION['project_adoption_action_result'] = $adoptionActionResult;
+        if (!empty($adoptionActionResult['success'])) {
+            unset($_SESSION['project_adoption_result'], $_SESSION['project_adoption_source'], $_SESSION['project_adoption_scan_state']);
+        }
+    }
+    header('Location: /?tab=projects&adoption=1#addExistingProject');
+    exit;
 }
 
 if ($action === 'update_project') {
@@ -1344,6 +2120,24 @@ $projectFlash = (string)($_SESSION['project_flash'] ?? '');
 unset($_SESSION['project_flash']);
 $projectActionResult = is_array($_SESSION['project_action_result'] ?? null) ? $_SESSION['project_action_result'] : $projectActionResult;
 unset($_SESSION['project_action_result']);
+$showExistingProjectWorkflow = (string)($_GET['adoption'] ?? '') === '1';
+$existingProjectDiscoveryResult = $showExistingProjectWorkflow && is_array($_SESSION['project_adoption_result'] ?? null) ? $_SESSION['project_adoption_result'] : $existingProjectDiscoveryResult;
+$existingProjectDiscoverySource = $showExistingProjectWorkflow && is_scalar($_SESSION['project_adoption_source'] ?? null) ? (string)$_SESSION['project_adoption_source'] : $existingProjectDiscoverySource;
+$existingProjectScanResult = $showExistingProjectWorkflow && is_array($_SESSION['project_adoption_scan_state'] ?? null) ? $_SESSION['project_adoption_scan_state'] : $existingProjectScanResult;
+$existingProjectAdoptionResult = $showExistingProjectWorkflow && is_array($_SESSION['project_adoption_action_result'] ?? null) ? $_SESSION['project_adoption_action_result'] : $existingProjectAdoptionResult;
+unset($_SESSION['project_adoption_action_result']);
+if (is_array($existingProjectScanResult['values'] ?? null)) {
+    foreach ($existingProjectScanValues as $field => $fallback) {
+        $value = $existingProjectScanResult['values'][$field] ?? $fallback;
+        $existingProjectScanValues[$field] = is_scalar($value) ? (string)$value : '';
+    }
+}
+if (is_array($existingProjectDiscoveryResult['values'] ?? null)) {
+    foreach ($existingProjectDiscoveryValues as $field => $fallback) {
+        $value = $existingProjectDiscoveryResult['values'][$field] ?? $fallback;
+        $existingProjectDiscoveryValues[$field] = is_scalar($value) ? (string)$value : '';
+    }
+}
 $apacheActionResult = is_array($_SESSION['apache_action_result'] ?? null) ? $_SESSION['apache_action_result'] : $apacheActionResult;
 unset($_SESSION['apache_action_result']);
 $githubActionResult = is_array($_SESSION['github_action_result'] ?? null) ? $_SESSION['github_action_result'] : $githubActionResult;
@@ -1371,7 +2165,10 @@ if (serverToolsValidateOperationId($serverToolOperationId)) {
         // Ignore stale or invalid operation state during page rendering.
     }
 }
-$serverDiagnostics = is_array($serverDiagnosticsResult['diagnostics'] ?? null) ? $serverDiagnosticsResult['diagnostics'] : serverToolsDiagnostics();
+$requestedTabForDiagnostics = (string)($_GET['tab'] ?? '');
+$serverDiagnostics = is_array($serverDiagnosticsResult['diagnostics'] ?? null)
+    ? $serverDiagnosticsResult['diagnostics']
+    : ($requestedTabForDiagnostics === 'settings' ? serverToolsDiagnostics(false) : serverToolsStoredDiagnosticsPlaceholder());
 $serverContext = is_array($serverDiagnostics['context'] ?? null) ? $serverDiagnostics['context'] : [];
 $serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostics['tools'] : [];
 $managedServers = managedServersLoad();
@@ -1392,7 +2189,7 @@ if ($serverManagementSelectedServer === null && !empty($managedServers)) {
 $managedPreviewDeploymentOverview = $activeProject === null ? null : previewDeploymentOverview($activeProject, $activeManagedServer);
 $managedPreviewDeploymentReadiness = previewDeploymentReadiness($activeProject, $managedServers);
 $managedProductionDeploymentOverview = $activeProject === null ? null : productionDeploymentOverview($activeProject, $activeManagedServer);
-$managedProductionDeploymentReadiness = productionDeploymentReadiness($activeProject, $managedServers);
+$managedProductionDeploymentReadiness = productionDeploymentReadiness($activeProject, $managedServers, false);
 $projectStatuses = [];
 $gitStatuses = [];
 foreach ($projects as $project) {
@@ -1408,6 +2205,13 @@ foreach ($projects as $project) {
     $gitStatuses[(string)($project['id'] ?? '')] = gitStatus($project, $githubConfiguration);
 }
 $activeGitStatus = $activeProjectId === '' ? [] : ($gitStatuses[$activeProjectId] ?? []);
+$dashboardTaskGroups = [
+    'TODO' => $taskGroups['TODO'] ?? [],
+    'History' => array_merge($taskGroups['DONE'] ?? [], $taskGroups['DROPPED'] ?? []),
+];
+usort($dashboardTaskGroups['History'], static function (array $left, array $right): int {
+    return ((int)($right['number'] ?? 0)) <=> ((int)($left['number'] ?? 0));
+});
 $workflowStages = workflowSummary([
     'task_id' => $activeTaskId,
     'task_status' => $activeTaskStatus,
@@ -1453,11 +2257,22 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     code { background: #edf7fb; border-radius: 4px; padding: 2px 5px; }
     .dashboard-columns { align-items: start; display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr) 440px; }
     .dashboard-column { min-width: 0; }
+    .dashboard-workspace { display: grid; gap: 16px; }
+    .dashboard-task-grid { align-items: stretch; display: grid; gap: 16px; grid-template-columns: minmax(0, 2fr) minmax(320px, .95fr); }
+    .dashboard-execution-grid, .dashboard-deployment-grid { align-items: stretch; display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .dashboard-task-grid > .dashboard-column { display: flex; }
+    .dashboard-task-grid > .dashboard-column > .panel, .dashboard-deployment-grid > .panel { box-sizing: border-box; display: flex; flex-direction: column; width: 100%; }
     .project-selector { align-items: end; display: grid; gap: 12px; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); }
     .project-selector form { margin: 0; }
     .project-selector label { margin-top: 0; }
     .project-identity { display: flex; flex-wrap: wrap; gap: 8px 14px; }
     .project-identity span { color: var(--muted); font-size: 12px; }
+    .project-paths { border-top: 1px solid var(--line); grid-column: 1 / -1; padding-top: 10px; }
+    .project-paths h3 { color: var(--blue); font-size: 13px; margin: 0 0 7px; }
+    .project-paths-list { display: grid; gap: 8px 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; }
+    .project-paths-list dt { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .project-paths-list dd { font-size: 12px; margin: 3px 0 0; overflow-wrap: anywhere; }
+    .project-paths-list code { padding: 1px 3px; }
     .panel, .result-block { background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 18px rgba(0, 83, 133, 0.07); margin-top: 14px; padding: 18px; }
     .result-block h2, .command-output h3 { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 15px; }
     .result-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
@@ -1473,8 +2288,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .tool-operation-log { max-height: 360px; min-height: 120px; }
     label { display: block; font-weight: 700; margin: 18px 0 8px; }
     textarea { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 8px; box-sizing: border-box; color: #10242f; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.5; min-height: 390px; padding: 14px; resize: vertical; tab-size: 2; width: 100%; }
+    #task_body { font-size: 12.5px; }
     textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
-    .metadata-preview { background: #f7fcfe; border: 1px solid var(--line); color: var(--muted); margin: 8px 0 14px; min-height: 78px; padding: 10px 12px; resize: none; }
+    .metadata-preview { background: #f7fcfe; border: 1px solid var(--line); color: var(--muted); font-size: 10.5px; margin: 8px 0 14px; min-height: 78px; padding: 10px 12px; resize: none; }
     input[type="text"], input[type="password"], select { background: #fcfeff; border: 1px solid #bddfeb; border-radius: 6px; box-sizing: border-box; color: #10242f; font-size: 14px; padding: 9px 10px; width: 100%; }
     input[type="text"]:focus, input[type="password"]:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0, 83, 133, 0.12); outline: none; }
     button, .button-link { align-items: center; background: var(--blue); border: 0; border-radius: 5px; color: #fff; cursor: pointer; display: inline-flex; font-size: 15px; font-weight: 700; gap: 8px; margin-top: 16px; padding: 11px 18px; text-decoration: none; }
@@ -1501,7 +2317,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .attachment-list li { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
     .inline-form { display: inline; margin: 0; }
     .link-button { background: none; border: 0; color: var(--blue); cursor: pointer; font: inherit; padding: 0; text-decoration: underline; }
-    .task-list-scroll { max-height: 620px; overflow-y: auto; padding-right: 6px; }
+    .task-list-scroll { flex: 1 1 auto; max-height: 760px; overflow-y: auto; padding-right: 6px; }
     .task-group { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
     .task-group:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
     .task-group h3 { color: var(--blue); font-size: 13px; letter-spacing: 0; margin: 0 0 6px; }
@@ -1509,6 +2325,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .task-list > li { border-top: 1px solid var(--line); padding: 8px 0; }
     .task-list li:first-child { border-top: 0; }
     .task-row-header { align-items: center; display: flex; gap: 8px; justify-content: space-between; }
+    .task-row-actions { display: flex; justify-content: flex-end; }
     .task-summary-label { color: var(--blue); font-weight: 700; }
     .task-title { color: var(--ink); display: block; font-size: 12px; margin-top: 3px; }
     .task-metadata { color: var(--muted); display: flex; flex-wrap: wrap; font-size: 12px; gap: 5px 12px; margin-top: 6px; }
@@ -1523,14 +2340,14 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .step-state { background: #edf4f7; border-radius: 999px; color: var(--muted); flex: 0 0 auto; font-size: 11px; font-weight: 700; padding: 4px 8px; text-transform: uppercase; }
     .step-state.done { background: #e9f7ef; color: var(--green); }
     .step-state.pending { background: #f4f1e8; color: #76622d; }
-    .workflow-summary { margin-bottom: 18px; }
-    .workflow-stage-grid { align-items: stretch; display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .workflow-stage { background: #fff; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 12px; position: relative; }
+    .workflow-summary { justify-self: start; margin-bottom: 2px; max-width: calc(50% - 8px); padding: 12px 14px; width: 100%; }
+    .workflow-stage-grid { align-items: stretch; display: grid; gap: 8px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .workflow-stage { background: #f8fbfc; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 8px 10px; position: relative; }
     .workflow-stage:not(:last-child)::after { color: var(--muted); content: "→"; font-weight: 700; position: absolute; right: -10px; top: 50%; transform: translateY(-50%); }
-    .workflow-stage h3 { color: var(--muted); font-size: 11px; letter-spacing: 0; margin: 0 0 8px; text-transform: uppercase; }
-    .workflow-stage strong { color: var(--ink); display: block; font-size: 15px; overflow-wrap: anywhere; }
-    .workflow-stage .meta { display: block; margin-top: 6px; overflow-wrap: anywhere; }
-    .workflow-stage .status-pill { margin-bottom: 8px; }
+    .workflow-stage h3 { color: var(--muted); font-size: 10px; letter-spacing: 0; margin: 0 0 5px; text-transform: uppercase; }
+    .workflow-stage strong { color: var(--ink); display: block; font-size: 13px; overflow-wrap: anywhere; }
+    .workflow-stage .meta { display: block; font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
+    .workflow-stage .status-pill { margin-bottom: 5px; }
     .git-output summary { color: var(--blue); cursor: pointer; font-weight: 700; }
     .command-output { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; }
     .command-output:first-of-type { border-top: 0; }
@@ -1541,6 +2358,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .codex-console { background: #101820; border-radius: 6px; color: #dce7ec; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; line-height: 1.5; max-height: 360px; min-height: 180px; overflow: auto; padding: 14px; white-space: pre-wrap; }
     .page-header { align-items: flex-start; display: flex; gap: 18px; justify-content: space-between; margin-bottom: 20px; }
     .page-header h1 { margin-bottom: 8px; }
+    .brand-heading { align-items: center; display: flex; gap: 12px; }
+    .brand-heading h1 { margin: 0; }
+    .brand-logo { display: block; flex: 0 0 auto; height: 51px; object-fit: contain; width: auto; }
+    .brand-separator { background: #9fbfcb; display: block; flex: 0 0 auto; height: 32px; width: 1px; }
     .page-context { color: var(--muted); min-width: 220px; text-align: right; }
     .page-context strong { color: var(--ink); display: block; font-size: 16px; }
     .page-context span { font-size: 13px; }
@@ -1550,6 +2371,10 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .tab-button.active { background: #fff; border-color: #5f8ea3; color: var(--ink); font-weight: 800; }
     .deployment-panel.production { border: 2px solid #8a1f1f; }
     .deployment-details { display: grid; gap: 10px 24px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 16px 0; }
+    .deployment-primary { display: grid; gap: 8px 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 12px 0; }
+    .deployment-primary div { min-width: 0; }
+    .deployment-primary dt { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .deployment-primary dd { font-size: 13px; margin: 3px 0 0; overflow-wrap: anywhere; }
     .deployment-details dt { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
     .deployment-details dd { margin: 3px 0 0; overflow-wrap: anywhere; }
     .deployment-status { border-radius: 999px; display: inline-block; font-size: 12px; font-weight: 700; padding: 5px 10px; text-transform: uppercase; }
@@ -1557,6 +2382,15 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .deployment-status.running { background: #fff2b8; color: #705900; }
     .deployment-status.success { background: #e4f6ea; color: #147544; }
     .deployment-status.failed { background: #fde8e8; color: #8a1f1f; }
+    .deployment-panel .compact-details { margin-top: 10px; }
+    .deployment-panel > button { align-self: flex-start; margin-top: auto; }
+    .preflight-summary { background: #f9fbfc; border: 1px solid var(--line); border-radius: 7px; display: grid; gap: 8px; margin: 12px 0; padding: 10px; }
+    .preflight-summary.review-required { background: #fff9e8; border-color: #e7c76a; }
+    .preflight-counts { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+    .preflight-counts span { background: #eef4f7; border-radius: 999px; color: var(--muted); font-size: 12px; font-weight: 700; padding: 4px 8px; }
+    .preflight-paths { display: grid; gap: 5px; margin: 0; padding: 0; }
+    .preflight-paths li { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; list-style: none; }
+    .preflight-paths code { overflow-wrap: anywhere; }
     .deploy-production { background: #a51d1d; border-color: #a51d1d; font-size: 16px; }
     .deploy-production:hover { background: #801515; }
     dialog { border: 0; border-radius: 10px; box-shadow: 0 20px 70px #0006; max-width: 720px; padding: 0; width: calc(100% - 32px); }
@@ -1571,8 +2405,11 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .dashboard-header button { margin-top: 0; }
     .dashboard-header h2 { font-size: 18px; }
     .dashboard-header .meta { font-size: 11px; white-space: nowrap; }
-    .dashboard-grid { display: grid; gap: 8px; margin-top: 10px; }
+    .dashboard-grid { display: grid; gap: 10px; margin-top: 10px; }
     .summary-grid { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .environment-host-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .environment-status-card { grid-column: 1 / -1; }
+    .repository-card { grid-column: 1 / -1; }
     .dashboard-card { background: #f8fbfc; border: 1px solid var(--line); border-radius: 7px; min-width: 0; padding: 9px 10px; }
     .dashboard-card h3 { color: var(--blue); font-size: 13px; margin: 0 0 6px; }
     .dashboard-list { display: grid; gap: 4px; margin: 0; }
@@ -1600,6 +2437,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .progress-bar.error { background: #c83232; }
     .resource-value { color: var(--muted); font-size: 10px; margin: 4px 0 0; }
     .compact-details summary { color: var(--blue); cursor: pointer; font-size: 13px; font-weight: 700; }
+    .app-footer { color: var(--muted); font-size: 12px; margin: 22px 0 4px; text-align: center; }
     .compact-table { border-collapse: collapse; font-size: 11px; width: 100%; }
     .compact-table th, .compact-table td { border-top: 1px solid var(--line); padding: 4px 2px; text-align: left; }
     .compact-table tr:first-child th, .compact-table tr:first-child td { border-top: 0; }
@@ -1636,6 +2474,36 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .github-submit { width: 100%; }
 	    .projects-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 2fr) minmax(320px, .95fr); }
 	    .project-sidebar { display: grid; gap: 14px; min-width: 0; }
+	    .project-adoption-panel { margin-top: 14px; }
+	    .project-adoption-form-grid { display: grid; gap: 12px 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	    .project-adoption-form-grid label { margin-top: 4px; }
+	    .project-adoption-scan-row { align-items: end; display: grid; gap: 12px; grid-template-columns: minmax(260px, 1fr) auto; }
+	    .project-adoption-scan-row label { margin-top: 4px; }
+	    .project-adoption-scan-row button { margin-top: 0; }
+	    .project-adoption-manual { margin-top: 14px; }
+	    .project-adoption-manual-actions { display: flex; justify-content: flex-end; }
+	    .project-adoption-manual-actions button { margin-top: 0; }
+	    .project-adoption-confirmation .project-adoption-manual-actions { margin-top: 14px; }
+	    .project-adoption-result { margin-top: 16px; }
+	    .project-adoption-report { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	    .project-adoption-overview, .project-adoption-report .wide { grid-column: 1 / -1; }
+	    .project-adoption-report .environment-block { min-width: 0; }
+	    .project-adoption-report .project-detail-grid { grid-template-columns: 1fr; }
+	    .project-adoption-report code, .project-adoption-report dd, .project-adoption-report td { overflow-wrap: break-word; word-break: normal; }
+	    .project-adoption-ssh-detail { margin-top: 10px; }
+	    .project-adoption-ssh-detail .tool-operation-log { max-height: 220px; min-height: 0; }
+	    .project-adoption-sites th:nth-child(1), .project-adoption-sites td:nth-child(1) { width: 16%; }
+	    .project-adoption-sites th:nth-child(2), .project-adoption-sites td:nth-child(2) { width: 22%; }
+	    .project-adoption-sites th:nth-child(3), .project-adoption-sites td:nth-child(3) { width: 19%; }
+	    .project-adoption-sites th:nth-child(4), .project-adoption-sites td:nth-child(4) { width: 9%; }
+	    .project-adoption-sites th:nth-child(5), .project-adoption-sites td:nth-child(5) { width: 10%; }
+	    .project-adoption-sites th:nth-child(6), .project-adoption-sites td:nth-child(6) { width: 16%; }
+	    .project-adoption-sites th:nth-child(7), .project-adoption-sites td:nth-child(7) { width: 8%; }
+	    .project-related-sites th:nth-child(1), .project-related-sites td:nth-child(1) { width: 14%; }
+	    .project-related-sites th:nth-child(2), .project-related-sites td:nth-child(2) { width: 20%; }
+	    .project-related-sites th:nth-child(3), .project-related-sites td:nth-child(3) { width: 18%; }
+	    .project-related-sites th:nth-child(7), .project-related-sites td:nth-child(7) { width: 28%; }
+	    .compact-list { margin: 6px 0 0; padding-left: 16px; }
 	    .server-layout { align-items: start; display: grid; gap: 14px; grid-template-columns: minmax(0, 2fr) minmax(300px, .95fr); }
 	    .server-sidebar { display: grid; gap: 14px; min-width: 0; }
 	    .server-compact-summary { align-items: center; display: grid; gap: 8px 12px; grid-template-columns: minmax(150px, 1.2fr) auto repeat(3, minmax(105px, .8fr)) auto; }
@@ -1736,9 +2604,12 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .process-table td:last-child { overflow-wrap: anywhere; }
     @media (max-width: 900px) {
       .dashboard-columns { display: block; }
-      .workflow-stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .workflow-stage:nth-child(2)::after { content: ""; }
+      .dashboard-task-grid, .dashboard-execution-grid, .dashboard-deployment-grid, .environment-host-grid { grid-template-columns: 1fr; }
+      .workflow-summary { max-width: none; }
+	      .workflow-stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	      .workflow-stage:nth-child(2)::after { content: ""; }
 	      .settings-layout, .server-layout, .projects-layout, .documentation-layout { grid-template-columns: 1fr; }
+	      .project-adoption-form-grid, .project-adoption-report, .project-adoption-scan-row { grid-template-columns: 1fr; }
 	      .documentation-nav { position: static; }
 	      .project-item[data-project-card] > .project-summary { grid-template-columns: minmax(0, 1fr); }
 	      .project-detail-grid { grid-template-columns: 1fr; }
@@ -1746,6 +2617,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 	      .server-detail-grid { grid-template-columns: 1fr; }
       .apache-summary, .runtime-limit-row, .github-config-grid { grid-template-columns: 1fr; }
       .page-header { display: block; }
+      .brand-logo { height: 30px; }
+      .project-paths-list { grid-template-columns: 1fr; }
+      .brand-separator { height: 24px; }
       .page-context { margin-top: 12px; text-align: left; }
       main { margin-top: 18px; }
     }
@@ -1759,8 +2633,12 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 <main>
   <header class="page-header">
     <div>
-      <h1>IOVON Dev Console</h1>
-      <p class="meta">Internal task creator. Run only on <code>127.0.0.1:8090</code>.</p>
+      <div class="brand-heading">
+        <img class="brand-logo" src="/assets/images/iovon-logo.svg" alt="IOVON">
+        <span class="brand-separator" aria-hidden="true"></span>
+        <h1>Dev Console</h1>
+      </div>
+      <p class="meta">Project development and deployment console</p>
       <nav class="tab-nav" role="tablist" aria-label="Primary">
         <button type="button" role="tab" aria-selected="<?= $initialTab === 'dashboard' ? 'true' : 'false' ?>" class="tab-button <?= $initialTab === 'dashboard' ? 'active' : '' ?>" data-tab-target="dashboard">Dashboard</button>
         <button type="button" role="tab" aria-selected="<?= $initialTab === 'projects' ? 'true' : 'false' ?>" class="tab-button <?= $initialTab === 'projects' ? 'active' : '' ?>" data-tab-target="projects">Projects</button>
@@ -1828,37 +2706,49 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         </select>
       </form>
       <div class="project-identity">
+        <?php
+          $projectProductionDomain = (string)($activeProject['production']['domain'] ?? '');
+          $projectPreviewDomain = (string)($activeProject['preview']['domain'] ?? '');
+          $projectProductionUrl = $projectProductionDomain === '' ? '' : 'http://' . $projectProductionDomain;
+          $projectPreviewUrl = $projectPreviewDomain === '' ? '' : 'http://' . $projectPreviewDomain;
+        ?>
         <span><strong><?= h((string)($activeProject['name'] ?? '')) ?></strong></span>
         <span>Server: <?= h(devConsoleManagedServerLabel($activeManagedServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></span>
         <span>Status: <?= h(devConsoleManagedServerStatusLabel($activeManagedServer)) ?></span>
-        <span>Production: <?= h(configuredDisplayValue($activeProject['production']['domain'] ?? '')) ?></span>
-        <span>Preview: <?= h(configuredDisplayValue($activeProject['preview']['domain'] ?? '')) ?></span>
+        <span>Production: <?php if ($projectProductionUrl !== ''): ?><a href="<?= h($projectProductionUrl) ?>" target="_blank" rel="noopener noreferrer"><?= h($projectProductionDomain) ?></a><?php else: ?>Not configured<?php endif; ?></span>
+        <span>Preview: <?php if ($projectPreviewUrl !== ''): ?><a href="<?= h($projectPreviewUrl) ?>" target="_blank" rel="noopener noreferrer"><?= h($projectPreviewDomain) ?></a><?php else: ?>Not configured<?php endif; ?></span>
       </div>
+      <section class="project-paths" aria-label="Project paths">
+        <h3>Project Paths</h3>
+        <dl class="project-paths-list">
+          <div>
+            <dt>Source repository</dt>
+            <dd><code><?= h(configuredDisplayValue($activeProject['repository_path'] ?? '')) ?></code></dd>
+          </div>
+          <div>
+            <dt>Preview path</dt>
+            <dd><code><?= h(configuredDisplayValue($activeProject['preview']['path'] ?? '')) ?></code></dd>
+          </div>
+          <div>
+            <dt>Production path</dt>
+            <dd><code><?= h(configuredDisplayValue($activeProject['production']['path'] ?? '')) ?></code></dd>
+          </div>
+        </dl>
+      </section>
     <?php endif; ?>
   </section>
 
   <?php if ($activeProject !== null): ?>
-  <section class="panel workflow-summary" aria-label="Project workflow summary">
+  <section class="panel environment-block" id="environment">
     <div class="dashboard-header">
-      <h2>Workflow</h2>
-      <span class="meta">Task → Codex → Preview → Production</span>
+      <h2>Environment</h2>
+      <span class="meta" id="dashboardUpdated">Loading...</span>
     </div>
-    <div class="workflow-stage-grid">
-      <?php foreach ($workflowStages as $stage): ?>
-        <?php $stageState = (string)($stage['state'] ?? ''); ?>
-        <section class="workflow-stage">
-          <h3><?= h((string)($stage['name'] ?? '')) ?></h3>
-          <span class="status-pill <?= h(workflowStateClass($stageState)) ?>"><?= h($stageState) ?></span>
-          <strong><?= h((string)($stage['primary'] ?? '')) ?></strong>
-          <?php if ((string)($stage['detail'] ?? '') !== ''): ?>
-            <span class="meta"><?= h((string)$stage['detail']) ?></span>
-          <?php endif; ?>
-        </section>
-      <?php endforeach; ?>
-    </div>
+    <div class="dashboard-grid" id="environmentDashboard" aria-live="polite"></div>
   </section>
-  <div class="dashboard-columns">
-  <div class="dashboard-column dashboard-column-left">
+  <div class="dashboard-workspace">
+  <div class="dashboard-task-grid">
+  <div class="dashboard-column dashboard-task-editor">
   <section class="panel" id="create-task">
     <div class="dashboard-header" id="dashboardTaskEditor">
       <h2 id="editorHeading"><?= h($editorHeading) ?></h2>
@@ -1944,7 +2834,50 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       <button type="submit"<?= $editorTaskId === '' ? ($taskCreationReady ? '' : ' disabled title="' . h($taskCreationUnavailableReason === '' ? 'Review Git status in Projects before creating tasks.' : $taskCreationUnavailableReason) . '"') : ($editorCanSave ? '' : ' disabled title="Only TODO Project tasks can be edited before execution."') ?>>Save Task</button>
     </form>
   </section>
+  </div>
 
+  <div class="dashboard-column dashboard-task-list">
+    <section class="panel" id="tasks">
+      <h2>Tasks</h2>
+      <?php if ($legacyTasksDetected): ?>
+        <p class="field-help">Legacy tasks detected. They belong to the previous global task storage and are associated with the default Project.</p>
+      <?php endif; ?>
+      <div class="task-list-scroll">
+        <?php foreach ($dashboardTaskGroups as $groupName => $groupTasks): ?>
+          <section class="task-group">
+            <h3><?= h($groupName) ?></h3>
+            <?php if (empty($groupTasks)): ?>
+              <p class="meta">No <?= h(strtolower($groupName)) ?> tasks.</p>
+            <?php else: ?>
+              <ul class="task-list">
+                <?php foreach ($groupTasks as $task): ?>
+                  <li>
+                    <div class="task-row-header">
+                      <span class="task-summary-label"><?= h($task['task_id']) ?></span>
+                      <span class="badge <?= h(strtolower((string)$task['status'])) ?>"><?= h($task['status']) ?></span>
+                    </div>
+                    <?php if ($task['title'] !== ''): ?><span class="task-title"><?= h($task['title']) ?></span><?php endif; ?>
+                    <div class="task-metadata">
+                      <?php if ((string)($task['source'] ?? '') === 'legacy'): ?><span>Legacy storage</span><?php endif; ?>
+                      <?php if ($task['commit'] !== ''): ?><span>Commit: <code title="<?= h($task['commit']) ?>"><?= h(shortSha($task['commit'])) ?></code></span><?php endif; ?>
+                      <?php if ($task['milestone'] !== ''): ?><span class="milestone">Milestone: <?= h($task['milestone']) ?></span><?php endif; ?>
+                      <?php if ($task['tag'] !== ''): ?><span>Tag: <?= h($task['tag']) ?></span><?php endif; ?>
+                    </div>
+                    <div class="task-row-actions">
+                      <a class="button-link secondary" href="?tab=dashboard&task=<?= h(rawurlencode($task['filename'])) ?>&task_source=<?= h(rawurlencode((string)$task['source'])) ?>">Use in Workflow</a>
+                    </div>
+                  </li>
+                <?php endforeach; ?>
+              </ul>
+            <?php endif; ?>
+          </section>
+        <?php endforeach; ?>
+      </div>
+    </section>
+  </div>
+  </div>
+
+  <div class="dashboard-execution-grid">
       <section class="panel">
         <h2>Current Workflow</h2>
         <?php if ($activeTaskId !== '' && $error === ''): ?>
@@ -2053,13 +2986,16 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <?php endif; ?>
           <div class="codex-run-panel" id="codexRunPanel" data-task="<?= h($activeTaskId) ?>" data-task-source="<?= h($activeTaskSource) ?>">
             <p><strong>Run status:</strong> <span class="codex-status" id="codexStatus"><?= h(statusLabel($activeRunStatus)) ?></span></p>
-            <pre class="codex-console" id="codexConsole">Loading activity...</pre>
-            <div class="prompt-actions">
-              <button type="button" class="secondary" id="refreshCodexLog">Refresh</button>
-              <button type="button" class="secondary" id="copyCodexLog">Copy to Clipboard</button>
-              <button type="button" class="secondary" id="downloadCodexLog">Download Log</button>
-              <span class="hint" id="copyCodexMessage" aria-live="polite"></span>
-            </div>
+            <details class="compact-details">
+              <summary>Show log</summary>
+              <pre class="codex-console" id="codexConsole">Loading activity...</pre>
+              <div class="prompt-actions">
+                <button type="button" class="secondary" id="refreshCodexLog">Refresh</button>
+                <button type="button" class="secondary" id="copyCodexLog">Copy to Clipboard</button>
+                <button type="button" class="secondary" id="downloadCodexLog">Download Log</button>
+                <span class="hint" id="copyCodexMessage" aria-live="polite"></span>
+              </div>
+            </details>
           </div>
         <?php else: ?>
           <div class="codex-run-panel">
@@ -2069,6 +3005,27 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         <?php endif; ?>
       </section>
 
+  </div>
+  <section class="panel workflow-summary" aria-label="Project workflow summary">
+    <div class="dashboard-header">
+      <h2>Workflow</h2>
+      <span class="meta">Task → Codex → Preview → Production</span>
+    </div>
+    <div class="workflow-stage-grid">
+      <?php foreach ($workflowStages as $stage): ?>
+        <?php $stageState = (string)($stage['state'] ?? ''); ?>
+        <section class="workflow-stage" data-workflow-stage="<?= h((string)($stage['name'] ?? '')) ?>">
+          <h3><?= h((string)($stage['name'] ?? '')) ?></h3>
+          <span class="status-pill <?= h(workflowStateClass($stageState)) ?>" data-workflow-state><?= h($stageState) ?></span>
+          <strong data-workflow-primary><?= h((string)($stage['primary'] ?? '')) ?></strong>
+          <?php if ((string)($stage['detail'] ?? '') !== ''): ?>
+            <span class="meta" data-workflow-detail><?= h((string)$stage['detail']) ?></span>
+          <?php endif; ?>
+        </section>
+      <?php endforeach; ?>
+    </div>
+  </section>
+  <div class="dashboard-deployment-grid">
       <section class="panel deployment-panel" id="previewDeployment">
         <h2>Preview Deployment</h2>
         <?php
@@ -2088,21 +3045,26 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           $previewWarnings = $managedPreviewDeploymentReadiness['warnings'] ?? [];
           $previewOperationId = $previewStatus === 'running' ? (string)($managedPreviewDeploymentOverview['operation_id'] ?? '') : '';
         ?>
-        <dl class="deployment-details">
-          <div><dt>Managed Server</dt><dd><?= h(devConsoleManagedServerLabel($previewServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></dd></div>
-          <div><dt>Remote path</dt><dd><code><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['remote_path'] ?? '')) ?></code></dd></div>
-          <div><dt>Preview URL</dt><dd><?php if ((string)($managedPreviewDeploymentOverview['url'] ?? '') !== ''): ?><a href="<?= h((string)$managedPreviewDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h((string)$managedPreviewDeploymentOverview['url']) ?></a><?php else: ?>Not configured<?php endif; ?></dd></div>
-          <div><dt>Repository</dt><dd><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['repository'] ?? '')) ?></dd></div>
-          <div><dt>Branch</dt><dd id="previewDeploymentBranch"><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['branch'] ?? '')) ?></dd></div>
-          <div><dt>GitHub commit</dt><dd id="previewDeploymentSourceCommit"><?= h($previewReady ? 'Resolved at deployment time' : 'Unavailable') ?></dd></div>
+        <dl class="deployment-primary">
           <div><dt>Status</dt><dd><span id="previewDeploymentStatus" class="deployment-status <?= h($previewStatusClass) ?>"><?= h($previewStatusLabel) ?></span></dd></div>
+          <div><dt>Preview URL</dt><dd><?php if ((string)($managedPreviewDeploymentOverview['url'] ?? '') !== ''): ?><a href="<?= h((string)$managedPreviewDeploymentOverview['url']) ?>" target="_blank" rel="noopener noreferrer"><?= h((string)$managedPreviewDeploymentOverview['url']) ?></a><?php else: ?>Not configured<?php endif; ?></dd></div>
           <div><dt>Preview version</dt><dd><code id="previewDeploymentCommit" title="<?= h($previewCommit) ?>"><?= h($previewCommit === '' ? 'Not deployed' : shortSha($previewCommit)) ?></code></dd></div>
           <div><dt>Last deployment</dt><dd id="previewLastDeploymentTime"><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['deployed_at'] ?? '')) ?></dd></div>
-          <div><dt>Duration</dt><dd id="previewDeploymentDuration"><?= h($previewDuration === null ? 'Not configured' : ((string)round(((int)$previewDuration) / 1000, 1) . 's')) ?></dd></div>
+        </dl>
+        <details class="compact-details">
+          <summary>Deployment details</summary>
+          <dl class="deployment-details">
+            <div><dt>Managed Server</dt><dd><?= h(devConsoleManagedServerLabel($previewServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></dd></div>
+            <div><dt>Remote path</dt><dd><code><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['remote_path'] ?? '')) ?></code></dd></div>
+            <div><dt>Repository</dt><dd><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['repository'] ?? '')) ?></dd></div>
+            <div><dt>Branch</dt><dd id="previewDeploymentBranch"><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['branch'] ?? '')) ?></dd></div>
+            <div><dt>GitHub commit</dt><dd id="previewDeploymentSourceCommit"><?= h($previewReady ? 'Resolved at deployment time' : 'Unavailable') ?></dd></div>
+            <div><dt>Duration</dt><dd id="previewDeploymentDuration"><?= h($previewDuration === null ? 'Not configured' : ((string)round(((int)$previewDuration) / 1000, 1) . 's')) ?></dd></div>
           <?php if ((string)($managedPreviewDeploymentOverview['last_attempt_status'] ?? '') === 'failed'): ?>
             <div><dt>Latest attempt</dt><dd><?= h(configuredDisplayValue($managedPreviewDeploymentOverview['last_attempt_at'] ?? '')) ?>: <?= h(configuredDisplayValue($managedPreviewDeploymentOverview['last_attempt_message'] ?? 'Failed')) ?></dd></div>
           <?php endif; ?>
-        </dl>
+          </dl>
+        </details>
         <?php if (!empty($previewWarnings)): ?>
           <ul class="operation-summary">
             <?php foreach ($previewWarnings as $warning): ?><li>Warning: <?= h((string)$warning) ?></li><?php endforeach; ?>
@@ -2117,54 +3079,16 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           <div><dt>Elapsed</dt><dd id="previewDeploymentElapsed">0s</dd></div>
         </dl>
         <p class="deployment-error" id="previewDeploymentError" aria-live="assertive"></p>
-        <pre class="codex-console" id="previewDeploymentLog">No deployment log yet.</pre>
+        <details class="compact-details">
+          <summary>Show deployment log</summary>
+          <div class="operation-actions">
+            <button type="button" class="secondary" data-copy-log="previewDeploymentLog">Copy Log</button>
+            <button type="button" class="secondary" data-download-log="previewDeploymentLog" data-download-name="preview-deployment.log">Download Log</button>
+            <span class="meta" data-log-message="previewDeploymentLog"></span>
+          </div>
+          <pre class="codex-console" id="previewDeploymentLog">No deployment log yet.</pre>
+        </details>
       </section>
-  </div>
-
-  <div class="dashboard-column dashboard-column-right">
-    <section class="panel environment-block" id="environment">
-      <div class="dashboard-header">
-        <h2>Environment</h2>
-        <span class="meta" id="dashboardUpdated">Loading...</span>
-      </div>
-      <div class="dashboard-grid" id="environmentDashboard" aria-live="polite"></div>
-    </section>
-
-    <section class="panel" id="tasks">
-      <h2>Tasks</h2>
-      <?php if ($legacyTasksDetected): ?>
-        <p class="field-help">Legacy tasks detected. They belong to the previous global task storage and are associated with the default Project.</p>
-      <?php endif; ?>
-      <div class="task-list-scroll">
-        <?php foreach ($taskGroups as $groupName => $groupTasks): ?>
-          <section class="task-group">
-            <h3><?= h($groupName) ?></h3>
-            <?php if (empty($groupTasks)): ?>
-              <p class="meta">No <?= h(strtolower($groupName)) ?> tasks.</p>
-            <?php else: ?>
-              <ul class="task-list">
-                <?php foreach ($groupTasks as $task): ?>
-                  <li>
-                    <div class="task-row-header">
-                      <span class="task-summary-label"><?= h($task['task_id']) ?></span>
-                      <span class="badge <?= h(strtolower((string)$task['status'])) ?>"><?= h($task['status']) ?></span>
-                    </div>
-                    <?php if ($task['title'] !== ''): ?><span class="task-title"><?= h($task['title']) ?></span><?php endif; ?>
-                    <div class="task-metadata">
-                      <?php if ((string)($task['source'] ?? '') === 'legacy'): ?><span>Legacy storage</span><?php endif; ?>
-                      <?php if ($task['commit'] !== ''): ?><span>Commit: <code title="<?= h($task['commit']) ?>"><?= h(shortSha($task['commit'])) ?></code></span><?php endif; ?>
-                      <?php if ($task['milestone'] !== ''): ?><span class="milestone">Milestone: <?= h($task['milestone']) ?></span><?php endif; ?>
-                      <?php if ($task['tag'] !== ''): ?><span>Tag: <?= h($task['tag']) ?></span><?php endif; ?>
-                    </div>
-                    <a class="button-link secondary" href="?tab=dashboard&task=<?= h(rawurlencode($task['filename'])) ?>&task_source=<?= h(rawurlencode((string)$task['source'])) ?>">Use in Workflow</a>
-                  </li>
-                <?php endforeach; ?>
-              </ul>
-            <?php endif; ?>
-          </section>
-        <?php endforeach; ?>
-      </div>
-    </section>
 
     <section class="panel deployment-panel production" id="productionDeployment">
       <h2>Production Deployment</h2>
@@ -2179,23 +3103,81 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         $productionReady = !empty($managedProductionDeploymentReadiness['ready']);
         $productionReasons = $managedProductionDeploymentReadiness['reasons'] ?? [];
         $productionOperationId = $productionStatus === 'running' ? (string)($managedProductionDeploymentOverview['operation_id'] ?? '') : '';
+        $productionPreflight = is_array($managedProductionDeploymentOverview['preflight'] ?? null) ? $managedProductionDeploymentOverview['preflight'] : null;
+        $productionPreflightChanges = is_array($productionPreflight['changes'] ?? null) ? $productionPreflight['changes'] : [];
+        $productionBlockingDeletes = is_array($productionPreflight['blocking_deletes'] ?? null) ? $productionPreflight['blocking_deletes'] : [];
+        $productionPreflightReviewRequired = $productionPreflight !== null && !empty($productionPreflight['review_required']);
+        $productionPreflightDeletionApproved = $productionPreflight !== null && !empty($productionPreflight['deletion_approved']);
+        $productionPreflightSummary = is_array($productionPreflight['summary'] ?? null) ? $productionPreflight['summary'] : [];
+        $productionPreservePaths = is_array($managedProductionDeploymentOverview['preserve_paths'] ?? null) ? $managedProductionDeploymentOverview['preserve_paths'] : [];
       ?>
-      <dl class="deployment-details">
-        <div><dt>Managed Server</dt><dd id="productionDeploymentServer"><?= h(devConsoleManagedServerLabel($productionServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></dd></div>
-        <div><dt>Production path</dt><dd><code id="productionDeploymentPath"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['production_path'] ?? '')) ?></code></dd></div>
+      <dl class="deployment-primary">
+        <div><dt>Status</dt><dd><span id="productionDeploymentStatus" class="deployment-status <?= h($productionStatusClass) ?>"><?= h($productionStatusLabel) ?></span></dd></div>
         <div><dt>Production URL</dt><dd id="productionDeploymentUrl"><?php if ((string)($managedProductionDeploymentOverview['production_url'] ?? '') !== ''): ?><a href="<?= h((string)$managedProductionDeploymentOverview['production_url']) ?>" target="_blank" rel="noopener noreferrer"><?= h((string)$managedProductionDeploymentOverview['production_url']) ?></a><?php else: ?>Not configured<?php endif; ?></dd></div>
         <div><dt>Preview version</dt><dd><code id="productionPreviewCommit" title="<?= h($productionPreviewCommit) ?>"><?= h($productionPreviewCommit === '' ? 'Not deployed' : shortSha($productionPreviewCommit)) ?></code></dd></div>
-        <div><dt>Preview deployed</dt><dd id="productionPreviewDeployedAt"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['preview_deployed_at'] ?? '')) ?></dd></div>
-        <div><dt>Preview path</dt><dd><code id="productionPreviewPath"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['preview_path'] ?? '')) ?></code></dd></div>
-        <div><dt>Status</dt><dd><span id="productionDeploymentStatus" class="deployment-status <?= h($productionStatusClass) ?>"><?= h($productionStatusLabel) ?></span></dd></div>
         <div><dt>Production version</dt><dd><code id="productionCommit" title="<?= h($productionCommit) ?>"><?= h($productionCommit === '' ? 'Not deployed' : shortSha($productionCommit)) ?></code></dd></div>
         <div><dt>Last deployed</dt><dd id="productionLastDeploymentTime"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['deployed_at'] ?? '')) ?></dd></div>
-        <div><dt>Duration</dt><dd id="productionDeploymentDuration"><?= h($productionDuration === null ? 'Not configured' : ((string)round(((int)$productionDuration) / 1000, 1) . 's')) ?></dd></div>
         <div><dt>Version state</dt><dd id="productionVersionState"><?= h((string)($managedProductionDeploymentOverview['version_state'] ?? 'Preview has not been deployed')) ?></dd></div>
+      </dl>
+      <details class="compact-details">
+        <summary>Deployment details</summary>
+        <dl class="deployment-details">
+          <div><dt>Managed Server</dt><dd id="productionDeploymentServer"><?= h(devConsoleManagedServerLabel($productionServer, (string)($activeProject['managed_server_id'] ?? ''))) ?></dd></div>
+          <div><dt>Production path</dt><dd><code id="productionDeploymentPath"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['production_path'] ?? '')) ?></code></dd></div>
+          <div><dt>Preview deployed</dt><dd id="productionPreviewDeployedAt"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['preview_deployed_at'] ?? '')) ?></dd></div>
+          <div><dt>Preview path</dt><dd><code id="productionPreviewPath"><?= h(configuredDisplayValue($managedProductionDeploymentOverview['preview_path'] ?? '')) ?></code></dd></div>
+        <div><dt>Duration</dt><dd id="productionDeploymentDuration"><?= h($productionDuration === null ? 'Not configured' : ((string)round(((int)$productionDuration) / 1000, 1) . 's')) ?></dd></div>
         <?php if ((string)($managedProductionDeploymentOverview['last_attempt_status'] ?? '') === 'failed'): ?>
           <div><dt>Latest attempt</dt><dd><?= h(configuredDisplayValue($managedProductionDeploymentOverview['last_attempt_at'] ?? '')) ?>: <?= h(configuredDisplayValue($managedProductionDeploymentOverview['last_attempt_message'] ?? 'Failed')) ?></dd></div>
         <?php endif; ?>
-      </dl>
+        </dl>
+      </details>
+      <section class="preflight-summary<?= $productionPreflightReviewRequired ? ' review-required' : '' ?>" id="productionPreflight">
+        <div class="dashboard-header">
+          <h3>Production Preflight</h3>
+          <?php if ($productionPreflightReviewRequired): ?>
+            <span class="status-pill warning" id="productionPreflightStatus">REVIEW REQUIRED</span>
+          <?php elseif ($productionPreflight !== null): ?>
+            <span class="status-pill healthy" id="productionPreflightStatus">READY</span>
+          <?php else: ?>
+            <span class="status-pill pending" id="productionPreflightStatus">NOT CHECKED</span>
+          <?php endif; ?>
+        </div>
+        <p class="field-help" id="productionPreflightMessage">
+          <?php if ($productionPreflight === null): ?>
+            Run preflight before deploying Production. It compares current remote Preview with current remote Production without changing either.
+          <?php elseif ($productionPreflightReviewRequired): ?>
+            Production contains unmanaged files that would be deleted by promotion. Preserve selected paths or approve the remaining deletions before deploying.
+          <?php elseif ($productionPreflightDeletionApproved): ?>
+            Deletions approved for this exact preflight result. Approved deletion candidates may be removed with managed privileges before sync. Checked <?= h(configuredDisplayValue($productionPreflight['checked_at'] ?? '')) ?> for Preview commit <?= h(shortSha((string)($productionPreflight['preview_commit'] ?? ''))) ?>.
+          <?php else: ?>
+            Checked <?= h(configuredDisplayValue($productionPreflight['checked_at'] ?? '')) ?> for Preview commit <?= h(shortSha((string)($productionPreflight['preview_commit'] ?? ''))) ?>.
+          <?php endif; ?>
+        </p>
+        <p class="preflight-counts" id="productionPreflightCounts">
+          <span>Add <?= h((string)($productionPreflightSummary['add'] ?? 0)) ?></span>
+          <span>Update <?= h((string)($productionPreflightSummary['update'] ?? 0)) ?></span>
+          <span>Delete <?= h((string)($productionPreflightSummary['delete'] ?? 0)) ?></span>
+          <span>Preserved <?= h((string)($productionPreflightSummary['preserved'] ?? 0)) ?></span>
+        </p>
+        <ul class="preflight-paths" id="productionPreflightDeletes"<?= empty($productionBlockingDeletes) ? ' hidden' : '' ?>>
+          <?php foreach (array_slice($productionBlockingDeletes, 0, 12) as $deletePath): ?>
+            <li>
+              <code><?= h((string)$deletePath) ?></code>
+              <button type="button" class="secondary" data-preserve-production-path="<?= h((string)$deletePath) ?>">Preserve path</button>
+            </li>
+          <?php endforeach; ?>
+        </ul>
+        <?php if (!empty($productionPreservePaths)): ?>
+          <p class="field-help" id="productionPreservePaths">Preserve rules: <?= h(implode(', ', array_map('strval', $productionPreservePaths))) ?></p>
+        <?php else: ?>
+          <p class="field-help" id="productionPreservePaths">Preserve rules: none</p>
+        <?php endif; ?>
+        <div class="operation-actions">
+          <button type="button" class="secondary" id="refreshProductionPreflight">Refresh Preflight</button>
+          <button type="button" class="secondary" id="approveProductionDeletions"<?= $productionPreflightReviewRequired ? '' : ' hidden' ?>>Approve deletions</button>
+        </div>
+      </section>
       <?php if (!$productionReady): ?>
         <p class="field-help"><?= h(implode(' ', array_map('strval', $productionReasons))) ?></p>
       <?php endif; ?>
@@ -2205,14 +3187,18 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         <div><dt>Elapsed</dt><dd id="productionDeploymentElapsed">0s</dd></div>
       </dl>
       <p class="deployment-error" id="productionDeploymentError" aria-live="assertive"></p>
-      <div class="operation-actions">
-        <button type="button" class="secondary" data-copy-log="productionDeploymentLog">Copy Log</button>
-        <button type="button" class="secondary" data-download-log="productionDeploymentLog" data-download-name="production-deployment.log">Download Log</button>
-        <span class="meta" data-log-message="productionDeploymentLog"></span>
-      </div>
-      <pre class="codex-console" id="productionDeploymentLog">No deployment log yet.</pre>
+      <details class="compact-details">
+        <summary>Show deployment log</summary>
+        <div class="operation-actions">
+          <button type="button" class="secondary" data-copy-log="productionDeploymentLog">Copy Log</button>
+          <button type="button" class="secondary" data-download-log="productionDeploymentLog" data-download-name="production-deployment.log">Download Log</button>
+          <span class="meta" data-log-message="productionDeploymentLog"></span>
+        </div>
+        <pre class="codex-console" id="productionDeploymentLog">No deployment log yet.</pre>
+      </details>
     </section>
   </div>
+
   </div>
   <?php endif; ?>
 
@@ -2301,8 +3287,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                         : null;
                 $cardOpen = $cardActionResult !== null || $projectIdForCard === (string)($projectsForDisplay[0]['id'] ?? '');
                 $usesGeneratedPaths = devConsoleProjectUsesGeneratedEnvironmentPaths($project);
+                $adoptedInPlace = devConsoleProjectAdoptedInPlace($project);
                 $setupUnavailableReason = '';
-                if (!$usesGeneratedPaths) {
+                if (!$usesGeneratedPaths && !$adoptedInPlace) {
                     $setupUnavailableReason = 'This project cannot be set up automatically with its current environment paths.';
                 } elseif ($projectManagedServerId === '') {
                     $setupUnavailableReason = 'Assign a Managed Server before setup.';
@@ -2457,7 +3444,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                     </section>
                   <?php endforeach; ?>
                 </div>
-                <?php if (!$usesGeneratedPaths): ?>
+                <?php if (!$usesGeneratedPaths && !$adoptedInPlace): ?>
                   <p class="error">This project uses custom environment paths and cannot be set up automatically. Remove it from Console and create it again.</p>
                 <?php endif; ?>
                 <div class="project-actions">
@@ -2692,6 +3679,89 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       </aside>
 
     </div>
+    <section class="panel project-adoption-panel" id="addExistingProject">
+        <h2>Add Existing Project</h2>
+        <p class="field-help">Scan a Managed Server for existing Apache websites and project sources, inspect a candidate, then review and confirm adoption. Scan and inspect are read-only.</p>
+        <form method="post" class="project-form project-adoption-scan-form" action="/?tab=projects&amp;adoption=1#addExistingProject" data-preserve-settings-scroll="1">
+          <input type="hidden" name="action" value="scan_existing_projects">
+          <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+          <fieldset>
+            <legend>Server scan</legend>
+            <div class="project-adoption-scan-row">
+              <div>
+                <label for="existing_scan_managed_server_id">Managed Server</label>
+                <?php if (empty($managedServers)): ?>
+                  <p class="field-help">No Managed Servers are configured yet. Add one on the <a href="/?tab=servers#add-server">Servers page</a> before scanning.</p>
+                <?php else: ?>
+                  <select id="existing_scan_managed_server_id" name="managed_server_id" required>
+                    <option value="">Select configured server</option>
+                    <?php foreach ($managedServers as $serverOption): ?>
+                      <?php $serverOptionId = (string)($serverOption['id'] ?? ''); ?>
+                      <option value="<?= h($serverOptionId) ?>"<?= $serverOptionId === (string)$existingProjectScanValues['managed_server_id'] ? ' selected' : '' ?>><?= h(devConsoleManagedServerLabel($serverOption) . ' - ' . devConsoleManagedServerStatusLabel($serverOption)) ?></option>
+                    <?php endforeach; ?>
+                  </select>
+                <?php endif; ?>
+              </div>
+              <button type="submit"<?= empty($managedServers) ? ' disabled title="Add a Managed Server before scanning for existing Projects."' : '' ?>>Scan Server</button>
+            </div>
+          </fieldset>
+        </form>
+        <?php if ($existingProjectScanResult !== null): ?>
+          <?php renderProjectAdoptionScanResult($existingProjectScanResult, $csrfToken); ?>
+        <?php endif; ?>
+        <?php if ($existingProjectAdoptionResult !== null): ?>
+          <?php renderProjectAdoptionActionResult($existingProjectAdoptionResult); ?>
+        <?php endif; ?>
+        <details class="compact-details project-adoption-manual"<?= $existingProjectDiscoverySource === 'manual' ? ' open' : '' ?>>
+          <summary>Add manually</summary>
+          <form method="post" class="project-form" action="/?tab=projects&amp;adoption=1#addExistingProject" data-preserve-settings-scroll="1">
+            <input type="hidden" name="action" value="discover_existing_project">
+            <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+            <input type="hidden" name="discovery_source" value="manual">
+
+            <fieldset>
+              <legend>Existing site</legend>
+              <div class="project-adoption-form-grid">
+                <div>
+                  <label for="existing_project_name">Project name</label>
+                  <input id="existing_project_name" name="project_name" type="text" required maxlength="120" placeholder="Existing Website" value="<?= h($existingProjectDiscoveryValues['project_name']) ?>">
+                </div>
+                <div>
+                  <label for="existing_managed_server_id">Managed Server</label>
+                  <?php if (empty($managedServers)): ?>
+                    <p class="field-help">No Managed Servers are configured yet. Add one on the <a href="/?tab=servers#add-server">Servers page</a> before discovery.</p>
+                  <?php else: ?>
+                    <select id="existing_managed_server_id" name="managed_server_id" required>
+                      <option value="">Select configured server</option>
+                      <?php foreach ($managedServers as $serverOption): ?>
+                        <?php $serverOptionId = (string)($serverOption['id'] ?? ''); ?>
+                        <option value="<?= h($serverOptionId) ?>"<?= $serverOptionId === (string)$existingProjectDiscoveryValues['managed_server_id'] ? ' selected' : '' ?>><?= h(devConsoleManagedServerLabel($serverOption) . ' - ' . devConsoleManagedServerStatusLabel($serverOption)) ?></option>
+                      <?php endforeach; ?>
+                    </select>
+                  <?php endif; ?>
+                </div>
+                <div>
+                  <label for="existing_production_domain">Production domain</label>
+                  <input id="existing_production_domain" name="production_domain" type="text" required maxlength="253" placeholder="example.com" value="<?= h($existingProjectDiscoveryValues['production_domain']) ?>">
+                  <p class="field-help">Use the hostname without https:// or a path.</p>
+                </div>
+                <div>
+                  <label for="existing_production_path">Production path <span class="meta">(optional)</span></label>
+                  <input id="existing_production_path" name="production_path" type="text" maxlength="4096" placeholder="/var/www/example/current" value="<?= h($existingProjectDiscoveryValues['production_path']) ?>">
+                  <p class="field-help">Optional. Use this when Apache discovery is ambiguous or the path is already known.</p>
+                </div>
+              </div>
+            </fieldset>
+
+            <div class="project-adoption-manual-actions">
+              <button type="submit"<?= empty($managedServers) ? ' disabled title="Add a Managed Server before discovering an existing Project."' : '' ?>>Discover Project</button>
+            </div>
+          </form>
+        </details>
+        <?php if ($existingProjectDiscoveryResult !== null): ?>
+          <?php renderProjectAdoptionResult($existingProjectDiscoveryResult, $csrfToken); ?>
+        <?php endif; ?>
+    </section>
   </section>
 
   <section id="serversTab" data-tab-panel="servers"<?= $initialTab === 'servers' ? '' : ' hidden' ?>>
@@ -3542,6 +4612,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     <?php endif; ?>
   </section>
 
+  <footer class="app-footer">&copy; <?= h(date('Y')) ?> IOVON</footer>
 </main>
 <script>
 (() => {
@@ -3567,6 +4638,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const nextTaskId = <?= json_encode(taskNumber($nextNumber), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const activeManagedServerLabel = <?= json_encode(devConsoleManagedServerLabel($activeManagedServer, (string)($activeProject['managed_server_id'] ?? '')), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const activeManagedServerStatus = <?= json_encode(devConsoleManagedServerStatusLabel($activeManagedServer), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const activeGitStatusLabel = <?= json_encode((string)($activeGitStatus['status'] ?? 'Not initialized'), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
   const draftKey = `dev-console-task-draft-${activeProjectId || 'none'}-${editorTaskId || `new-${nextTaskId || 'none'}`}`;
   const environmentDashboard = document.getElementById('environmentDashboard');
   const dashboardUpdated = document.getElementById('dashboardUpdated');
@@ -4146,6 +5218,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const dashboardCard = (title, rows, extraClass = '') => `<section class="dashboard-card ${extraClass}"><h3>${dashboardEscape(title)}</h3><dl class="dashboard-list">${rows.map(([label, value]) => `<div><dt>${dashboardEscape(label)}</dt><dd>${value}</dd></div>`).join('')}</dl></section>`;
   const dashboardLink = (url) => `<a href="${dashboardEscape(url)}" target="_blank" rel="noopener noreferrer">${dashboardEscape(url)}</a>`;
   const dashboardStatus = (status) => `<span class="status-pill ${statusClass(status)}">${dashboardEscape(statusLabel(status))}</span>`;
+  const safeLink = (url) => url ? dashboardLink(url) : 'Not configured';
   const healthItem = (label, state) => `<span class="health-item ${state}"><span class="health-dot" aria-hidden="true"></span>${dashboardEscape(label)}</span>`;
   const resourceBar = (label, percentage, numericValue) => {
     const value = Math.max(0, Math.min(100, Number(percentage) || 0));
@@ -4157,7 +5230,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     if (!environmentDashboard || environmentRefreshInProgress) return;
     environmentRefreshInProgress = true;
     try {
-      const topProcessesWasOpen = environmentDashboard.querySelector('#topProcesses')?.open ?? false;
+      const topProcessesWasOpen = sessionStorage.getItem('dev-console-topProcesses-open') === '1' || (environmentDashboard.querySelector('#topProcesses')?.open ?? false);
+      const managedProcessesWasOpen = sessionStorage.getItem('dev-console-managedTopProcesses-open') === '1' || (environmentDashboard.querySelector('#managedTopProcesses')?.open ?? false);
       const response = await fetch('?action=environment-status', { cache: 'no-store' });
       const payload = await response.json();
       if (!payload.ok) throw new Error(payload.error || 'Unable to load environment status.');
@@ -4167,34 +5241,59 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       const production = data.environment.production;
       const memory = data.server.memory;
       const disk = data.server.disk;
-      const softwareNames = ['PHP', 'Composer', 'Node.js', 'npm', 'Git', 'Codex CLI'];
-      const readiness = {
-        PHP: 'Required',
-        Composer: 'Optional / project-dependent',
-        'Node.js': 'Optional / project-dependent',
-        npm: 'Optional / project-dependent',
-        Git: 'Required',
-        'Codex CLI': 'Required for Run Codex',
-      };
-      const softwareRows = softwareNames.map((name) => `<tr><th>${dashboardEscape(name)}</th><td>${dashboardEscape(data.software[name])}<br><span class="meta">${dashboardEscape(readiness[name] || '')}</span></td></tr>`).join('');
+      const managedServer = data.managed_server || {};
+      const managedMetrics = managedServer.server || null;
+      const managedMemory = managedMetrics?.memory || { percentage: 0, used: 0, total: 0 };
+      const managedDisk = managedMetrics?.disk || { percentage: 0, used: 0, total: 0 };
       const processes = data.processes.length ? data.processes.map((process) => `<tr><td>${process.pid}</td><td>${dashboardEscape(process.user)}</td><td>${process.cpu.toFixed(1)}</td><td>${process.memory.toFixed(1)}</td><td>${dashboardEscape(process.command)}</td></tr>`).join('') : '<tr><td colspan="5">No process data available.</td></tr>';
+      const managedProcesses = Array.isArray(managedServer.processes) && managedServer.processes.length ? managedServer.processes.map((process) => `<tr><td>${process.pid}</td><td>${dashboardEscape(process.user)}</td><td>${Number(process.cpu || 0).toFixed(1)}</td><td>${Number(process.memory || 0).toFixed(1)}</td><td>${dashboardEscape(process.command || '')}</td></tr>`).join('') : '<tr><td colspan="5">No managed server process data available.</td></tr>';
+      const storage = managedServer.storage || {};
+      const storageRows = (environment, label) => {
+        const item = storage[environment] || {};
+        if (item.status === 'available') {
+          return [[`${label} size`, formatBytes(item.bytes || 0)], [`${label} files`, Number(item.files || 0).toLocaleString()]];
+        }
+        const state = item.status === 'not_deployed' ? 'Not deployed' : (item.status === 'not_readable' ? 'Not readable' : 'Not available');
+        return [[label, dashboardEscape(state)]];
+      };
       const previewHealth = statusClass(preview.status);
       const productionHealth = statusClass(production.status);
       const consoleHealth = statusClass(data.environment.console.status);
-      const gitHealth = data.software.Git === 'Not installed' ? 'error' : 'healthy';
-      const webHealth = previewHealth === 'error' && productionHealth === 'error' ? 'error' : (previewHealth === 'warning' && productionHealth === 'warning' ? 'warning' : 'healthy');
+      const gitHealth = /connected|ready|initialized/i.test(activeGitStatusLabel) ? 'healthy' : (/not|incomplete|failed|error/i.test(activeGitStatusLabel) ? 'error' : 'warning');
+      const apache = managedServer.apache || {};
+      const sites = Array.isArray(managedServer.apache_sites) ? managedServer.apache_sites : [];
+      const projectSites = sites.filter((site) => site && site.project_id === activeProjectId && site.managed_marker);
+      const webHealth = apache.installed === false ? 'error' : (projectSites.some((site) => site.enabled === true) ? 'healthy' : (projectSites.length ? 'warning' : 'warning'));
+      const tailscaleHealth = 'warning';
+      const tailscaleLabel = 'Tailscale: Unknown';
+      const devConsoleResources = `<section class="dashboard-card"><h3>Dev Console Host Resources</h3><div class="resource-grid">${resourceBar('CPU', data.server.load_percentage, `Load ${data.server.load.join(' / ') || 'not detected'}`)}${resourceBar('Memory', memory.percentage, `${formatBytes(memory.used)} / ${formatBytes(memory.total)}`)}${resourceBar('Disk', disk.percentage, `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`)}</div></section>`;
+      const managedResources = managedMetrics && managedServer.available
+        ? `<section class="dashboard-card"><h3>Managed Server Resources</h3><div class="resource-grid">${resourceBar('CPU', managedMetrics.load_percentage, `Load ${(managedMetrics.load || []).join(' / ') || 'not detected'}`)}${resourceBar('Memory', managedMemory.percentage, `${formatBytes(managedMemory.used)} / ${formatBytes(managedMemory.total)}`)}${resourceBar('Disk', managedDisk.percentage, `${formatBytes(managedDisk.used)} / ${formatBytes(managedDisk.total)}`)}</div></section>`
+        : dashboardCard('Managed Server Resources', [['Server', dashboardEscape(activeManagedServerLabel || 'Not configured')], ['Status', dashboardEscape(activeManagedServerStatus || 'Unknown')], ['Diagnostics', dashboardEscape(managedServer.message || 'Unavailable until the server is reachable')]], '');
       environmentDashboard.innerHTML =
-        `<section class="dashboard-card"><div class="health-row">${healthItem('Preview', previewHealth)}${healthItem('Production', productionHealth)}${healthItem('Dev Console', consoleHealth)}${healthItem('Git', gitHealth)}${healthItem('Project Apache', webHealth)}${healthItem('Tailscale', consoleHealth)}</div></section>` +
-        `<div class="summary-grid">` +
-        dashboardCard('Development', [['Branch', dashboardEscape(development.branch)], ['Commit', `<code>${dashboardEscape(development.commit)}</code>`], ['Current task', dashboardEscape(activeTask)], ['Server', dashboardEscape(activeManagedServerLabel)], ['Server status', dashboardEscape(activeManagedServerStatus)]]) +
-        dashboardCard('Preview', [['Status', dashboardStatus(preview.status)], ['URL', dashboardLink(preview.url)]]) +
-        dashboardCard('Production', [['Status', dashboardStatus(production.status)], ['URL', dashboardLink(production.url)]]) +
-        dashboardCard('Dev Console', [['Status', dashboardStatus(data.environment.console.status)], ['URL', dashboardLink(data.environment.console.url)]]) +
+        `<section class="dashboard-card environment-status-card"><div class="health-row">${healthItem(`Preview: ${statusLabel(preview.status)}`, previewHealth)}${healthItem(`Production: ${statusLabel(production.status)}`, productionHealth)}${healthItem('Dev Console: Running', consoleHealth)}${healthItem(`Git: ${activeGitStatusLabel || 'Unknown'}`, gitHealth)}${healthItem(`Project Apache: ${projectSites.length ? 'Configured' : 'Unknown'}`, webHealth)}${healthItem(tailscaleLabel, tailscaleHealth)}</div></section>` +
+        `<div class="environment-host-grid">` +
+        dashboardCard('Dev Console Host', [['Status', dashboardStatus(data.environment.console.status)]]) +
+        dashboardCard('Managed Server', [['Server', dashboardEscape(activeManagedServerLabel || 'Not configured')], ['Status', dashboardEscape(activeManagedServerStatus || 'Unknown')]]) +
         `</div>` +
-        `<section class="dashboard-card"><h3>Resources</h3><div class="resource-grid">${resourceBar('CPU', data.server.load_percentage, `Load ${data.server.load.join(' / ') || 'not detected'}`)}${resourceBar('Memory', memory.percentage, `${formatBytes(memory.used)} / ${formatBytes(memory.total)}`)}${resourceBar('Disk', disk.percentage, `${formatBytes(disk.used)} / ${formatBytes(disk.total)}`)}</div></section>` +
-        `<section class="dashboard-card"><h3>Software Versions</h3><table class="compact-table"><tbody>${softwareRows}</tbody></table></section>` +
-        dashboardCard('Repository', [['Size', formatBytes(data.statistics.development.bytes)], ['File count', data.statistics.development.files.toLocaleString()]]) +
-        `<details class="dashboard-card compact-details" id="topProcesses"${topProcessesWasOpen ? ' open' : ''}><summary>Top Processes</summary><table class="process-table"><thead><tr><th>PID</th><th>User</th><th>CPU %</th><th>Memory %</th><th>Command</th></tr></thead><tbody>${processes}</tbody></table></details>`;
+        `<div class="environment-host-grid">${devConsoleResources}${managedResources}</div>` +
+        dashboardCard('Repository / Project Storage', [
+          ['Dev Console Host', '<strong>Repository</strong>'],
+          ['Repository size', formatBytes(data.statistics.development.bytes)],
+          ['Repository files', data.statistics.development.files.toLocaleString()],
+          ['Managed Server', '<strong>Deployed storage</strong>'],
+          ...storageRows('preview', 'Preview'),
+          ...storageRows('production', 'Production'),
+        ], 'repository-card') +
+        `<div class="environment-host-grid">` +
+        `<details class="dashboard-card compact-details dashboard-processes" id="topProcesses"${topProcessesWasOpen ? ' open' : ''}><summary>Dev Console Host Top Processes</summary><table class="process-table"><thead><tr><th>PID</th><th>User</th><th>CPU %</th><th>Memory %</th><th>Command</th></tr></thead><tbody>${processes}</tbody></table></details>` +
+        `<details class="dashboard-card compact-details dashboard-processes" id="managedTopProcesses"${managedProcessesWasOpen ? ' open' : ''}><summary>Managed Server Top Processes</summary><table class="process-table"><thead><tr><th>PID</th><th>User</th><th>CPU %</th><th>Memory %</th><th>Command</th></tr></thead><tbody>${managedProcesses}</tbody></table></details>` +
+        `</div>`;
+      environmentDashboard.querySelectorAll('.dashboard-processes').forEach((details) => {
+        details.addEventListener('toggle', () => {
+          sessionStorage.setItem(`dev-console-${details.id}-open`, details.open ? '1' : '0');
+        });
+      });
       dashboardUpdated.textContent = `Updated ${new Date(data.generated_at).toLocaleTimeString()}`;
     } finally {
       environmentRefreshInProgress = false;
@@ -4589,6 +5688,14 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const productionDeploymentProgress = document.getElementById('productionDeploymentProgress');
   const productionDeploymentDuration = document.getElementById('productionDeploymentDuration');
   const productionVersionState = document.getElementById('productionVersionState');
+  const productionPreflight = document.getElementById('productionPreflight');
+  const productionPreflightStatus = document.getElementById('productionPreflightStatus');
+  const productionPreflightMessage = document.getElementById('productionPreflightMessage');
+  const productionPreflightCounts = document.getElementById('productionPreflightCounts');
+  const productionPreflightDeletes = document.getElementById('productionPreflightDeletes');
+  const productionPreservePaths = document.getElementById('productionPreservePaths');
+  const refreshProductionPreflight = document.getElementById('refreshProductionPreflight');
+  const approveProductionDeletions = document.getElementById('approveProductionDeletions');
   const previewDeploymentError = document.getElementById('previewDeploymentError');
   const previewDeploymentLog = document.getElementById('previewDeploymentLog');
   const previewDeploymentStatus = document.getElementById('previewDeploymentStatus');
@@ -4617,7 +5724,58 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     element.textContent = status.charAt(0).toUpperCase() + status.slice(1);
     element.className = `deployment-status ${status}`;
   };
-  const productionConfirmationHtml = () => `<p>Deploy current Preview to Production?</p><dl class="deployment-details"><div><dt>Preview version</dt><dd><code>${escapeHtml(deployButton?.dataset.previewCommit || 'Not deployed')}</code></dd></div><div><dt>Server</dt><dd>${escapeHtml(deployButton?.dataset.server || 'Not configured')}</dd></div><div><dt>Production path</dt><dd><code>${escapeHtml(deployButton?.dataset.productionPath || 'Not configured')}</code></dd></div></dl><p class="field-help">This will replace the current Production contents with Preview.</p>`;
+  const setWorkflowStage = (name, state, primary = '', detail = '') => {
+    const stage = document.querySelector(`[data-workflow-stage="${name}"]`);
+    if (!stage) return;
+    const pill = stage.querySelector('[data-workflow-state]');
+    const primaryElement = stage.querySelector('[data-workflow-primary]');
+    const detailElement = stage.querySelector('[data-workflow-detail]');
+    if (pill) {
+      pill.textContent = state;
+      pill.className = `status-pill ${state === 'Failed' ? 'error' : (['Deployed', 'Completed', 'In sync with Preview'].includes(state) ? 'healthy' : (state === 'Running' ? 'running' : 'warning'))}`;
+    }
+    if (primaryElement && primary) primaryElement.textContent = primary;
+    if (detailElement && detail !== '') detailElement.textContent = detail;
+  };
+  const productionConfirmationHtml = () => `<p>Deploy current Preview to Production?</p><dl class="deployment-details"><div><dt>Preview version</dt><dd><code>${escapeHtml(deployButton?.dataset.previewCommit || 'Not deployed')}</code></dd></div><div><dt>Server</dt><dd>${escapeHtml(deployButton?.dataset.server || 'Not configured')}</dd></div><div><dt>Production path</dt><dd><code>${escapeHtml(deployButton?.dataset.productionPath || 'Not configured')}</code></dd></div></dl><p class="field-help">The latest Production preflight must be clean or explicitly preserved. This will replace the current Production contents with Preview.</p>`;
+  const renderProductionPreflight = (preflight) => {
+    if (!preflight) return;
+    const summary = preflight.summary || {};
+    const deletes = Array.isArray(preflight.blocking_deletes) ? preflight.blocking_deletes : [];
+    const preservePaths = Array.isArray(preflight.preserve_paths) ? preflight.preserve_paths : [];
+    const reviewRequired = Boolean(preflight.review_required);
+    const deletionApproved = Boolean(preflight.deletion_approved);
+    if (productionPreflight) productionPreflight.classList.toggle('review-required', reviewRequired);
+    if (productionPreflightStatus) {
+      productionPreflightStatus.textContent = reviewRequired ? 'REVIEW REQUIRED' : 'READY';
+      productionPreflightStatus.className = `status-pill ${reviewRequired ? 'warning' : 'healthy'}`;
+    }
+    if (productionPreflightMessage) {
+      productionPreflightMessage.textContent = reviewRequired
+        ? 'Production contains unmanaged files that would be deleted by promotion. Preserve selected paths or approve the remaining deletions before deploying.'
+        : (deletionApproved
+            ? `Deletions approved for this exact preflight result. Approved deletion candidates may be removed with managed privileges before sync. Checked ${preflight.checked_at || 'now'} for Preview commit ${(preflight.preview_commit || '').slice(0, 12) || 'unknown'}.`
+            : `Checked ${preflight.checked_at || 'now'} for Preview commit ${(preflight.preview_commit || '').slice(0, 12) || 'unknown'}.`);
+    }
+    if (productionPreflightCounts) {
+      productionPreflightCounts.innerHTML = `<span>Add ${Number(summary.add || 0)}</span><span>Update ${Number(summary.update || 0)}</span><span>Delete ${Number(summary.delete || 0)}</span><span>Preserved ${Number(summary.preserved || 0)}</span>`;
+    }
+    if (productionPreflightDeletes) {
+      productionPreflightDeletes.hidden = deletes.length === 0;
+      productionPreflightDeletes.innerHTML = deletes.slice(0, 12).map((path) => `<li><code>${escapeHtml(path)}</code><button type="button" class="secondary" data-preserve-production-path="${escapeHtml(path)}">Preserve path</button></li>`).join('');
+    }
+    if (approveProductionDeletions) {
+      approveProductionDeletions.hidden = !reviewRequired;
+      approveProductionDeletions.disabled = !reviewRequired;
+    }
+    if (productionPreservePaths) {
+      productionPreservePaths.textContent = `Preserve rules: ${preservePaths.length ? preservePaths.join(', ') : 'none'}`;
+    }
+    if (deployButton) {
+      deployButton.disabled = reviewRequired;
+      deployButton.title = reviewRequired ? 'Production preflight requires review before deployment.' : '';
+    }
+  };
   const setPreviewManagedStatus = (operation) => {
     if (!operation) return;
     const result = operation.result || {};
@@ -4633,6 +5791,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       previewDeploymentStatus.textContent = status === 'deployed' ? 'Deployed' : (status === 'failed' ? 'Failed' : 'Running');
       previewDeploymentStatus.className = `deployment-status ${status === 'deployed' ? 'success' : status}`;
     }
+    setWorkflowStage('Preview', status === 'deployed' ? 'Deployed' : (status === 'failed' ? 'Failed' : 'Running'), result.commit ? result.commit.slice(0, 7) : '', '');
     if (previewDeploymentError) previewDeploymentError.textContent = operation.status === 'failed' ? (operation.message || 'Preview deployment failed.') : '';
     if (result.commit && previewDeploymentCommit) {
       previewDeploymentCommit.textContent = result.commit.slice(0, 7);
@@ -4646,6 +5805,24 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     if (result.duration_ms && previewDeploymentDuration) previewDeploymentDuration.textContent = `${(Number(result.duration_ms) / 1000).toFixed(1)}s`;
     const lastDeployment = document.getElementById('previewLastDeploymentTime');
     if (lastDeployment && operation.status === 'completed' && operation.finished_at) lastDeployment.textContent = operation.finished_at;
+    if (operation.status === 'completed') {
+      if (deployButton) {
+        deployButton.dataset.previewCommit = result.commit || deployButton.dataset.previewCommit || '';
+        deployButton.disabled = true;
+        deployButton.title = 'Run Production preflight before deploying.';
+      }
+      if (productionPreflightStatus) {
+        productionPreflightStatus.textContent = 'Not checked';
+        productionPreflightStatus.className = 'status-pill pending';
+      }
+      if (approveProductionDeletions) {
+        approveProductionDeletions.hidden = true;
+        approveProductionDeletions.disabled = true;
+      }
+      if (productionPreflightMessage) {
+        productionPreflightMessage.textContent = 'Preview changed. Run Production preflight before deploying.';
+      }
+    }
   };
   const pollPreviewManagedDeployment = (operationId) => {
     if (!operationId) return;
@@ -4708,6 +5885,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       deploymentStatus.textContent = status === 'deployed' ? 'Deployed' : (status === 'failed' ? 'Failed' : 'Running');
       deploymentStatus.className = `deployment-status ${status === 'deployed' ? 'success' : status}`;
     }
+    setWorkflowStage('Production', status === 'deployed' ? 'In sync with Preview' : (status === 'failed' ? 'Failed' : 'Running'), result.commit && operation.status === 'completed' ? result.commit.slice(0, 7) : '', '');
     if (deploymentError) deploymentError.textContent = operation.status === 'failed' ? (operation.message || 'Production deployment failed.') : '';
     if (result.commit) {
       const productionCommit = document.getElementById('productionCommit');
@@ -4774,6 +5952,42 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   if (deployButton?.dataset.operationId) {
     pollProductionManagedDeployment(deployButton.dataset.operationId);
   }
+  refreshProductionPreflight?.addEventListener('click', async () => {
+    refreshProductionPreflight.disabled = true;
+    if (deploymentError) deploymentError.textContent = '';
+    try {
+      const payload = await postDeployment('production_preflight_managed');
+      renderProductionPreflight(payload.preflight);
+    } catch (error) {
+      if (deploymentError) deploymentError.textContent = error.message;
+    } finally {
+      refreshProductionPreflight.disabled = false;
+    }
+  });
+  productionPreflightDeletes?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-preserve-production-path]');
+    if (!button) return;
+    button.disabled = true;
+    if (deploymentError) deploymentError.textContent = '';
+    try {
+      const payload = await postDeployment('production_add_preserve_path', { path: button.dataset.preserveProductionPath || '' });
+      renderProductionPreflight(payload.preflight);
+    } catch (error) {
+      if (deploymentError) deploymentError.textContent = error.message;
+      button.disabled = false;
+    }
+  });
+  approveProductionDeletions?.addEventListener('click', async () => {
+    approveProductionDeletions.disabled = true;
+    if (deploymentError) deploymentError.textContent = '';
+    try {
+      const payload = await postDeployment('production_approve_deletions');
+      renderProductionPreflight(payload.preflight);
+    } catch (error) {
+      if (deploymentError) deploymentError.textContent = error.message;
+      approveProductionDeletions.disabled = false;
+    }
+  });
 
   if (codexRunPanel) {
     updateCodexStatus().then((status) => {

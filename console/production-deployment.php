@@ -117,8 +117,17 @@ function productionDeploymentRunCommand(string $operationId, array $arguments, a
 function productionDeploymentFailureMessage(array $result, string $fallback): string
 {
     $output = strtolower((string)($result['output'] ?? ''));
-    if (str_contains($output, 'permission denied') || str_contains($output, 'authentication failed')) {
+    $detail = productionDeploymentFailureDetail((string)($result['output'] ?? ''));
+    if (str_contains($output, 'permission denied (publickey)') || str_contains($output, 'authentication failed') || str_contains($output, 'publickey,')) {
         return 'SSH authentication failed.';
+    }
+    if (str_contains($output, 'permission denied')) {
+        $message = 'Remote filesystem permission failure.';
+        if (str_contains(strtolower($fallback), 'synchronization')) {
+            $message .= ' Production synchronization may have been partially applied; rerun preflight after fixing the permission issue.';
+        }
+
+        return $message . ($detail === '' ? '' : "\n\n" . $detail);
     }
     if (!empty($result['timed_out']) || str_contains($output, 'connection timed out') || str_contains($output, 'operation timed out')) {
         return 'Connection timeout.';
@@ -130,6 +139,23 @@ function productionDeploymentFailureMessage(array $result, string $fallback): st
     return $fallback;
 }
 
+function productionDeploymentFailureDetail(string $output): string
+{
+    $lines = [];
+    foreach (preg_split('/\R/', trim($output)) ?: [] as $line) {
+        $line = trim($line);
+        if ($line === '') {
+            continue;
+        }
+        if (count($lines) >= 6) {
+            break;
+        }
+        $lines[] = $line;
+    }
+
+    return implode("\n", $lines);
+}
+
 function productionDeploymentExpectedPath(array $project): string
 {
     return '/var/www/projects/' . (string)($project['id'] ?? '') . '/production';
@@ -138,7 +164,9 @@ function productionDeploymentExpectedPath(array $project): string
 function productionDeploymentPathIsAllowed(array $project): bool
 {
     $path = (string)($project['production']['path'] ?? '');
-    return $path !== '' && $path === productionDeploymentExpectedPath($project);
+    $previewPath = (string)($project['preview']['path'] ?? '');
+    return devConsoleIsAbsoluteUnixPath($path)
+        && ($previewPath === '' || $path !== $previewPath);
 }
 
 function productionDeploymentShellPath(string $path): string
@@ -172,14 +200,54 @@ function productionDeploymentRemotePrepareCommand(string $productionPath): strin
     return 'mkdir -p -- ' . $path . ' && test -d ' . $path . ' && test -w ' . $path;
 }
 
-function productionDeploymentRemotePromoteCommand(string $previewPath, string $productionPath): string
+function productionDeploymentRemotePromoteCommand(string $previewPath, string $productionPath, array $preservePaths = []): string
 {
     $source = productionDeploymentShellPath(rtrim($previewPath, '/') . '/');
     $target = productionDeploymentShellPath(rtrim($productionPath, '/') . '/');
     $targetRoot = productionDeploymentShellPath($productionPath);
-    return 'rsync -a --delete --no-owner --no-group -- ' . $source . ' ' . $target
+    return 'rsync -a --delete --no-owner --no-group '
+        . productionDeploymentPreserveArgumentsForShell($preservePaths)
+        . '-- ' . $source . ' ' . $target
         . ' && ' . projectRemoteEnvironmentRootPermissionCommand($productionPath)
         . ' && test -d ' . $targetRoot;
+}
+
+function productionDeploymentApprovedDeletionPaths(array $project): array
+{
+    $preflight = is_array($project['production_deployment']['preflight'] ?? null) ? $project['production_deployment']['preflight'] : null;
+    $approval = is_array($project['production_deployment']['deletion_approval'] ?? null) ? $project['production_deployment']['deletion_approval'] : [];
+    if ($preflight === null || !productionDeploymentPreflightDeletionApproval($preflight, $approval)) {
+        return [];
+    }
+
+    $paths = is_array($preflight['blocking_deletes'] ?? null) ? $preflight['blocking_deletes'] : [];
+    $approved = [];
+    foreach ($paths as $path) {
+        $normalized = productionDeploymentNormalizePreservePath(is_scalar($path) ? (string)$path : '');
+        if ($normalized !== null) {
+            $approved[] = $normalized;
+        }
+    }
+
+    return array_values(array_unique($approved));
+}
+
+function productionDeploymentRemoteApprovedDeletionCommand(string $productionPath, array $approvedDeletes, array $capabilities): string
+{
+    $commands = [];
+    $productionRoot = rtrim($productionPath, '/');
+    foreach ($approvedDeletes as $path) {
+        $normalized = productionDeploymentNormalizePreservePath((string)$path);
+        if ($normalized === null) {
+            throw new RuntimeException('Production deletion approval contains an unsafe path.');
+        }
+        $target = $productionRoot . '/' . rtrim($normalized, '/');
+        $commands[] = 'if [ -e ' . productionDeploymentShellPath($target) . ' ] || [ -L ' . productionDeploymentShellPath($target) . ' ]; then '
+            . projectRemotePrivilegedCommand($capabilities, 'rm -rf -- ' . productionDeploymentShellPath($target))
+            . '; fi';
+    }
+
+    return implode(' && ', $commands);
 }
 
 function productionDeploymentRemoteVerifyCommand(string $productionPath): string
@@ -219,14 +287,351 @@ function productionDeploymentVersionState(array $previewDeployment, array $produ
     return 'Preview ready for promotion';
 }
 
+function productionDeploymentEffectiveStatus(array $deployment): string
+{
+    $status = (string)($deployment['status'] ?? 'never_deployed');
+    $lastAttemptStatus = (string)($deployment['last_attempt_status'] ?? '');
+    if ($lastAttemptStatus === 'running') {
+        return 'running';
+    }
+    if ($lastAttemptStatus === 'failed') {
+        $deployedAt = strtotime((string)($deployment['deployed_at'] ?? '')) ?: 0;
+        $lastAttemptAt = strtotime((string)($deployment['last_attempt_at'] ?? '')) ?: 0;
+        if ($status !== 'deployed' || $deployedAt === 0 || $lastAttemptAt > $deployedAt) {
+            return 'failed';
+        }
+    }
+
+    return $status;
+}
+
+function productionDeploymentPreservePaths(array $project): array
+{
+    $deployment = is_array($project['production_deployment'] ?? null) ? $project['production_deployment'] : [];
+    $paths = is_array($deployment['preserve_paths'] ?? null) ? $deployment['preserve_paths'] : [];
+    $valid = [];
+    foreach ($paths as $path) {
+        $normalized = productionDeploymentNormalizePreservePath(is_scalar($path) ? (string)$path : '');
+        if ($normalized !== null) {
+            $valid[] = $normalized;
+        }
+    }
+
+    return array_values(array_unique($valid));
+}
+
+function productionDeploymentNormalizePreservePath(string $path): ?string
+{
+    $path = trim(str_replace('\\', '/', $path));
+    $path = preg_replace('~/+~', '/', $path) ?? $path;
+    $path = ltrim($path, '/');
+    if (str_starts_with($path, './')) {
+        $path = substr($path, 2);
+    }
+    $directoryRule = str_ends_with($path, '/');
+    $path = trim($path, '/');
+    if ($path === '' || strlen($path) > 255 || devConsoleHasControlCharacters($path)) {
+        return null;
+    }
+    foreach (explode('/', $path) as $segment) {
+        if ($segment === '' || $segment === '.' || $segment === '..') {
+            return null;
+        }
+    }
+
+    return $path . ($directoryRule ? '/' : '');
+}
+
+function productionDeploymentPreserveArgumentsForShell(array $preservePaths): string
+{
+    $parts = [
+        '--exclude=' . escapeshellarg('/.git/'),
+        '--exclude=' . escapeshellarg('/TASKS/'),
+    ];
+    foreach ($preservePaths as $path) {
+        $pattern = '/' . $path;
+        if (str_ends_with($path, '/')) {
+            $pattern .= '***';
+        }
+        $parts[] = '--exclude=' . escapeshellarg($pattern);
+    }
+
+    return empty($parts) ? '' : implode(' ', $parts) . ' ';
+}
+
+function productionDeploymentRemotePreflightCommand(string $previewPath, string $productionPath, array $preservePaths): string
+{
+    $source = productionDeploymentShellPath(rtrim($previewPath, '/') . '/');
+    $target = productionDeploymentShellPath(rtrim($productionPath, '/') . '/');
+    $targetRoot = rtrim($productionPath, '/');
+    $command = 'test -d ' . productionDeploymentShellPath($previewPath)
+        . ' && test -r ' . productionDeploymentShellPath($previewPath)
+        . ' && test -d ' . productionDeploymentShellPath($productionPath)
+        . ' && test -r ' . productionDeploymentShellPath($productionPath)
+        . ' && rsync -ani --delete --no-owner --no-group --out-format=' . escapeshellarg('%i|%n%L') . ' '
+        . productionDeploymentPreserveArgumentsForShell($preservePaths)
+        . '-- ' . $source . ' ' . $target;
+
+    foreach ($preservePaths as $path) {
+        $remotePath = $targetRoot . '/' . rtrim($path, '/');
+        $command .= ' && if [ -e ' . productionDeploymentShellPath($remotePath) . ' ]; then printf ' . escapeshellarg('__DEV_CONSOLE_PRESERVED__=%s\n') . ' ' . escapeshellarg($path) . '; fi';
+    }
+
+    return $command;
+}
+
+function productionDeploymentParsePreflightOutput(string $stdout): array
+{
+    $changes = [
+        'add' => [],
+        'update' => [],
+        'delete' => [],
+        'preserved' => [],
+        'other' => [],
+    ];
+    foreach (preg_split('/\r\n|\r|\n/', trim($stdout)) ?: [] as $line) {
+        $line = trim($line);
+        if ($line === '') {
+            continue;
+        }
+        if (str_starts_with($line, 'cannot delete non-empty directory:')) {
+            continue;
+        }
+        if (str_starts_with($line, '__DEV_CONSOLE_PRESERVED__=')) {
+            $path = substr($line, strlen('__DEV_CONSOLE_PRESERVED__='));
+            if ($path !== '') {
+                $changes['preserved'][] = $path;
+            }
+            continue;
+        }
+        $parts = explode('|', $line, 2);
+        $code = $parts[0] ?? '';
+        $path = $parts[1] ?? $line;
+        $path = trim($path);
+        if ($path === '' || $path === './') {
+            continue;
+        }
+        if (str_starts_with($code, '*deleting')) {
+            $changes['delete'][] = $path;
+        } elseif (str_contains($code, '+++++++++')) {
+            $changes['add'][] = $path;
+        } elseif (preg_match('/^[<>ch*]/', $code) === 1 || str_contains($code, 's') || str_contains($code, 't')) {
+            $changes['update'][] = $path;
+        } else {
+            $changes['other'][] = $path;
+        }
+    }
+
+    foreach ($changes as $key => $paths) {
+        $changes[$key] = array_values(array_unique($paths));
+        sort($changes[$key], SORT_NATURAL);
+    }
+
+    return $changes;
+}
+
+function productionDeploymentPathIsPreserveAncestor(string $path, array $preservePaths): bool
+{
+    $path = rtrim($path, '/');
+    if ($path === '') {
+        return false;
+    }
+    foreach ($preservePaths as $preservePath) {
+        $preservePath = trim($preservePath, '/');
+        if ($preservePath !== '' && str_starts_with($preservePath . '/', $path . '/')) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function productionDeploymentPreflightHasBlockingDeletes(array $preflight): bool
+{
+    return !empty($preflight['blocking_deletes']);
+}
+
+function productionDeploymentDeletionApprovalFingerprint(array $preflight): string
+{
+    $payload = [
+        'preview_commit' => (string)($preflight['preview_commit'] ?? ''),
+        'preview_path' => (string)($preflight['preview_path'] ?? ''),
+        'production_path' => (string)($preflight['production_path'] ?? ''),
+        'preserve_paths' => array_values(array_map('strval', is_array($preflight['preserve_paths'] ?? null) ? $preflight['preserve_paths'] : [])),
+        'blocking_deletes' => array_values(array_map('strval', is_array($preflight['blocking_deletes'] ?? null) ? $preflight['blocking_deletes'] : [])),
+    ];
+    sort($payload['preserve_paths'], SORT_NATURAL);
+    sort($payload['blocking_deletes'], SORT_NATURAL);
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+
+    return hash('sha256', $json === false ? serialize($payload) : $json);
+}
+
+function productionDeploymentPreflightDeletionApproval(array $preflight, array $approval): bool
+{
+    if (!productionDeploymentPreflightHasBlockingDeletes($preflight)) {
+        return true;
+    }
+
+    return (string)($approval['fingerprint'] ?? '') !== ''
+        && hash_equals(productionDeploymentDeletionApprovalFingerprint($preflight), (string)$approval['fingerprint']);
+}
+
+function productionDeploymentPreflightRequiresReview(array $preflight, array $approval = []): bool
+{
+    return productionDeploymentPreflightHasBlockingDeletes($preflight)
+        && !productionDeploymentPreflightDeletionApproval($preflight, $approval);
+}
+
+function productionDeploymentPreflightForUi(?array $preflight, array $approval = []): ?array
+{
+    if ($preflight === null) {
+        return null;
+    }
+    $deletionApproved = productionDeploymentPreflightDeletionApproval($preflight, $approval);
+    $preflight['deletion_approved'] = $deletionApproved;
+    $preflight['review_required'] = productionDeploymentPreflightRequiresReview($preflight, $approval);
+    $preflight['deletion_approval'] = $deletionApproved ? $approval : null;
+
+    return $preflight;
+}
+
+function productionDeploymentBuildPreflight(array $project, array $server): array
+{
+    $previewPath = (string)($project['preview']['path'] ?? '');
+    $productionPath = (string)($project['production']['path'] ?? '');
+    $preservePaths = productionDeploymentPreservePaths($project);
+    $started = microtime(true);
+    $result = processRunCommand(productionDeploymentSshArguments($server, productionDeploymentRemotePreflightCommand($previewPath, $productionPath, $preservePaths)), [
+        'timeout' => 120,
+        'env' => ['PATH' => serverToolsDefaultPath()],
+        'inherit_env' => false,
+    ]);
+    if ($result['exit_code'] !== 0) {
+        throw new RuntimeException(productionDeploymentFailureMessage($result, 'Production preflight failed.'));
+    }
+    $changes = productionDeploymentParsePreflightOutput((string)$result['stdout']);
+    if (!empty($preservePaths)) {
+        $changes['delete'] = array_values(array_filter(
+            $changes['delete'],
+            static fn(string $path): bool => !productionDeploymentPathIsPreserveAncestor($path, $preservePaths)
+        ));
+    }
+
+    return [
+        'checked_at' => date('c'),
+        'preview_commit' => (string)($project['preview_deployment']['commit'] ?? ''),
+        'preview_path' => $previewPath,
+        'production_path' => $productionPath,
+        'preserve_paths' => $preservePaths,
+        'changes' => $changes,
+        'blocking_deletes' => $changes['delete'],
+        'summary' => [
+            'add' => count($changes['add']),
+            'update' => count($changes['update']),
+            'delete' => count($changes['delete']),
+            'preserved' => count($changes['preserved']),
+            'other' => count($changes['other']),
+        ],
+        'duration_ms' => (int)round((microtime(true) - $started) * 1000),
+    ];
+}
+
+function productionDeploymentPersistPreflight(array $configuration, string $projectId, array $preflight): bool
+{
+    $project = devConsoleFindProjectById($configuration, $projectId);
+    if ($project === null) {
+        return false;
+    }
+    $existing = is_array($project['production_deployment'] ?? null) ? $project['production_deployment'] : [];
+    $project['production_deployment'] = array_merge(devConsoleEmptyProject()['production_deployment'], $existing, [
+        'preflight' => $preflight,
+        'preserve_paths' => productionDeploymentPreservePaths($project),
+        'deletion_approval' => null,
+    ]);
+
+    return devConsoleSaveProjectConfiguration(devConsoleUpdateProjectInConfiguration($configuration, $project));
+}
+
+function productionDeploymentRunPreflight(array $configuration, string $projectId): array
+{
+    $project = devConsoleFindProjectById($configuration, $projectId);
+    $managedServers = managedServersLoad();
+    $readiness = productionDeploymentReadiness($project, $managedServers, true, false);
+    $server = $readiness['server'] ?? null;
+    if (empty($readiness['ready']) || $project === null || $server === null) {
+        throw new RuntimeException(implode(' ', $readiness['reasons']));
+    }
+    $preflight = productionDeploymentBuildPreflight($project, $server);
+    if (!productionDeploymentPersistPreflight($configuration, $projectId, $preflight)) {
+        throw new RuntimeException('Production preflight completed, but metadata could not be saved.');
+    }
+
+    return $preflight;
+}
+
+function productionDeploymentApproveDeletions(array $configuration, string $projectId): array
+{
+    $project = devConsoleFindProjectById($configuration, $projectId);
+    if ($project === null) {
+        throw new RuntimeException('Project not found.');
+    }
+    $preflight = is_array($project['production_deployment']['preflight'] ?? null) ? $project['production_deployment']['preflight'] : null;
+    if ($preflight === null) {
+        throw new RuntimeException('Run Production preflight before approving deletions.');
+    }
+    $previewCommit = (string)($project['preview_deployment']['commit'] ?? '');
+    if ((string)($preflight['preview_commit'] ?? '') !== $previewCommit) {
+        throw new RuntimeException('Production preflight is stale. Run it again for the current Preview version.');
+    }
+    if (!productionDeploymentPreflightHasBlockingDeletes($preflight)) {
+        throw new RuntimeException('There are no Production deletion candidates to approve.');
+    }
+
+    $approval = [
+        'fingerprint' => productionDeploymentDeletionApprovalFingerprint($preflight),
+        'approved_at' => date('c'),
+        'preview_commit' => (string)($preflight['preview_commit'] ?? ''),
+        'paths' => array_values(array_map('strval', $preflight['blocking_deletes'] ?? [])),
+    ];
+    $project['production_deployment']['deletion_approval'] = $approval;
+    if (!devConsoleSaveProjectConfiguration(devConsoleUpdateProjectInConfiguration($configuration, $project))) {
+        throw new RuntimeException('Unable to save Production deletion approval.');
+    }
+
+    return $approval;
+}
+
+function productionDeploymentAddPreservePath(array $configuration, string $projectId, string $path): array
+{
+    $normalized = productionDeploymentNormalizePreservePath($path);
+    if ($normalized === null) {
+        throw new RuntimeException('Preserve path must be a safe relative Production path.');
+    }
+    $project = devConsoleFindProjectById($configuration, $projectId);
+    if ($project === null) {
+        throw new RuntimeException('Project not found.');
+    }
+    $preservePaths = productionDeploymentPreservePaths($project);
+    $preservePaths[] = $normalized;
+    $project['production_deployment']['preserve_paths'] = array_values(array_unique($preservePaths));
+    $project['production_deployment']['preflight'] = null;
+    $project['production_deployment']['deletion_approval'] = null;
+    if (!devConsoleSaveProjectConfiguration(devConsoleUpdateProjectInConfiguration($configuration, $project))) {
+        throw new RuntimeException('Unable to save Production preserve rule.');
+    }
+
+    return $project['production_deployment']['preserve_paths'];
+}
+
 function productionDeploymentOverview(array $project, ?array $server): array
 {
     $previewDeployment = is_array($project['preview_deployment'] ?? null) ? $project['preview_deployment'] : devConsoleEmptyProject()['preview_deployment'];
     $productionDeployment = is_array($project['production_deployment'] ?? null) ? $project['production_deployment'] : devConsoleEmptyProject()['production_deployment'];
-    $status = (string)($productionDeployment['status'] ?? 'never_deployed');
+    $status = productionDeploymentEffectiveStatus($productionDeployment);
     $lastAttemptStatus = (string)($productionDeployment['last_attempt_status'] ?? '');
-    if (in_array($lastAttemptStatus, ['running', 'failed'], true)) {
-        $status = $lastAttemptStatus;
+    if ($status === 'deployed' && $lastAttemptStatus === 'failed') {
+        $lastAttemptStatus = '';
     }
 
     return [
@@ -249,10 +654,16 @@ function productionDeploymentOverview(array $project, ?array $server): array
         'last_attempt_commit' => (string)($productionDeployment['last_attempt_commit'] ?? ''),
         'last_attempt_message' => (string)($productionDeployment['last_attempt_message'] ?? ''),
         'version_state' => productionDeploymentVersionState($previewDeployment, $productionDeployment),
+        'preserve_paths' => productionDeploymentPreservePaths($project),
+        'preflight' => productionDeploymentPreflightForUi(
+            is_array($productionDeployment['preflight'] ?? null) ? $productionDeployment['preflight'] : null,
+            is_array($productionDeployment['deletion_approval'] ?? null) ? $productionDeployment['deletion_approval'] : []
+        ),
+        'deletion_approval' => is_array($productionDeployment['deletion_approval'] ?? null) ? $productionDeployment['deletion_approval'] : null,
     ];
 }
 
-function productionDeploymentReadiness(?array $project, array $managedServers, bool $checkRemote = true): array
+function productionDeploymentReadiness(?array $project, array $managedServers, bool $checkRemote = true, bool $requirePreflight = true): array
 {
     $reasons = [];
     $server = null;
@@ -278,10 +689,10 @@ function productionDeploymentReadiness(?array $project, array $managedServers, b
             $reasons[] = 'Preview has never been deployed.';
         }
         if (!previewDeploymentPathIsAllowed($project) || $previewPath === '') {
-            $reasons[] = 'Preview path is not a supported managed Project path.';
+            $reasons[] = 'Preview path is not a valid configured Project path.';
         }
         if (!productionDeploymentPathIsAllowed($project) || $productionPath === '') {
-            $reasons[] = 'Production path is not a supported managed Project path.';
+            $reasons[] = 'Production path is not a valid configured Project path.';
         }
         if (previewDeploymentLocalRsync() === '') {
             $reasons[] = 'rsync is not installed on Dev Console.';
@@ -297,6 +708,17 @@ function productionDeploymentReadiness(?array $project, array $managedServers, b
             ]);
             if ($previewCheck['exit_code'] !== 0 || trim((string)$previewCheck['stdout']) === '') {
                 $reasons[] = 'Preview directory does not exist, is not readable, or is empty.';
+            }
+        }
+        if ($requirePreflight && empty($reasons)) {
+            $preflight = is_array($project['production_deployment']['preflight'] ?? null) ? $project['production_deployment']['preflight'] : null;
+            $previewCommit = (string)($previewDeployment['commit'] ?? '');
+            if ($preflight === null) {
+                $reasons[] = 'Run Production preflight before deploying.';
+            } elseif ((string)($preflight['preview_commit'] ?? '') !== $previewCommit) {
+                $reasons[] = 'Production preflight is stale. Run it again for the current Preview version.';
+            } elseif (productionDeploymentPreflightRequiresReview($preflight, is_array($project['production_deployment']['deletion_approval'] ?? null) ? $project['production_deployment']['deletion_approval'] : [])) {
+                $reasons[] = 'Production preflight requires review before deployment.';
             }
         }
     }
@@ -438,9 +860,28 @@ function productionDeploymentStart(array $configuration, string $projectId): arr
 {
     $project = devConsoleFindProjectById($configuration, $projectId);
     $managedServers = managedServersLoad();
-    $readiness = productionDeploymentReadiness($project, $managedServers);
+    $readiness = productionDeploymentReadiness($project, $managedServers, true, false);
     if (empty($readiness['ready'])) {
         throw new RuntimeException(implode(' ', $readiness['reasons']));
+    }
+    $existingPreflight = is_array($project['production_deployment']['preflight'] ?? null) ? $project['production_deployment']['preflight'] : null;
+    $existingApproval = is_array($project['production_deployment']['deletion_approval'] ?? null) ? $project['production_deployment']['deletion_approval'] : [];
+    $existingApprovalValid = $existingPreflight !== null && productionDeploymentPreflightDeletionApproval($existingPreflight, $existingApproval);
+    $preflight = productionDeploymentBuildPreflight($project, $readiness['server']);
+    if ($existingApprovalValid && hash_equals(productionDeploymentDeletionApprovalFingerprint($existingPreflight), productionDeploymentDeletionApprovalFingerprint($preflight))) {
+        $project['production_deployment']['preflight'] = $preflight;
+        $project['production_deployment']['deletion_approval'] = $existingApproval;
+        devConsoleSaveProjectConfiguration(devConsoleUpdateProjectInConfiguration($configuration, $project));
+    } else {
+        productionDeploymentPersistPreflight($configuration, $projectId, $preflight);
+    }
+    if (productionDeploymentPreflightRequiresReview($preflight, $existingApprovalValid ? $existingApproval : [])) {
+        throw new RuntimeException('Production preflight requires review before deployment.');
+    }
+    $configuration = devConsoleLoadProjectConfiguration();
+    $project = devConsoleFindProjectById($configuration, $projectId);
+    if ($project === null) {
+        throw new RuntimeException('Project not found after Production preflight.');
     }
     $previewDeployment = is_array($project['preview_deployment'] ?? null) ? $project['preview_deployment'] : [];
     $operationId = 'production_deploy_' . bin2hex(random_bytes(16));
@@ -557,23 +998,44 @@ function productionDeploymentRun(string $operationId, string $projectId): void
         if ($remotePrep['exit_code'] !== 0) {
             throw new RuntimeException(productionDeploymentFailureMessage($remotePrep, 'Production directory cannot be created or is not writable.'));
         }
-        $vhostCheck = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, projectRemoteVhostDocumentRootMatchesCommand($project, 'production', $documentRoot)), [
+        $vhostCommand = devConsoleProjectAdoptedInPlace($project)
+            ? projectRemoteAdoptedVhostDocumentRootMatchesCommand($project, 'production', $documentRoot)
+            : projectRemoteVhostDocumentRootMatchesCommand($project, 'production', $documentRoot);
+        $vhostCheck = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, $vhostCommand), [
             'timeout' => 30,
             'env' => ['PATH' => serverToolsDefaultPath()],
             'inherit_env' => false,
         ]);
         if ($vhostCheck['exit_code'] !== 0) {
-            throw new RuntimeException('Production Apache DocumentRoot does not match the deployed web root. Run Update Infrastructure before deploying Production.');
+            $message = devConsoleProjectAdoptedInPlace($project)
+                ? 'Production Apache configuration does not map ' . (string)($project['production']['domain'] ?? '') . ' to ' . $documentRoot . '.'
+                : 'Production Apache DocumentRoot does not match the deployed web root. Run Update Infrastructure before deploying Production.';
+            throw new RuntimeException($message);
+        }
+
+        $approvedDeletes = productionDeploymentApprovedDeletionPaths($project);
+        if (!empty($approvedDeletes)) {
+            productionDeploymentSetStage($operationId, 'Preparing Deletes', 'Removing explicitly approved Production deletion candidates with managed privileges.');
+            productionDeploymentAppendLog($operationId, 'Approved Production deletion candidates: ' . implode(', ', $approvedDeletes));
+            $deleteCommand = productionDeploymentRemoteApprovedDeletionCommand($productionPath, $approvedDeletes, productionDeploymentRemoteApacheCapabilities($server));
+            $deleteResult = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, $deleteCommand), [
+                'timeout' => 120,
+                'env' => ['PATH' => serverToolsDefaultPath()],
+                'inherit_env' => false,
+            ]);
+            if ($deleteResult['exit_code'] !== 0) {
+                throw new RuntimeException(productionDeploymentFailureMessage($deleteResult, 'Unable to remove approved Production deletion candidates.'));
+            }
         }
 
         productionDeploymentSetStage($operationId, 'Promoting Preview', 'Synchronizing remote Preview to remote Production with delete semantics.');
-        $promote = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, productionDeploymentRemotePromoteCommand($previewPath, $productionPath)), [
+        $promote = productionDeploymentRunCommand($operationId, productionDeploymentSshArguments($server, productionDeploymentRemotePromoteCommand($previewPath, $productionPath, productionDeploymentPreservePaths($project))), [
             'timeout' => 300,
             'env' => ['PATH' => serverToolsDefaultPath()],
             'inherit_env' => false,
         ]);
         if ($promote['exit_code'] !== 0) {
-            throw new RuntimeException(productionDeploymentFailureMessage($promote, 'rsync failed.'));
+            throw new RuntimeException(productionDeploymentFailureMessage($promote, 'Production synchronization failed after changes may have been partially applied. Review Production state, rerun preflight, and retry when safe.'));
         }
 
         productionDeploymentSetStage($operationId, 'Verifying Production', 'Verifying remote Production directory and promoted files.');

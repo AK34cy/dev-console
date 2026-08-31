@@ -85,7 +85,7 @@ The legacy deployment module also defines `DEPLOY_STATE_DIR` as `/tmp/iovon-depl
 
 ## Project Lifecycle
 
-A project is stored in `config/projects.json`. New projects receive generated local paths:
+A project is stored in `config/projects.json`. New projects receive generated default paths:
 
 - project root: `/var/www/projects/<project-id>`
 - Preview path: `/var/www/projects/<project-id>/preview`
@@ -94,10 +94,13 @@ A project is stored in `config/projects.json`. New projects receive generated lo
 
 Project creation records metadata only. Repository initialization, server setup, Preview deployment, and Production deployment are separate actions.
 
+Existing hosted projects can also be adopted. Adoption imports the selected source directory from a Managed Server into `/var/www/git/<project-id>` on the Dev Console host, preserves compatible Git and TASKS history when present, and registers the project only after the import succeeds. Existing Preview, Production, and Apache configuration are adopted in place and are not modified by adoption.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Registered
     Registered --> RepositoryInitialized: Initialize Repository
+    [*] --> RepositoryInitialized: Adopt Existing Project
     RepositoryInitialized --> Configured: Set up
     Configured --> PreviewDeployed: Deploy Preview
     PreviewDeployed --> ProductionDeployed: Deploy Production
@@ -197,16 +200,18 @@ Preview deploys GitHub repository content as-is except for Dev Console operation
 - `.git/`
 - `TASKS/`
 
-Production deployment promotes the current remote Preview contents to the remote Production path using remote `rsync --delete`. It does not fetch GitHub and does not rebuild a source archive.
+Production deployment promotes the current remote Preview contents to the remote Production path using remote `rsync --delete`. It does not fetch GitHub and does not rebuild a source archive. Before promotion, Dev Console stores a read-only Production preflight result for the current Preview commit. The preflight blocks unreviewed Production-only deletion candidates unless the Project has explicit relative preserve rules for those paths.
 
 ## Preview / Production Architecture
 
-Each project has generated environment paths:
+New projects have generated default environment paths:
 
 - Preview: `/var/www/projects/<project-id>/preview`
 - Production: `/var/www/projects/<project-id>/production`
 
-Project setup creates Apache virtual hosts for both environments. For managed servers, Apache configuration is installed remotely over SSH. For the older local setup path, Apache configuration is installed on the local server.
+Adopted projects may preserve arbitrary existing Preview and Production paths when those paths are explicitly stored in project configuration. Generic project, deployment, and diagnostics code uses the configured paths; it must not reconstruct environment paths from the project ID except when creating a new project default.
+
+Project setup creates Apache virtual hosts for both environments when Dev Console owns that infrastructure. Adopted-in-place infrastructure may be recorded as already configured without rewriting existing Apache configuration. For managed servers, Apache configuration is installed remotely over SSH. For the older local setup path, Apache configuration is installed on the local server.
 
 Production deployment requires a successful Preview deployment first. Production copies Preview to Production on the managed server.
 
@@ -352,6 +357,6 @@ dev-console-<project-id>-production.conf
 
 ## Project Metadata
 
-Project metadata stores identity, managed server binding, generated paths, Git state, setup/provisioning state, Preview deployment metadata, Production deployment metadata, and timestamps.
+Project metadata stores identity, managed server binding, configured environment paths, Git state, setup/provisioning state, Preview deployment metadata, Production deployment metadata, and timestamps.
 
 The implementation still keeps both `provisioning` and `setup` metadata. `provisioning` is historical/internal; `setup` is the newer user-facing state.
