@@ -2,6 +2,19 @@
 
 Dev Console is an internal tool for managing Projects, task execution with Codex, and Preview/Production deployments on managed Linux servers.
 
+For a fresh Dev Console host, install from a Git checkout:
+
+```sh
+git clone <repo> /var/www/dev-console
+cd /var/www/dev-console
+sudo ./install.sh
+```
+
+The installer uses the invoking `SUDO_USER` as the service user unless
+`--user <existing-linux-user>` is provided. It creates the local token, systemd
+unit, `/var/www/git`, and Dev Console runtime directories without creating any
+projects or credentials.
+
 The normal v1 workflow is:
 
 1. Prepare a Linux server.

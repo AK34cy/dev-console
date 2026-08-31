@@ -23,55 +23,63 @@ For lower-level service details, see [docs/DEV_CONSOLE.md](docs/DEV_CONSOLE.md).
 - Project, workflow, and deployment status dashboard.
 - Built-in Documentation section.
 - Unauthenticated JSON health endpoint at `/health`.
-- Portable bootstrap script for systemd installation.
+- Portable Git-checkout installer for systemd installation.
 
 ## Requirements
 
 - Ubuntu server with systemd.
-- Existing Linux user to run the service.
-- PHP CLI. The bootstrap script installs `php-cli` with `apt` if it is missing.
-- Git, for version metadata and task/deployment workflows.
-- Existing `/etc/iovon-dev-console.env` containing `IOVON_DEV_CONSOLE_TOKEN`.
-- Optional: Tailscale Serve for private HTTPS access.
+- Existing non-root Linux user to run the service.
+- `sudo` access for installation.
+- Optional: Tailscale Serve or another private tunnel for private HTTPS access.
+
+The installer installs the base packages required for Dev Console itself,
+including PHP CLI and required PHP extensions, Git, OpenSSH client, rsync, sudo,
+and certificate support. GitHub CLI, Node.js, npm, Composer, and Codex CLI are
+managed as optional host or server tools after installation.
 
 ## Installation
 
-Clone or copy this repository onto the target server, then run the bootstrap from
-the repository root:
+Clone this repository onto the target server, then run the installer from the
+repository root:
 
 ```sh
-sudo ./bootstrap.sh
+git clone <repo> /var/www/dev-console
+cd /var/www/dev-console
+sudo ./install.sh
 ```
 
 To explicitly choose the Linux user that should run the service:
 
 ```sh
-sudo ./bootstrap.sh --user iovon
+sudo ./install.sh --user deploy
 ```
 
-If `--user` is omitted, the bootstrap uses `SUDO_USER` when available. Otherwise,
-it uses the current user. The selected user must already exist and must be able
-to read the project files.
+If `--user` is omitted, the installer uses `SUDO_USER` when available. It does
+not create Linux users in v1. The selected user must already exist, must not be
+`root`, and must be able to read the checkout.
 
-The bootstrap script:
+The installer:
 
-- Verifies Ubuntu, systemd, PHP CLI, and project file access.
-- Installs only missing required packages.
+- Verifies Ubuntu, systemd, required packages, PHP extensions, and checkout
+  access.
+- Installs missing base packages with `apt`.
+- Creates `/etc/iovon-dev-console.env` with a strong token if it is missing.
+- Preserves existing local configuration, secrets, project repositories, managed
+  server definitions, SSH keys, and runtime state.
+- Ensures `/var/www/git` and ignored Dev Console runtime directories exist with
+  service-user ownership.
 - Generates `/etc/systemd/system/iovon-dev-console.service` from the tracked
   systemd template.
 - Reloads systemd, enables the service, starts or restarts it, and verifies it is
   active.
+- Checks the local `/health` endpoint.
 
 ## Configuration
 
-Create `/etc/iovon-dev-console.env` before running the bootstrap:
-
-```sh
-sudo install -o root -g root -m 600 /dev/null /etc/iovon-dev-console.env
-sudo sh -c 'printf "IOVON_DEV_CONSOLE_TOKEN=%s\n" "$(openssl rand -hex 32)" > /etc/iovon-dev-console.env'
-```
-
-The token is required for the web UI. It is not required for `/health`.
+The installer creates `/etc/iovon-dev-console.env` if it does not exist and
+stores `IOVON_DEV_CONSOLE_TOKEN` with `root:root` ownership and `0600`
+permissions. Existing tokens are preserved. The token is required for the web UI
+and is not printed during installation. It is not required for `/health`.
 
 Retrieve the configured token when needed:
 
@@ -83,8 +91,12 @@ Dev Console runtime settings, including task attachment upload limits, are
 managed in Settings -> Dev Console Runtime. The defaults are 25 MB per
 attachment and 50 MB per request. Saving new values requires restarting
 `iovon-dev-console.service` before PHP reports them as effective. If Settings
-reports that the runtime unit needs an update, run `sudo ./bootstrap.sh` once to
+reports that the runtime unit needs an update, run `sudo ./install.sh` once to
 install the service unit that starts `bin/run-dev-console`.
+
+Project repositories are stored on the Dev Console host under `/var/www/git`.
+Fresh installs start with no configured projects, no GitHub token, and no
+managed servers.
 
 ## Starting the Service
 
@@ -102,8 +114,8 @@ The service listens on:
 http://127.0.0.1:8090
 ```
 
-If Tailscale Serve is configured, use `bin/start-dev-console` to display the
-tailnet URL and service status:
+If Tailscale Serve is configured separately, use `bin/start-dev-console` to
+display the tailnet URL and service status:
 
 ```sh
 bin/start-dev-console
@@ -142,21 +154,21 @@ Server Management through a predefined POST action with CSRF protection.
 
 ## Updating
 
-Update the repository checkout, then rerun the bootstrap so the installed
+Update the repository checkout, then rerun the installer so the installed
 systemd unit is regenerated from the current files:
 
 ```sh
 git pull
-sudo ./bootstrap.sh
+sudo ./install.sh
 ```
 
 If the service user should change during an update, pass it explicitly:
 
 ```sh
-sudo ./bootstrap.sh --user deploy
+sudo ./install.sh --user deploy
 ```
 
-The bootstrap is idempotent and will restart the service when it is already
+The installer is idempotent and will restart the service when it is already
 active.
 
 ## Troubleshooting
@@ -176,10 +188,8 @@ ss -ltnp 'sport = :8090'
 
 Common issues:
 
-- `Missing environment file`: create `/etc/iovon-dev-console.env` with
-  `IOVON_DEV_CONSOLE_TOKEN`.
 - `Linux user does not exist`: rerun with `--user <existing-linux-user>` or
-  create the account intentionally outside the bootstrap.
+  create the account intentionally outside the installer.
 - `cannot read or traverse project path`: fix repository ownership or
   permissions so the selected service user can read the checkout.
 - `/health` fails remotely but works locally: check the private tunnel or

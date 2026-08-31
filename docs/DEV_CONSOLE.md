@@ -4,31 +4,38 @@ For the main project overview and common setup path, start with
 [../README.md](../README.md). This document keeps the lower-level service notes.
 
 The Dev Console runs as `iovon-dev-console.service` and listens only on
-`127.0.0.1:8090`. Tailscale Serve provides its permanent, tailnet-only HTTPS URL.
-Run `bin/start-dev-console` on the server to display that URL and the service
-status. Tailscale Funnel and Apache are not used.
+`127.0.0.1:8090`. Remote browser access should be provided by a private tunnel,
+VPN, SSH port forwarding, or another private network path. Tailscale Serve is a
+supported optional access method, but it is not required by the Dev Console
+runtime. Apache is not used to serve Dev Console itself.
 
-Install the service once, on the server, from the repository root:
+Install the service once, on the server, from a Git checkout:
 
 ```sh
-sudo bin/install-dev-console
+git clone <repo> /var/www/dev-console
+cd /var/www/dev-console
+sudo ./install.sh
 ```
 
-The installer verifies that Tailscale is connected and shows the existing Serve
-configuration before making changes. It refuses to overwrite an existing Serve
-configuration. If an existing route is reported, add a non-conflicting HTTPS
-route for `http://127.0.0.1:8090` using the installed Tailscale CLI instead of
-resetting the existing configuration.
+To choose the existing non-root Linux user that should run the service:
 
-Connect the Mac or iPad to the same tailnet, open the HTTPS URL displayed by
-`bin/start-dev-console`, and enter the persistent token in the authentication
-form. The token is submitted in the request body so it does not appear in the
-URL or journald access logs. The console then stores authentication in its secure
-HTTP session.
+```sh
+sudo ./install.sh --user deploy
+```
+
+If `--user` is omitted, the installer uses `SUDO_USER` when available. The
+installer does not create Linux users in v1 and refuses to run the service as
+`root`.
+
+Connect through a private access path, open the local or tunneled Console URL,
+and enter the persistent token in the authentication form. The token is
+submitted in the request body so it does not appear in the URL or journald
+access logs. The console then stores authentication in its secure HTTP session.
 
 The token is generated only during the first installation and stored at
-`/etc/iovon-dev-console.env`. It is not printed or committed. A root user can
-retrieve it when needed with:
+`/etc/iovon-dev-console.env` with `0600` permissions. It is not printed or
+committed. Existing tokens are preserved. A root user can retrieve it when
+needed with:
 
 ```sh
 sudo sed -n 's/^IOVON_DEV_CONSOLE_TOKEN=//p' /etc/iovon-dev-console.env
@@ -55,16 +62,23 @@ effective PHP values do not change until `iovon-dev-console.service` is
 restarted. This does not modify global PHP configuration and does not affect
 Managed Servers.
 
-Older installed units may still start `/usr/bin/php -S` directly. Run
-`sudo ./bootstrap.sh` from the repository root once to install the updated unit
-that uses `bin/run-dev-console`; the bootstrap reloads and restarts the service.
+The installer also ensures the local runtime/configuration directories and
+`/var/www/git` exist with service-user ownership. Fresh installs do not populate
+project configuration, GitHub credentials, managed servers, SSH keys, task
+history, or deployment history.
 
-Confirm the local bind and private HTTPS route with:
+Older installed units may still start `/usr/bin/php -S` directly. Run
+`sudo ./install.sh` from the repository root once to install the updated unit
+that uses `bin/run-dev-console`; the installer reloads and restarts the service.
+
+Confirm the local bind with:
 
 ```sh
 ss -ltnp 'sport = :8090'
-tailscale serve status
 ```
+
+If Tailscale Serve is configured separately, `bin/start-dev-console` displays
+the tailnet URL and systemd status.
 
 Health checks can be performed without authentication:
 

@@ -70,7 +70,7 @@ Dev Console currently uses these primary configuration files:
 - `config/projects.json`: project registry, active project, project Git metadata, setup metadata, and deployment metadata.
 - `config/github.json`: GitHub account and Personal Access Token configuration.
 - `console/config/servers.json`: managed server registry and last SSH diagnostics.
-- `/etc/iovon-dev-console.env`: service environment file required by bootstrap and systemd.
+- `/etc/iovon-dev-console.env`: service environment file created or preserved by `install.sh` and loaded by systemd.
 - `/etc/systemd/system/iovon-dev-console.service`: installed systemd unit generated from `systemd/iovon-dev-console.service`.
 
 Runtime operation state is stored under:
@@ -300,7 +300,8 @@ No custom Apache helper binary is part of the current source.
 Important repository files:
 
 ```text
-bootstrap.sh
+install.sh
+bootstrap.sh (compatibility wrapper)
 systemd/iovon-dev-console.service
 console/index.php
 console/config.php
