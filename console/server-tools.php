@@ -2,6 +2,8 @@
 
 const DEV_CONSOLE_SERVICE_NAME = 'iovon-dev-console.service';
 const DEV_CONSOLE_SERVER_TOOL_RUNTIME_DIR = __DIR__ . '/runtime/server-tool-operations';
+const DEV_CONSOLE_HOST_DIAGNOSTICS_CACHE = __DIR__ . '/runtime/host-diagnostics.json';
+const DEV_CONSOLE_CODEX_AUTH_TIMEOUT_SECONDS = 900;
 
 function serverToolsDefinitions(): array
 {
@@ -37,22 +39,22 @@ function serverToolsDefinitions(): array
             'required_group' => 'required',
             'requirement' => 'Required for Run Codex',
             'dependency' => 'Run Codex action',
-            'source' => 'Administrator-managed CLI',
+            'source' => 'OpenAI standalone installer or administrator-managed CLI',
         ],
         'node' => [
             'display_name' => 'Node.js',
-            'purpose' => 'Project-dependent; Required to install and run Codex CLI through npm',
+            'purpose' => 'Project-dependent',
             'command' => 'node',
             'version_arguments' => ['node', '--version'],
             'version_pattern' => '/^v?(.+)/',
             'required_group' => 'optional',
             'requirement' => 'Project-dependent',
-            'dependency' => 'May be required by JavaScript Projects and npm-installed Codex CLI',
+            'dependency' => 'May be required by JavaScript Projects',
             'source' => 'System package, NodeSource, nvm, or administrator-managed binary',
         ],
         'npm' => [
             'display_name' => 'npm',
-            'purpose' => 'Project-dependent; Required to install and update Codex CLI',
+            'purpose' => 'Project-dependent',
             'command' => 'npm',
             'version_arguments' => ['npm', '--version'],
             'version_pattern' => '/^(.+)/',
@@ -168,6 +170,175 @@ function serverToolsComposerEnvironment(?array $context = null, bool $createHome
     return $environment;
 }
 
+function serverToolsCodexStandalonePath(?array $context = null): string
+{
+    $context = $context ?? serverToolsServiceContext();
+    $home = serverToolsUserHome((string)($context['user'] ?? ''));
+    if ($home === '') {
+        return '';
+    }
+
+    $candidate = rtrim($home, '/') . '/.codex/packages/standalone/current/codex';
+    return is_file($candidate) && is_executable($candidate) ? $candidate : '';
+}
+
+function serverToolsCodexEnvironment(?array $context = null): array
+{
+    $context = $context ?? serverToolsServiceContext();
+    $user = (string)($context['user'] ?? '');
+    $home = serverToolsUserHome($user);
+    if ($home === '') {
+        throw new RuntimeException('Unable to resolve Codex home directory for the service user.');
+    }
+
+    $binDir = rtrim($home, '/') . '/.local/bin';
+    $path = (string)($context['path'] ?? serverToolsDefaultPath());
+    if (!str_contains(':' . $path . ':', ':' . $binDir . ':')) {
+        $path = $binDir . ':' . $path;
+    }
+
+    return [
+        'PATH' => $path,
+        'HOME' => $home,
+        'CODEX_HOME' => rtrim($home, '/') . '/.codex',
+        'CODEX_NON_INTERACTIVE' => 'true',
+    ];
+}
+
+function serverToolsResolveCodexCommand(?array $context = null): string
+{
+    $context = $context ?? serverToolsServiceContext();
+    $standalone = serverToolsCodexStandalonePath($context);
+    if ($standalone !== '') {
+        return $standalone;
+    }
+
+    return serverToolsFindExecutable('codex', (string)($context['path'] ?? serverToolsDefaultPath()));
+}
+
+function serverToolsCodexAppArmorHelperPath(): string
+{
+    return dirname(__DIR__) . '/bin/configure-codex-apparmor';
+}
+
+function serverToolsCodexAppArmorCommand(array $context, bool $requireBwrap): array
+{
+    $helper = serverToolsCodexAppArmorHelperPath();
+    if (!is_file($helper) || !is_executable($helper)) {
+        throw new RuntimeException('Codex AppArmor helper is not installed.');
+    }
+
+    $user = (string)($context['user'] ?? '');
+    if ($user === '' || $user === 'Diagnostic unavailable') {
+        throw new RuntimeException('Unable to determine Dev Console service user for Codex AppArmor setup.');
+    }
+
+    $arguments = [$helper, '--user', $user];
+    if ($requireBwrap) {
+        $arguments[] = '--require-bwrap';
+    }
+
+    if (function_exists('posix_geteuid') && posix_geteuid() === 0) {
+        return $arguments;
+    }
+
+    $sudo = serverToolsFindExecutable('sudo', (string)($context['path'] ?? serverToolsDefaultPath()));
+    if ($sudo === '') {
+        throw new RuntimeException('sudo is required to configure the Codex AppArmor sandbox profile.');
+    }
+
+    return array_merge([$sudo, '-n'], $arguments);
+}
+
+function serverToolsConfigureCodexAppArmor(array $context, array &$log, ?string $operationId = null, bool $requireBwrap = true): void
+{
+    serverToolsSetOperationStage($operationId, 'Configuring Codex AppArmor sandbox support');
+    $arguments = serverToolsCodexAppArmorCommand($context, $requireBwrap);
+    try {
+        serverToolsRunOperationCommand($arguments, $log, 30, [], $operationId, 'Configuring AppArmor');
+    } catch (RuntimeException $exception) {
+        throw new RuntimeException(
+            'Codex CLI was installed, but Dev Console could not configure Ubuntu AppArmor support for the Codex sandbox. '
+            . 'Run sudo ./install.sh from the Dev Console checkout after Codex is installed, or configure passwordless sudo for the service user. '
+            . $exception->getMessage()
+        );
+    }
+}
+
+function serverToolsCodexAuthStatus(?array $context = null, string $codexPath = ''): array
+{
+    $context = $context ?? serverToolsServiceContext();
+    $codexPath = $codexPath !== '' ? $codexPath : serverToolsResolveCodexCommand($context);
+    if ($codexPath === '' || !is_file($codexPath) || !is_executable($codexPath)) {
+        return [
+            'state' => 'not_installed',
+            'label' => 'CLI not installed',
+            'message' => 'Install Codex CLI before signing in.',
+        ];
+    }
+
+    try {
+        $environment = serverToolsCodexEnvironment($context);
+    } catch (Throwable $exception) {
+        return [
+            'state' => 'unknown',
+            'label' => 'Status could not be determined',
+            'message' => $exception->getMessage(),
+        ];
+    }
+
+    $doctor = serverToolsRunDiagnosticCommand([$codexPath, 'doctor', '--json'], 8, $environment, false);
+    $decoded = json_decode((string)$doctor['stdout'], true);
+    $auth = is_array($decoded) && is_array($decoded['checks']['auth.credentials'] ?? null)
+        ? $decoded['checks']['auth.credentials']
+        : [];
+    $authState = strtolower((string)($auth['status'] ?? ''));
+    $summary = (string)($auth['summary'] ?? '');
+    if ($authState === 'ok') {
+        return [
+            'state' => 'authenticated',
+            'label' => 'Authenticated',
+            'message' => $summary !== '' ? $summary : 'Signed in with ChatGPT.',
+        ];
+    }
+    if (in_array($authState, ['failed', 'fail', 'error', 'warning'], true)) {
+        return [
+            'state' => 'not_authenticated',
+            'label' => 'Not authenticated',
+            'message' => $summary !== '' ? $summary : 'Sign in with ChatGPT before running Codex tasks.',
+        ];
+    }
+
+    $status = serverToolsRunDiagnosticCommand([$codexPath, 'login', 'status'], 8, $environment, false);
+    $statusOutput = trim((string)($status['output'] ?? ''));
+    if (!empty($status['success']) && stripos($statusOutput, 'logged in') !== false) {
+        return [
+            'state' => 'authenticated',
+            'label' => 'Authenticated',
+            'message' => 'Logged in using ChatGPT.',
+        ];
+    }
+    if (!empty($status['success']) && stripos($statusOutput, 'not logged') !== false) {
+        return [
+            'state' => 'not_authenticated',
+            'label' => 'Not authenticated',
+            'message' => 'Sign in with ChatGPT before running Codex tasks.',
+        ];
+    }
+
+    return [
+        'state' => 'unknown',
+        'label' => 'Status could not be determined',
+        'message' => $statusOutput !== '' ? $statusOutput : 'Codex authentication status could not be determined.',
+    ];
+}
+
+function serverToolsClearCodexAuthCache(): void
+{
+    $stateDir = defined('DEPLOY_STATE_DIR') ? DEPLOY_STATE_DIR : '/tmp/iovon-deployments';
+    @unlink(rtrim($stateDir, '/') . '/codex-auth-status.json');
+}
+
 function serverToolsRunDiagnosticCommand(array $arguments, int $timeoutSeconds = 5, array $environment = [], bool $inheritEnvironment = false): array
 {
     return processRunCommand($arguments, [
@@ -206,9 +377,19 @@ function serverToolsParseVersion(string $output, string $pattern): string
 function serverToolsDetectTool(array $definition, array $context, bool $includeLatest = true): array
 {
     $path = (string)($context['path'] ?? serverToolsDefaultPath());
-    $executable = serverToolsFindExecutable((string)$definition['command'], $path);
-    $checkedAt = date('c');
     $toolId = (string)($definition['id'] ?? '');
+    $standaloneCodex = $toolId === 'codex' ? serverToolsCodexStandalonePath($context) : '';
+    $executable = $standaloneCodex !== '' ? $standaloneCodex : serverToolsFindExecutable((string)$definition['command'], $path);
+    $checkedAt = date('c');
+    $packageSource = (string)$definition['source'];
+    if ($toolId === 'codex' && $standaloneCodex !== '') {
+        $packageSource = 'OpenAI standalone installer';
+    } elseif ($toolId === 'codex' && $executable !== '') {
+        $packageSource = 'Administrator-managed CLI';
+    }
+    $codexAuth = $toolId === 'codex'
+        ? serverToolsCodexAuthStatus($context, $executable)
+        : ['state' => 'not_applicable', 'label' => '', 'message' => ''];
     if ($executable === '') {
         return [
             'display_name' => (string)$definition['display_name'],
@@ -221,10 +402,13 @@ function serverToolsDetectTool(array $definition, array $context, bool $includeL
             'last_checked_at' => $checkedAt,
             'latest_version' => $includeLatest ? serverToolsLatestVersion($toolId, '', false) : '',
             'outdated' => false,
-            'package_source' => (string)$definition['source'],
+            'package_source' => $packageSource,
             'dependency_relationship' => (string)$definition['dependency'],
             'requirement' => (string)$definition['requirement'],
             'required_group' => (string)$definition['required_group'],
+            'auth_state' => (string)$codexAuth['state'],
+            'auth_label' => (string)$codexAuth['label'],
+            'auth_message' => (string)$codexAuth['message'],
             'log' => (string)$definition['display_name'] . ': executable not found in PATH.',
         ];
     }
@@ -232,11 +416,17 @@ function serverToolsDetectTool(array $definition, array $context, bool $includeL
     $arguments = $definition['version_arguments'];
     if ((string)$definition['command'] === PHP_BINARY) {
         $arguments = [$executable, '--version'];
+    } elseif ($toolId === 'codex') {
+        $arguments = [$executable, '--version'];
     }
     try {
-        $result = $toolId === 'composer'
-            ? serverToolsRunDiagnosticCommand([$executable, '--version'], 5, serverToolsComposerEnvironment($context), false)
-            : serverToolsRunDiagnosticCommand($arguments, 5);
+        if ($toolId === 'composer') {
+            $result = serverToolsRunDiagnosticCommand([$executable, '--version'], 5, serverToolsComposerEnvironment($context), false);
+        } elseif ($toolId === 'codex') {
+            $result = serverToolsRunDiagnosticCommand($arguments, 5, serverToolsCodexEnvironment($context), false);
+        } else {
+            $result = serverToolsRunDiagnosticCommand($arguments, 5);
+        }
     } catch (Throwable $exception) {
         return [
             'display_name' => (string)$definition['display_name'],
@@ -249,15 +439,21 @@ function serverToolsDetectTool(array $definition, array $context, bool $includeL
             'last_checked_at' => $checkedAt,
             'latest_version' => '',
             'outdated' => false,
-            'package_source' => (string)$definition['source'],
+            'package_source' => $packageSource,
             'dependency_relationship' => (string)$definition['dependency'],
             'requirement' => (string)$definition['requirement'],
             'required_group' => (string)$definition['required_group'],
+            'auth_state' => (string)$codexAuth['state'],
+            'auth_label' => (string)$codexAuth['label'],
+            'auth_message' => (string)$codexAuth['message'],
             'log' => (string)$definition['display_name'] . ': ' . $exception->getMessage(),
         ];
     }
     $available = !empty($result['success']);
     $version = $available ? serverToolsParseVersion((string)$result['stdout'], (string)$definition['version_pattern']) : '';
+    if ($toolId === 'codex' && $version !== '') {
+        $version = serverToolsNormalizeVersion($version);
+    }
     $status = $available ? 'Installed' : ((int)($result['exit_code'] ?? 127) === 126 ? 'Installed but unavailable to service user' : 'Version check failed');
 
     $latestVersion = $includeLatest ? serverToolsLatestVersion($toolId, $version, $available) : '';
@@ -274,10 +470,13 @@ function serverToolsDetectTool(array $definition, array $context, bool $includeL
         'last_checked_at' => $checkedAt,
         'latest_version' => $latestVersion,
         'outdated' => $outdated,
-        'package_source' => (string)$definition['source'],
+        'package_source' => $packageSource,
         'dependency_relationship' => (string)$definition['dependency'],
         'requirement' => (string)$definition['requirement'],
         'required_group' => (string)$definition['required_group'],
+        'auth_state' => (string)$codexAuth['state'],
+        'auth_label' => (string)$codexAuth['label'],
+        'auth_message' => (string)$codexAuth['message'],
         'log' => trim((string)$definition['display_name'] . ': ' . $result['command'] . ' -> ' . $status . ($version !== '' ? ' (' . $version . ')' : '')),
     ];
 }
@@ -311,16 +510,113 @@ function serverToolsDiagnostics(bool $includeLatest = true): array
         $log[] = (string)$tools[$id]['log'];
     }
 
-    return [
+    $diagnostics = [
         'context' => $context,
         'tools' => $tools,
         'generated_at' => date('c'),
         'log' => implode("\n", $log),
     ];
+
+    if ($includeLatest) {
+        serverToolsPersistDiagnostics($diagnostics);
+    }
+
+    return $diagnostics;
+}
+
+function serverToolsNormalizeDiagnosticsForCache(array $diagnostics): array
+{
+    $context = is_array($diagnostics['context'] ?? null) ? $diagnostics['context'] : [];
+    $diagnosticTools = is_array($diagnostics['tools'] ?? null) ? $diagnostics['tools'] : [];
+    $tools = [];
+    foreach (serverToolsDefinitions() as $id => $definition) {
+        $tool = is_array($diagnosticTools[$id] ?? null) ? $diagnosticTools[$id] : [];
+        $tools[(string)$id] = [
+            'display_name' => (string)($tool['display_name'] ?? $definition['display_name']),
+            'purpose' => (string)($tool['purpose'] ?? $definition['purpose']),
+            'installed' => !empty($tool['installed']),
+            'version' => (string)($tool['version'] ?? ''),
+            'executable_path' => (string)($tool['executable_path'] ?? ''),
+            'available_to_service_user' => !empty($tool['available_to_service_user']),
+            'diagnostic_status' => (string)($tool['diagnostic_status'] ?? ''),
+            'last_checked_at' => (string)($tool['last_checked_at'] ?? ''),
+            'latest_version' => (string)($tool['latest_version'] ?? ''),
+            'outdated' => !empty($tool['outdated']),
+            'package_source' => (string)($tool['package_source'] ?? $definition['source']),
+            'dependency_relationship' => (string)($tool['dependency_relationship'] ?? $definition['dependency']),
+            'requirement' => (string)($tool['requirement'] ?? $definition['requirement']),
+            'required_group' => (string)($tool['required_group'] ?? $definition['required_group']),
+            'auth_state' => (string)($tool['auth_state'] ?? ''),
+            'auth_label' => (string)($tool['auth_label'] ?? ''),
+            'auth_message' => (string)($tool['auth_message'] ?? ''),
+            'log' => (string)($tool['display_name'] ?? $definition['display_name']) . ': cached last-known diagnostic state.',
+        ];
+    }
+
+    return [
+        'context' => [
+            'service_name' => (string)($context['service_name'] ?? DEV_CONSOLE_SERVICE_NAME),
+            'user' => (string)($context['user'] ?? ''),
+            'group' => (string)($context['group'] ?? ''),
+            'path' => (string)($context['path'] ?? ''),
+            'working_directory' => (string)($context['working_directory'] ?? ''),
+            'php_executable' => (string)($context['php_executable'] ?? PHP_BINARY),
+            'status' => (string)($context['status'] ?? ''),
+        ],
+        'tools' => $tools,
+        'generated_at' => (string)($diagnostics['generated_at'] ?? date('c')),
+        'cached' => true,
+        'log' => 'Loaded last-known Dev Console host diagnostics.',
+    ];
+}
+
+function serverToolsPersistDiagnostics(array $diagnostics): void
+{
+    $normalized = serverToolsNormalizeDiagnosticsForCache($diagnostics);
+    $directory = dirname(DEV_CONSOLE_HOST_DIAGNOSTICS_CACHE);
+    if (!is_dir($directory) && !@mkdir($directory, 0750, true) && !is_dir($directory)) {
+        return;
+    }
+    $json = json_encode($normalized, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if ($json === false) {
+        return;
+    }
+    $temporaryPath = $directory . '/.' . basename(DEV_CONSOLE_HOST_DIAGNOSTICS_CACHE) . '.tmp.' . bin2hex(random_bytes(8));
+    if (@file_put_contents($temporaryPath, $json . "\n", LOCK_EX) === false) {
+        return;
+    }
+    @chmod($temporaryPath, 0600);
+    @rename($temporaryPath, DEV_CONSOLE_HOST_DIAGNOSTICS_CACHE);
+    if (is_file($temporaryPath)) {
+        @unlink($temporaryPath);
+    }
+}
+
+function serverToolsLoadPersistedDiagnostics(): array
+{
+    if (!is_file(DEV_CONSOLE_HOST_DIAGNOSTICS_CACHE) || !is_readable(DEV_CONSOLE_HOST_DIAGNOSTICS_CACHE)) {
+        return [];
+    }
+    $decoded = json_decode((string)@file_get_contents(DEV_CONSOLE_HOST_DIAGNOSTICS_CACHE), true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+
+    return serverToolsNormalizeDiagnosticsForCache($decoded);
 }
 
 function serverToolsNormalizeVersion(string $version): string
 {
+    $version = trim($version);
+    if (str_starts_with($version, 'rust-v')) {
+        $version = substr($version, 7);
+    } elseif (str_starts_with($version, 'v')) {
+        $version = substr($version, 1);
+    }
+    if (str_starts_with($version, '.')) {
+        $version = '0' . $version;
+    }
+
     return preg_match('/(\d+(?:\.\d+){0,3})/', $version, $matches) === 1 ? $matches[1] : $version;
 }
 
@@ -333,10 +629,30 @@ function serverToolsLatestVersion(string $toolId, string $installedVersion, bool
             return $value === '(none)' ? '' : $value;
         }
     }
-    if ($toolId === 'npm' || $toolId === 'codex') {
-        $package = $toolId === 'npm' ? 'npm' : '@openai/codex';
-        $latest = serverToolsRunDiagnosticCommand(['npm', 'view', $package, 'version'], 15);
+    if ($toolId === 'npm') {
+        $latest = serverToolsRunDiagnosticCommand(['npm', 'view', 'npm', 'version'], 15);
         return !empty($latest['success']) ? trim((string)$latest['stdout']) : '';
+    }
+    if ($toolId === 'codex') {
+        $latest = serverToolsRunDiagnosticCommand([PHP_BINARY, '-r', <<<'PHP'
+$context = stream_context_create(["http" => ["timeout" => 15, "ignore_errors" => true]]);
+$json = @file_get_contents("https://releases.openai.com/codex/channels/latest", false, $context);
+if ($json === false) {
+    exit(1);
+}
+$decoded = json_decode($json, true);
+if (!is_array($decoded)) {
+    exit(1);
+}
+$tag = (string)($decoded["tag_name"] ?? "");
+        if (str_starts_with($tag, "rust-v")) {
+            $tag = substr($tag, 7);
+        } elseif (str_starts_with($tag, "v")) {
+            $tag = substr($tag, 1);
+        }
+echo $tag;
+PHP], 20);
+        return !empty($latest['success']) ? serverToolsNormalizeVersion((string)$latest['stdout']) : '';
     }
     if ($toolId === 'composer') {
         try {
@@ -369,6 +685,18 @@ function serverToolsAllowedActionsForTool(string $toolId, array $tool): array
     if ((string)($tool['diagnostic_status'] ?? '') !== 'Installed') {
         return ['reinstall', 'refresh'];
     }
+    if ($toolId === 'codex') {
+        $actions = [];
+        if ((string)($tool['auth_state'] ?? '') === 'not_authenticated') {
+            $actions[] = 'sign_in_chatgpt';
+        }
+        if (!empty($tool['outdated'])) {
+            $actions[] = 'update';
+        }
+        $actions[] = 'refresh';
+
+        return array_values(array_unique($actions));
+    }
     if (!empty($tool['outdated'])) {
         return ['update', 'refresh'];
     }
@@ -382,6 +710,7 @@ function serverToolsActionLabel(string $action): string
         'install' => 'Install',
         'update' => 'Update',
         'reinstall' => 'Reinstall',
+        'sign_in_chatgpt' => 'Sign in with ChatGPT',
         default => 'Refresh',
     };
 }
@@ -646,86 +975,213 @@ function serverToolsRunOperationCommand(array $arguments, array &$log, int $time
     return $result;
 }
 
-function serverToolsRunningAsRoot(): bool
+function serverToolsSanitizeCodexAuthOutput(string $output): string
 {
-    return function_exists('posix_geteuid') && posix_geteuid() === 0;
+    $output = preg_replace('/\x1B(?:[@-Z\\\\-_]|\[[0-?]*[ -\/]*[@-~])/', '', $output) ?? $output;
+    $output = preg_replace('#\b(Bearer)\s+[A-Za-z0-9._~+/=-]+#i', '$1 [redacted]', $output) ?? $output;
+    $output = preg_replace('~\b(access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|api[_-]?key)(\s*[:=]\s*)[^\s,;}]+~i', '$1$2[redacted]', $output) ?? $output;
+    $output = preg_replace('~(Authorization:\s*(?:Bearer|token|Basic)\s+)[^\r\n]+~i', '$1[redacted]', $output) ?? $output;
+
+    return $output;
 }
 
-function serverToolsPathLooksAdministratorManaged(string $path): bool
+function serverToolsParseCodexDeviceAuthOutput(string $output): array
 {
-    $path = trim($path);
-    if ($path === '') {
-        return false;
-    }
-    $realPath = realpath($path) ?: $path;
-    foreach ([$path, $realPath] as $candidate) {
-        foreach (['/usr/bin/', '/usr/sbin/', '/usr/local/bin/', '/usr/local/sbin/', '/usr/lib/', '/usr/local/lib/', '/opt/'] as $prefix) {
-            if (str_starts_with($candidate, $prefix)) {
-                return true;
+    $clean = serverToolsSanitizeCodexAuthOutput($output);
+    $result = [
+        'url' => '',
+        'code' => '',
+        'state' => 'waiting',
+        'message' => 'Waiting for authorization...',
+    ];
+
+    if (preg_match_all('~https?://[^\s<>"\'\]\)]+~i', $clean, $matches) > 0) {
+        foreach ($matches[0] as $candidate) {
+            $candidate = rtrim($candidate, ".,;");
+            $host = strtolower((string)(parse_url($candidate, PHP_URL_HOST) ?: ''));
+            if ($host === '' || !preg_match('/(^|\.)((openai\.com)|(chatgpt\.com))$/', $host)) {
+                continue;
             }
+            $result['url'] = $candidate;
+            break;
         }
     }
 
-    return false;
-}
-
-function serverToolsNpmGlobalPrefix(array &$log, ?string $operationId = null): string
-{
-    $result = serverToolsRunOperationCommand(['npm', 'prefix', '-g'], $log, 30, [], $operationId, 'Checking prerequisites');
-
-    return trim((string)($result['stdout'] ?? ''));
-}
-
-function serverToolsNpmGlobalInstallNeedsSudo(string $toolAction, array $diagnostics, array &$log, ?string $operationId = null): bool
-{
-    if (serverToolsRunningAsRoot()) {
-        return false;
-    }
-    $codexPath = (string)($diagnostics['tools']['codex']['executable_path'] ?? '');
-    if (in_array($toolAction, ['update', 'reinstall'], true) && serverToolsPathLooksAdministratorManaged($codexPath)) {
-        return true;
-    }
-    $prefix = serverToolsNpmGlobalPrefix($log, $operationId);
-    if ($prefix === '') {
-        return false;
-    }
-    foreach ([$prefix . '/lib/node_modules', $prefix . '/bin', $prefix] as $path) {
-        if (is_dir($path)) {
-            return !is_writable($path);
+    $expectCode = false;
+    foreach (preg_split('/\R/', $clean) ?: [] as $line) {
+        $line = trim($line);
+        if ($line === '' || str_contains($line, '://')) {
+            continue;
+        }
+        if (preg_match('/\b(?:one-time\s+code|device\s+code|user\s+code|enter\s+(?:this\s+)?code|verification\s+code)\b/i', $line) === 1) {
+            $expectCode = true;
+        }
+        if (preg_match('/(?:code|enter|verification)[^A-Z0-9]*([A-Z0-9][A-Z0-9-]{5,24})\b/i', $line, $matches) === 1 && serverToolsLooksLikeCodexDeviceCode($matches[1])) {
+            $result['code'] = strtoupper($matches[1]);
+            break;
+        }
+        if ($expectCode && preg_match('/^([A-Z0-9][A-Z0-9-]{5,24})$/i', $line, $matches) === 1 && serverToolsLooksLikeCodexDeviceCode($matches[1])) {
+            $result['code'] = strtoupper($matches[1]);
+            break;
         }
     }
 
-    return serverToolsPathLooksAdministratorManaged($prefix);
+    $lower = strtolower($clean);
+    if (str_contains($lower, 'authenticated') || str_contains($lower, 'logged in') || str_contains($lower, 'success')) {
+        $result['state'] = 'completed';
+        $result['message'] = 'Authentication completed.';
+    } elseif (str_contains($lower, 'timed out') || str_contains($lower, 'expired')) {
+        $result['state'] = 'failed';
+        $result['message'] = 'ChatGPT sign-in timed out.';
+    } elseif (str_contains($lower, 'error') || str_contains($lower, 'failed')) {
+        $result['state'] = 'failed';
+        $result['message'] = 'ChatGPT sign-in failed.';
+    }
+
+    return $result;
 }
 
-function serverToolsAssertNonInteractiveSudo(array &$log, ?string $operationId = null): void
+function serverToolsLooksLikeCodexDeviceCode(string $value): bool
 {
-    $log[] = 'Administrator-managed Codex CLI detected; checking non-interactive sudo.';
-    serverToolsAppendOperationLog($operationId ?? '', 'Administrator-managed Codex CLI detected; checking non-interactive sudo.');
-    $sudo = serverToolsRunDiagnosticCommand(['sudo', '-n', 'true'], 10);
-    $log[] = '$ ' . $sudo['command'];
-    if ((string)$sudo['output'] !== '') {
-        $log[] = (string)$sudo['output'];
-        serverToolsAppendOperationLog($operationId ?? '', (string)$sudo['output']);
+    $value = strtoupper(trim($value));
+    if (preg_match('/^[A-Z0-9][A-Z0-9-]{5,24}$/', $value) !== 1) {
+        return false;
     }
-    $log[] = 'Exit code: ' . (string)$sudo['exit_code'];
-    serverToolsAppendOperationLog($operationId ?? '', '$ ' . $sudo['command']);
-    serverToolsAppendOperationLog($operationId ?? '', 'Exit code: ' . (string)$sudo['exit_code']);
-    if (empty($sudo['success'])) {
-        throw new RuntimeException('Administrator-managed Codex CLI requires passwordless sudo. Configure non-interactive sudo for the Dev Console service user, then retry the update.');
-    }
+
+    return str_contains($value, '-') || preg_match('/\d/', $value) === 1;
 }
 
-function serverToolsCodexNpmCommand(string $toolAction, array $diagnostics, array &$log, ?string $operationId = null): array
+function serverToolsUpdateCodexDeviceAuthState(?string $operationId, string $output): void
 {
-    $needsSudo = serverToolsNpmGlobalInstallNeedsSudo($toolAction, $diagnostics, $log, $operationId);
-    if (!$needsSudo) {
-        return ['npm', 'install', '-g', '@openai/codex'];
+    if ($operationId === null || $operationId === '') {
+        return;
+    }
+    $state = serverToolsReadOperation($operationId);
+    if (empty($state) || (string)($state['tool_action'] ?? '') !== 'sign_in_chatgpt') {
+        return;
+    }
+    $state['device_auth'] = serverToolsParseCodexDeviceAuthOutput($output);
+    serverToolsWriteOperation($state);
+}
+
+function serverToolsMarkCodexDeviceAuthFailed(?string $operationId, string $message): void
+{
+    if ($operationId === null || $operationId === '') {
+        return;
+    }
+    $state = serverToolsReadOperation($operationId);
+    if (empty($state) || (string)($state['tool_action'] ?? '') !== 'sign_in_chatgpt') {
+        return;
+    }
+    $deviceAuth = is_array($state['device_auth'] ?? null) ? $state['device_auth'] : [];
+    $deviceAuth['state'] = 'failed';
+    $deviceAuth['message'] = $message;
+    $state['device_auth'] = $deviceAuth;
+    serverToolsWriteOperation($state);
+}
+
+function serverToolsRunStreamingOperationCommand(array $arguments, array &$log, int $timeoutSeconds, array $environment, ?string $operationId, string $stage): array
+{
+    if ($stage !== '') {
+        serverToolsSetOperationStage($operationId, $stage);
+    }
+    $startedAt = microtime(true);
+    $commandDisplay = processCommandDisplay($arguments);
+    $log[] = '$ ' . $commandDisplay;
+    serverToolsAppendOperationLog($operationId ?? '', '$ ' . $commandDisplay);
+
+    $pipes = [];
+    $normalizedEnvironment = processNormalizeEnvironment($environment, false);
+    $process = @proc_open(array_values(array_map('strval', $arguments)), [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, $normalizedEnvironment);
+    if (!is_resource($process)) {
+        throw new RuntimeException('Unable to start command.');
     }
 
-    serverToolsAssertNonInteractiveSudo($log, $operationId);
+    fclose($pipes[0]);
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+    $stdout = '';
+    $stderr = '';
+    $deadline = microtime(true) + max(1, $timeoutSeconds);
+    $timedOut = false;
+    $observedExitCode = null;
 
-    return ['sudo', '-n', 'npm', 'install', '-g', '@openai/codex'];
+    while (true) {
+        foreach ([1 => 'stdout', 2 => 'stderr'] as $index => $target) {
+            $chunk = stream_get_contents($pipes[$index]) ?: '';
+            if ($chunk === '') {
+                continue;
+            }
+            if ($target === 'stdout') {
+                $stdout .= $chunk;
+            } else {
+                $stderr .= $chunk;
+            }
+            $safeChunk = serverToolsSanitizeCodexAuthOutput(processRedactSensitiveOutput($chunk, $normalizedEnvironment ?? []));
+            serverToolsAppendOperationLog($operationId ?? '', $safeChunk);
+            serverToolsUpdateCodexDeviceAuthState($operationId, $stdout . "\n" . $stderr);
+        }
+
+        $status = proc_get_status($process);
+        if (!$status['running']) {
+            if (isset($status['exitcode']) && (int)$status['exitcode'] >= 0) {
+                $observedExitCode = (int)$status['exitcode'];
+            }
+            break;
+        }
+        if (microtime(true) >= $deadline) {
+            $timedOut = true;
+            proc_terminate($process);
+            usleep(200000);
+            $status = proc_get_status($process);
+            if (!empty($status['running'])) {
+                proc_terminate($process, 9);
+            } elseif (isset($status['exitcode']) && (int)$status['exitcode'] >= 0) {
+                $observedExitCode = (int)$status['exitcode'];
+            }
+            break;
+        }
+        usleep(100000);
+    }
+
+    $finalStdout = stream_get_contents($pipes[1]) ?: '';
+    $finalStderr = stream_get_contents($pipes[2]) ?: '';
+    if ($finalStdout !== '') {
+        $stdout .= $finalStdout;
+        serverToolsAppendOperationLog($operationId ?? '', serverToolsSanitizeCodexAuthOutput(processRedactSensitiveOutput($finalStdout, $normalizedEnvironment ?? [])));
+    }
+    if ($finalStderr !== '') {
+        $stderr .= $finalStderr;
+        serverToolsAppendOperationLog($operationId ?? '', serverToolsSanitizeCodexAuthOutput(processRedactSensitiveOutput($finalStderr, $normalizedEnvironment ?? [])));
+    }
+    serverToolsUpdateCodexDeviceAuthState($operationId, $stdout . "\n" . $stderr);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    $closedExitCode = proc_close($process);
+    $exitCode = $closedExitCode >= 0 ? $closedExitCode : $observedExitCode;
+    if ($timedOut) {
+        $exitCode = 124;
+        $stderr = trim($stderr . "\nCommand timed out.");
+    } elseif ($exitCode === null) {
+        $exitCode = 127;
+        $stderr = trim($stderr . "\nUnable to determine command exit status.");
+    }
+
+    $stdout = serverToolsSanitizeCodexAuthOutput(processRedactSensitiveOutput($stdout, $normalizedEnvironment ?? []));
+    $stderr = serverToolsSanitizeCodexAuthOutput(processRedactSensitiveOutput($stderr, $normalizedEnvironment ?? []));
+    $result = processResult($commandDisplay, $stdout, $stderr, (int)$exitCode, $timedOut, $startedAt);
+    if ((string)$result['output'] !== '') {
+        $log[] = (string)$result['output'];
+    }
+    $log[] = 'Exit code: ' . (string)$result['exit_code'];
+    serverToolsAppendOperationLog($operationId ?? '', 'Exit code: ' . (string)$result['exit_code']);
+    if (empty($result['success'])) {
+        $message = $timedOut ? 'Codex ChatGPT sign-in timed out before completion.' : serverToolsReadableCommandError($result);
+        serverToolsMarkCodexDeviceAuthFailed($operationId, $message);
+        throw new RuntimeException($message);
+    }
+
+    return $result;
 }
 
 function serverToolsReadableCommandError(array $result): string
@@ -817,12 +1273,26 @@ function serverToolsInstallCodex(string $toolAction, array &$log, ?string $opera
 {
     serverToolsSetOperationStage($operationId, 'Checking prerequisites');
     $diagnostics = serverToolsDiagnostics();
-    if (empty($diagnostics['tools']['node']['available_to_service_user']) || empty($diagnostics['tools']['npm']['available_to_service_user'])) {
-        throw new RuntimeException('Install Node.js and npm before installing Codex CLI.');
+    $context = is_array($diagnostics['context'] ?? null) ? $diagnostics['context'] : serverToolsServiceContext();
+    $environment = serverToolsCodexEnvironment($context);
+    $curl = serverToolsFindExecutable('curl', (string)$environment['PATH']);
+    $wget = serverToolsFindExecutable('wget', (string)$environment['PATH']);
+    if ($curl === '' && $wget === '') {
+        throw new RuntimeException('Codex CLI standalone installer requires curl or wget on the Dev Console host.');
     }
     $expectedVersion = (string)($diagnostics['tools']['codex']['latest_version'] ?? '');
-    $command = serverToolsCodexNpmCommand($toolAction, $diagnostics, $log, $operationId);
-    serverToolsRunOperationCommand($command, $log, 240, [], $operationId, 'Installing');
+    $installerPath = sys_get_temp_dir() . '/codex-install-' . ($operationId !== null && serverToolsValidateOperationId($operationId) ? $operationId : bin2hex(random_bytes(8))) . '.sh';
+    try {
+        $downloadCommand = $curl !== ''
+            ? [$curl, '-fsSL', 'https://chatgpt.com/codex/install.sh', '-o', $installerPath]
+            : [$wget, '-q', '-O', $installerPath, 'https://chatgpt.com/codex/install.sh'];
+        serverToolsRunOperationCommand($downloadCommand, $log, 60, $environment, $operationId, 'Downloading');
+        @chmod($installerPath, 0700);
+        serverToolsRunOperationCommand(['sh', $installerPath], $log, 600, $environment, $operationId, 'Installing');
+    } finally {
+        @unlink($installerPath);
+    }
+    serverToolsConfigureCodexAppArmor($context, $log, $operationId, true);
     $after = serverToolsDiagnostics(false);
     $installedVersion = (string)($after['tools']['codex']['version'] ?? '');
     if ($installedVersion === '') {
@@ -833,6 +1303,48 @@ function serverToolsInstallCodex(string $toolAction, array &$log, ?string $opera
     }
     $log[] = 'Codex CLI version verified: ' . $installedVersion;
     serverToolsAppendOperationLog($operationId ?? '', 'Codex CLI version verified: ' . $installedVersion);
+}
+
+function serverToolsAuthenticateCodexChatGpt(array &$log, ?string $operationId = null): void
+{
+    serverToolsSetOperationStage($operationId, 'Checking Codex CLI');
+    $context = serverToolsServiceContext();
+    $codex = serverToolsResolveCodexCommand($context);
+    if ($codex === '') {
+        throw new RuntimeException('Codex CLI is not installed on the Dev Console host.');
+    }
+    $environment = serverToolsCodexEnvironment($context);
+    $status = serverToolsCodexAuthStatus($context, $codex);
+    if ((string)($status['state'] ?? '') === 'authenticated') {
+        $log[] = 'Codex CLI is already authenticated with ChatGPT.';
+        serverToolsAppendOperationLog($operationId ?? '', 'Codex CLI is already authenticated with ChatGPT.');
+        return;
+    }
+
+    $log[] = 'Starting official Codex ChatGPT device authentication.';
+    $log[] = 'Open the URL/code shown by Codex CLI to complete sign-in.';
+    serverToolsAppendOperationLog($operationId ?? '', 'Starting official Codex ChatGPT device authentication.');
+    serverToolsAppendOperationLog($operationId ?? '', 'Open the URL/code shown by Codex CLI to complete sign-in.');
+    serverToolsRunStreamingOperationCommand([$codex, 'login', '--device-auth'], $log, DEV_CONSOLE_CODEX_AUTH_TIMEOUT_SECONDS, $environment, $operationId, 'Waiting for ChatGPT sign-in');
+
+    serverToolsSetOperationStage($operationId, 'Verifying authentication');
+    $after = serverToolsCodexAuthStatus($context, $codex);
+    if ((string)($after['state'] ?? '') !== 'authenticated') {
+        throw new RuntimeException('Codex ChatGPT sign-in completed, but authentication could not be verified.');
+    }
+    serverToolsClearCodexAuthCache();
+    if ($operationId !== null && $operationId !== '') {
+        $state = serverToolsReadOperation($operationId);
+        if (!empty($state)) {
+            $deviceAuth = is_array($state['device_auth'] ?? null) ? $state['device_auth'] : [];
+            $deviceAuth['state'] = 'completed';
+            $deviceAuth['message'] = 'Authentication completed.';
+            $state['device_auth'] = $deviceAuth;
+            serverToolsWriteOperation($state);
+        }
+    }
+    $log[] = 'Codex ChatGPT authentication verified.';
+    serverToolsAppendOperationLog($operationId ?? '', 'Codex ChatGPT authentication verified.');
 }
 
 function serverToolsRunManagedAction(string $toolId, string $toolAction, ?string $operationId = null): array
@@ -873,7 +1385,9 @@ function serverToolsRunManagedAction(string $toolId, string $toolAction, ?string
         } elseif ($toolId === 'composer') {
             $toolAction === 'update' ? serverToolsUpdateComposer($log, $operationId) : serverToolsInstallComposer($log, $operationId);
         } elseif ($toolId === 'codex') {
-            serverToolsInstallCodex($toolAction, $log, $operationId);
+            $toolAction === 'sign_in_chatgpt'
+                ? serverToolsAuthenticateCodexChatGpt($log, $operationId)
+                : serverToolsInstallCodex($toolAction, $log, $operationId);
         } else {
             throw new RuntimeException('Action is diagnostics-only for this tool.');
         }
@@ -948,7 +1462,10 @@ function serverToolsExecuteOperation(string $operationId): void
 
 function serverToolsDashboardSoftware(): array
 {
-    $diagnostics = serverToolsDiagnostics(false);
+    $diagnostics = serverToolsLoadPersistedDiagnostics();
+    if (empty($diagnostics)) {
+        $diagnostics = serverToolsDiagnostics(false);
+    }
     $software = [];
     foreach ($diagnostics['tools'] as $tool) {
         $software[(string)$tool['display_name']] = !empty($tool['installed']) && (string)$tool['version'] !== ''

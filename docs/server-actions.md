@@ -6,7 +6,7 @@ Page responsibilities:
 
 - Settings: Dev Console host/runtime/configuration and required local host tool diagnostics for Git, PHP, and Codex CLI.
 - Servers: managed server registry, SSH onboarding, Add/Edit/Remove, Test Connection, and connection details.
-- Server Management: selected Managed Server overview, remote PHP/Composer/Node.js/npm diagnostics, remote Apache status and site inventory, Composer installation, and assigned projects.
+- Server Management: selected Managed Server overview, remote PHP/Composer/Node.js/npm diagnostics, remote Apache status and site inventory, Composer/Apache installation, and assigned projects.
 
 ## Add Server
 
@@ -162,7 +162,7 @@ Current sections:
 
 Git is intentionally absent from Server Management. Project Git repositories, GitHub authentication, Codex commits, and deployment source preparation are Dev Console host responsibilities.
 
-The current remote tool action implemented from this page is Composer installation. PHP, Node.js, npm, and Apache are diagnostic-only in this page unless source code later adds explicit actions.
+The current remote tool actions implemented from this page are Composer installation and Apache installation. PHP, Node.js, and npm are diagnostic-only in this page unless source code later adds explicit actions.
 
 ## Generate SSH Key
 

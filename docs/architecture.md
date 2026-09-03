@@ -240,10 +240,13 @@ ServerName localhost
 
 GitHub configuration is stored in `config/github.json`. The token is passed to GitHub CLI commands as `GH_TOKEN` in the process environment. It is not passed as a command-line argument.
 
+Settings verifies GitHub API authentication and provisions the Git SSH transport used by Project repositories. Dev Console maintains one service-user SSH key and a managed SSH config alias named `github.com-dev-console-account`; Project remotes use `git@github.com-dev-console-account:<account>/<repository>.git`.
+
 Current GitHub operations include:
 
 - connection test through `gh api user`
 - organization/account verification
+- service-user SSH public-key registration
 - private repository creation
 - repository metadata lookup
 - exact configured repository deletion during Project deletion when explicitly selected

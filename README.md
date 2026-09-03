@@ -33,9 +33,9 @@ For lower-level service details, see [docs/DEV_CONSOLE.md](docs/DEV_CONSOLE.md).
 - Optional: Tailscale Serve or another private tunnel for private HTTPS access.
 
 The installer installs the base packages required for Dev Console itself,
-including PHP CLI and required PHP extensions, Git, OpenSSH client, rsync, sudo,
-and certificate support. GitHub CLI, Node.js, npm, Composer, and Codex CLI are
-managed as optional host or server tools after installation.
+including PHP CLI and required PHP extensions, curl, Git, OpenSSH client, rsync,
+sudo, and certificate support. GitHub CLI, Node.js, npm, Composer, and Codex CLI
+are managed as optional host or server tools after installation.
 
 ## Installation
 
@@ -43,7 +43,7 @@ Clone this repository onto the target server, then run the installer from the
 repository root:
 
 ```sh
-git clone <repo> /var/www/dev-console
+sudo git clone <repo> /var/www/dev-console
 cd /var/www/dev-console
 sudo ./install.sh
 ```
@@ -68,6 +68,9 @@ The installer:
   server definitions, SSH keys, and runtime state.
 - Ensures `/var/www/git` and ignored Dev Console runtime directories exist with
   service-user ownership.
+- On Ubuntu hosts that restrict unprivileged user namespaces through AppArmor,
+  configures a narrow Codex sandbox profile if Codex standalone is already
+  installed.
 - Generates `/etc/systemd/system/iovon-dev-console.service` from the tracked
   systemd template.
 - Reloads systemd, enables the service, starts or restarts it, and verifies it is
@@ -79,12 +82,16 @@ The installer:
 The installer creates `/etc/iovon-dev-console.env` if it does not exist and
 stores `IOVON_DEV_CONSOLE_TOKEN` with `root:root` ownership and `0600`
 permissions. Existing tokens are preserved. The token is required for the web UI
-and is not printed during installation. It is not required for `/health`.
+and is not required for `/health`.
+
+On first install, the newly generated token is printed once in the installer
+completion summary. On reruns, the existing token is preserved and is not
+printed.
 
 Retrieve the configured token when needed:
 
 ```sh
-sudo sed -n 's/^IOVON_DEV_CONSOLE_TOKEN=//p' /etc/iovon-dev-console.env
+sudo grep '^IOVON_DEV_CONSOLE_TOKEN=' /etc/iovon-dev-console.env
 ```
 
 Dev Console runtime settings, including task attachment upload limits, are
@@ -97,6 +104,23 @@ install the service unit that starts `bin/run-dev-console`.
 Project repositories are stored on the Dev Console host under `/var/www/git`.
 Fresh installs start with no configured projects, no GitHub token, and no
 managed servers.
+
+On Ubuntu 24.04, AppArmor may restrict unprivileged user namespaces while Codex
+needs its bundled Bubblewrap sandbox. Dev Console keeps the global kernel
+restriction enabled and, after Codex standalone is installed, manages only this
+profile:
+
+```text
+/etc/apparmor.d/iovon-dev-console-codex-bwrap
+```
+
+If Codex is installed later from Settings, Dev Console attempts the same profile
+setup with non-interactive `sudo -n`. If that is unavailable, run the installer
+again after installing Codex:
+
+```sh
+sudo ./install.sh
+```
 
 ## Starting the Service
 

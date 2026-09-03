@@ -182,6 +182,49 @@ function configuredDisplayValue($value): string
     return trim($text) === '' ? 'Not configured' : $text;
 }
 
+function devConsoleHostsFileGuidance(?array $server, array $project): array
+{
+    $host = trim((string)($server['host'] ?? ''));
+    $domains = array_values(array_unique(array_filter([
+        trim((string)($project['production']['domain'] ?? '')),
+        trim((string)($project['preview']['domain'] ?? '')),
+    ], static fn(string $value): bool => $value !== '')));
+    if (empty($domains)) {
+        return ['copyable' => false, 'line' => '', 'message' => 'Project domains are not configured.'];
+    }
+    if ($host === '') {
+        return ['copyable' => false, 'line' => '', 'message' => 'Managed Server address is not configured.'];
+    }
+
+    $isIpv4 = filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false;
+    $isIpv6 = filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
+    $isLoopback = strcasecmp($host, 'localhost') === 0
+        || ($isIpv4 && str_starts_with($host, '127.'))
+        || ($isIpv6 && $host === '::1');
+
+    if (($isIpv4 || $isIpv6) && !$isLoopback) {
+        return [
+            'copyable' => true,
+            'line' => $host . ' ' . implode(' ', $domains),
+            'message' => 'If DNS is not configured yet, add this line to the hosts file on the computer running your browser:',
+        ];
+    }
+
+    if ($isLoopback) {
+        return [
+            'copyable' => false,
+            'line' => '',
+            'message' => 'The Managed Server is configured as ' . $host . '. Use the IP address that this browser/client uses to reach that server when adding local hosts-file entries.',
+        ];
+    }
+
+    return [
+        'copyable' => false,
+        'line' => '',
+        'message' => 'The Managed Server is configured as hostname ' . $host . '. If DNS is unavailable, resolve that hostname from the browser/client network and map the Project domains to the reachable IP address.',
+    ];
+}
+
 function serverToolsStoredDiagnosticsPlaceholder(): array
 {
     $context = [
@@ -1461,6 +1504,23 @@ if ($action === 'install_managed_server_composer') {
     exit;
 }
 
+if ($action === 'install_managed_server_apache') {
+    if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
+        http_response_code(403);
+        sendJson(['ok' => false, 'error' => 'Invalid managed server request.']);
+    } else {
+        try {
+            $serverId = managedServersNormalizeId(is_scalar($_POST['server_id'] ?? null) ? (string)$_POST['server_id'] : '');
+            $operation = managedServerStartApacheInstall(managedServersLoad(), $serverId);
+            sendJson(['ok' => true, 'operation' => $operation]);
+        } catch (Throwable $exception) {
+            http_response_code(400);
+            sendJson(['ok' => false, 'error' => $exception->getMessage()]);
+        }
+    }
+    exit;
+}
+
 if ($action === 'generate_managed_server_key') {
     if ($requestMethod !== 'POST' || !hash_equals($csrfToken, (string)($_POST['csrf_token'] ?? ''))) {
         $_SESSION['managed_server_result'] = ['success' => false, 'message' => 'Invalid Server SSH Key request.'];
@@ -1777,7 +1837,8 @@ if (in_array($action, ['provision_project', 'remove_project', 'delete_project', 
         $projectActionResult['message'] = $prefix . (string)($projectActionResult['message'] ?? 'Action failed.');
     }
     if (empty($projectActionResult['success']) && $projectForAction !== null && !in_array($action, ['remove_project', 'delete_project'], true)) {
-        devConsoleSaveProjectConfiguration(devConsoleTouchProject($projectConfigurationForAction, $projectId));
+        $latestProjectConfiguration = devConsoleLoadProjectConfiguration();
+        devConsoleSaveProjectConfiguration(devConsoleTouchProject($latestProjectConfiguration, $projectId));
     }
     $_SESSION['project_action_result'] = $projectActionResult;
     header('Location: /?tab=' . ($action === 'cleanup_orphaned_project' ? 'settings#apache' : 'projects#projects'));
@@ -2165,10 +2226,12 @@ if (serverToolsValidateOperationId($serverToolOperationId)) {
         // Ignore stale or invalid operation state during page rendering.
     }
 }
-$requestedTabForDiagnostics = (string)($_GET['tab'] ?? '');
 $serverDiagnostics = is_array($serverDiagnosticsResult['diagnostics'] ?? null)
     ? $serverDiagnosticsResult['diagnostics']
-    : ($requestedTabForDiagnostics === 'settings' ? serverToolsDiagnostics(false) : serverToolsStoredDiagnosticsPlaceholder());
+    : serverToolsLoadPersistedDiagnostics();
+if (empty($serverDiagnostics)) {
+    $serverDiagnostics = serverToolsStoredDiagnosticsPlaceholder();
+}
 $serverContext = is_array($serverDiagnostics['context'] ?? null) ? $serverDiagnostics['context'] : [];
 $serverTools = is_array($serverDiagnostics['tools'] ?? null) ? $serverDiagnostics['tools'] : [];
 $managedServers = managedServersLoad();
@@ -2471,11 +2534,15 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .host-tools-table th:nth-child(2), .host-tools-table td:nth-child(2) { width: 10%; }
     .host-tools-table th:nth-child(3), .host-tools-table td:nth-child(3) { width: 12%; }
     .host-tools-table th:nth-child(4), .host-tools-table td:nth-child(4) { width: 12%; }
-    .host-tools-table th:nth-child(5), .host-tools-table td:nth-child(5) { width: 14%; }
-    .host-tools-table th:nth-child(6), .host-tools-table td:nth-child(6) { width: 30%; }
-    .host-tools-table th:nth-child(7), .host-tools-table td:nth-child(7) { width: 8%; }
+    .host-tools-table th:nth-child(5), .host-tools-table td:nth-child(5) { width: 13%; }
+    .host-tools-table th:nth-child(6), .host-tools-table td:nth-child(6) { width: 27%; }
+    .host-tools-table th:nth-child(7), .host-tools-table td:nth-child(7) { width: 12%; }
     .host-tools-table td:last-child .project-actions { gap: 5px; }
     .host-tools-table td:last-child button { padding: 7px 9px; }
+    .codex-auth-panel { background: #f7fcfe; border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 10px; margin: 12px 0; padding: 14px; }
+    .codex-auth-panel h3 { color: var(--blue); font-size: 15px; margin: 0; }
+    .codex-auth-url { overflow-wrap: anywhere; }
+    .codex-auth-code { background: #fff; border: 1px solid #b9cbd4; border-radius: 6px; color: var(--blue); display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 22px; font-weight: 800; letter-spacing: 1px; padding: 8px 12px; }
     .server-management-selector { align-items: end; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 8px 0 14px; padding-bottom: 10px; }
     .server-management-selector form { align-items: end; display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
     .server-management-selector label { margin: 0; }
@@ -2561,6 +2628,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     .documentation-content blockquote { border-left: 4px solid var(--line); color: var(--muted); margin: 14px 0; padding: 2px 0 2px 14px; }
     .tool-status { white-space: nowrap; }
     .site-path, .path-value { overflow-wrap: anywhere; word-break: normal; }
+    .settings-table td.path-value, .settings-table .path-value { overflow-wrap: anywhere; white-space: normal; word-break: break-word; }
     #projects, #github, #apache, #runtime, #dev-console-host, #dev-console-tools { scroll-margin-top: 18px; }
     #createProject { scroll-margin-top: 18px; }
     #createProject button[type="submit"] { width: 100%; }
@@ -2896,7 +2964,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
               <li><span class="step-state done">Done</span><span>Task file created<?php if ($activeTaskPath !== ''): ?>: <code><?= h($activeTaskPath) ?></code><?php endif; ?></span></li>
               <li><span class="step-state <?= h($taskGitCompleted ? 'done' : 'pending') ?>"><?= h($taskGitCompleted ? 'Done' : 'Ready') ?></span><span>Task committed locally<?php if ($commitHash !== ''): ?>: <code title="<?= h($commitHash) ?>"><?= h(shortSha($commitHash)) ?></code><?php endif; ?></span></li>
               <li><span class="step-state <?= h($taskGitPushed ? 'done' : 'pending') ?>"><?= h($taskGitPushed ? 'Done' : 'Pending') ?></span><span><?= h($taskGitPushed ? 'Task synchronized with GitHub' : 'GitHub synchronization needs retry from Projects') ?></span></li>
-              <li><span class="step-state <?= h(in_array($activeRunStatus, ['completed', 'failed'], true) ? 'done' : 'pending') ?>"><?= h(statusLabel($activeRunStatus)) ?></span><span>Codex run status</span></li>
+              <li><span class="step-state <?= h(in_array($activeRunStatus, ['completed', 'failed'], true) ? 'done' : 'pending') ?>" data-codex-workflow-status><?= h(statusLabel($activeRunStatus)) ?></span><span>Codex run status</span></li>
             </ul>
           </details>
           <div class="prompt-actions">
@@ -2984,16 +3052,16 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
             <li>Done: Task selected</li>
             <li><?= $taskGitCompleted ? 'Done' : 'Ready' ?>: Local commit</li>
             <li><?= $taskGitPushed ? 'Done' : 'Pending' ?>: GitHub synchronized</li>
-            <li><?= h($activeRunStatus === 'not_started' ? 'Ready: Codex not started' : statusLabel($activeRunStatus) . ': Codex run') ?></li>
+            <li data-codex-activity-status><?= h($activeRunStatus === 'not_started' ? 'Ready: Codex not started' : statusLabel($activeRunStatus) . ': Codex run') ?></li>
           </ul>
           <?php if (!empty($activeCodexResult)): ?>
             <dl class="deployment-details" id="codexResultSummary">
               <div><dt>Task</dt><dd><?= h((string)($activeCodexResult['task_id'] ?? $activeTaskId)) ?></dd></div>
-              <div><dt>Status</dt><dd><?= h((string)($activeCodexResult['status'] ?? statusLabel($activeRunStatus))) ?></dd></div>
-              <div><dt>Commit</dt><dd><code title="<?= h((string)($activeCodexResult['commit'] ?? '')) ?>"><?= h((string)($activeCodexResult['commit'] ?? '') === '' ? 'Not configured' : shortSha((string)$activeCodexResult['commit'])) ?></code></dd></div>
-              <div><dt>Files changed</dt><dd><?= h((string)($activeCodexResult['files_changed'] ?? 'Not configured')) ?></dd></div>
-              <div><dt>Validation</dt><dd><?= h((string)($activeCodexResult['validation'] ?? 'Not configured')) ?></dd></div>
-              <div><dt>Duration</dt><dd><?= h(isset($activeCodexResult['duration_seconds']) ? formatDuration((int)$activeCodexResult['duration_seconds']) : 'Not configured') ?></dd></div>
+              <div><dt>Status</dt><dd data-codex-result-field="status"><?= h((string)($activeCodexResult['status'] ?? statusLabel($activeRunStatus))) ?></dd></div>
+              <div><dt>Commit</dt><dd><code data-codex-result-field="commit" title="<?= h((string)($activeCodexResult['commit'] ?? '')) ?>"><?= h((string)($activeCodexResult['commit'] ?? '') === '' ? 'Not configured' : shortSha((string)$activeCodexResult['commit'])) ?></code></dd></div>
+              <div><dt>Files changed</dt><dd data-codex-result-field="files_changed"><?= h((string)($activeCodexResult['files_changed'] ?? 'Not configured')) ?></dd></div>
+              <div><dt>Validation</dt><dd data-codex-result-field="validation"><?= h((string)($activeCodexResult['validation'] ?? 'Not configured')) ?></dd></div>
+              <div><dt>Duration</dt><dd data-codex-result-field="duration"><?= h(isset($activeCodexResult['duration_seconds']) ? formatDuration((int)$activeCodexResult['duration_seconds']) : 'Not configured') ?></dd></div>
             </dl>
             <?php if ((string)($activeCodexResult['summary'] ?? '') !== ''): ?>
               <p><?= h((string)$activeCodexResult['summary']) ?></p>
@@ -3317,12 +3385,6 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                 $showProjectIdInHeader = $projectIdForCard !== '' && $projectNameForDisplay !== $projectIdForCard;
                 $managedServerLabel = devConsoleManagedServerLabel($projectManagedServer, $projectManagedServerId);
                 $managedServerStatusLabel = devConsoleManagedServerStatusLabel($projectManagedServer);
-                $projectServerAddress = (string)($projectManagedServer['host'] ?? '');
-                $hostsLine = trim(implode(' ', array_filter([
-                    $projectServerAddress,
-                    (string)($project['production']['domain'] ?? ''),
-                    (string)($project['preview']['domain'] ?? ''),
-                ], static fn(string $value): bool => trim($value) !== '')));
               ?>
               <section class="project-item" data-project-card data-project-id="<?= h($projectIdForCard) ?>" data-expanded="<?= $cardOpen ? '1' : '0' ?>">
                 <div class="project-summary">
@@ -3548,12 +3610,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           $gitCanFetch = !empty($gitStatus['can_fetch']) && in_array($gitStatus['status'], ['INITIALIZATION INCOMPLETE', 'CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND', 'REMOTE UNAVAILABLE'], true);
           $gitCanPull = !empty($gitStatus['can_pull']) && in_array($gitStatus['status'], ['CONNECTED', 'CHANGES PRESENT', 'AHEAD', 'BEHIND', 'AHEAD / BEHIND'], true);
           $gitCanPush = !empty($gitStatus['can_fetch']) && in_array($gitStatus['status'], ['AHEAD', 'AHEAD / BEHIND', 'REMOTE UNAVAILABLE'], true);
-          $projectServerAddress = (string)($projectManagedServer['host'] ?? '');
-          $hostsLine = trim(implode(' ', array_filter([
-              $projectServerAddress,
-              (string)($project['production']['domain'] ?? ''),
-              (string)($project['preview']['domain'] ?? ''),
-          ], static fn(string $value): bool => trim($value) !== '')));
+          $hostsGuidance = devConsoleHostsFileGuidance($projectManagedServer, $project);
         ?>
         <section class="panel" data-project-edit-panel data-project-edit-id="<?= h($projectIdForCard) ?>" hidden>
           <h2>Edit Project</h2>
@@ -3660,14 +3717,14 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           </section>
           <section class="environment-block">
             <h4>Local DNS testing</h4>
-            <?php if ($projectServerAddress !== '' && $hostsLine !== ''): ?>
-              <p class="field-help">If DNS is not configured yet, add this line to your local hosts file:</p>
+            <?php if (!empty($hostsGuidance['copyable']) && (string)($hostsGuidance['line'] ?? '') !== ''): ?>
+              <p class="field-help"><?= h((string)$hostsGuidance['message']) ?></p>
               <div class="hosts-copy-row">
-                <p class="local-hosts" id="hostsLine-<?= h($projectIdForCard) ?>"><?= h($hostsLine) ?></p>
+                <p class="local-hosts" id="hostsLine-<?= h($projectIdForCard) ?>"><?= h((string)$hostsGuidance['line']) ?></p>
                 <button type="button" class="secondary" data-copy-log="hostsLine-<?= h($projectIdForCard) ?>">Copy</button>
               </div>
             <?php else: ?>
-              <p class="field-help">Server address is not available.</p>
+              <p class="field-help"><?= h((string)($hostsGuidance['message'] ?? 'Server address is not available.')) ?></p>
             <?php endif; ?>
           </section>
         </section>
@@ -4098,6 +4155,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       <section class="panel" id="dev-console-tools">
         <div class="dashboard-header">
           <h2>Dev Console Host Tools</h2>
+          <?php if (!empty($serverDiagnostics['cached']) && (string)($serverDiagnostics['generated_at'] ?? '') !== ''): ?>
+            <span class="meta">Last known: <?= h((string)$serverDiagnostics['generated_at']) ?></span>
+          <?php endif; ?>
           <form method="post" action="/?tab=settings#dev-console-tools" data-preserve-settings-scroll="1">
             <input type="hidden" name="action" value="refresh_server_diagnostics">
             <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
@@ -4110,6 +4170,20 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         <section class="result-block tool-operation-panel" id="serverToolOperationPanel" hidden>
           <h2>Dev Console host tool operation</h2>
           <p id="serverToolOperationMessage">Starting...</p>
+          <section class="codex-auth-panel" id="serverToolCodexAuthPanel" hidden>
+            <h3>Sign in to ChatGPT</h3>
+            <div>
+              <strong>Open this page:</strong><br>
+              <a id="serverToolCodexAuthUrl" class="codex-auth-url" href="" target="_blank" rel="noopener" hidden></a>
+              <span id="serverToolCodexAuthUrlPending" class="meta">Waiting for authorization URL...</span>
+            </div>
+            <div>
+              <strong>Enter this code:</strong><br>
+              <button type="button" class="codex-auth-code" id="serverToolCodexAuthCode" data-copy-text="" hidden></button>
+              <span id="serverToolCodexAuthCodePending" class="meta">Waiting for device code...</span>
+            </div>
+            <p class="field-help" id="serverToolCodexAuthState">Waiting for authorization...</p>
+          </section>
           <dl class="tool-operation-grid">
             <div><dt>Tool</dt><dd id="serverToolOperationTool">-</dd></div>
             <div><dt>Action</dt><dd id="serverToolOperationAction">-</dd></div>
@@ -4117,12 +4191,15 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
             <div><dt>Elapsed</dt><dd id="serverToolOperationElapsed">0s</dd></div>
           </dl>
           <p><strong>Stage:</strong> <span id="serverToolOperationStage">Starting</span></p>
-          <div class="result-actions">
-            <button type="button" class="secondary" data-copy-log="serverToolLiveLog">Copy Log</button>
-            <button type="button" class="secondary" data-download-log="serverToolLiveLog" data-download-name="server-tool-operation.log">Download Log</button>
-            <span class="hint" data-log-message="serverToolLiveLog" aria-live="polite"></span>
-          </div>
-          <pre id="serverToolLiveLog" class="tool-operation-log">Waiting for operation log...</pre>
+          <details id="serverToolTechnicalLogDetails" open>
+            <summary>Show technical log</summary>
+            <div class="result-actions">
+              <button type="button" class="secondary" data-copy-log="serverToolLiveLog">Copy Log</button>
+              <button type="button" class="secondary" data-download-log="serverToolLiveLog" data-download-name="server-tool-operation.log">Download Log</button>
+              <span class="hint" data-log-message="serverToolLiveLog" aria-live="polite"></span>
+            </div>
+            <pre id="serverToolLiveLog" class="tool-operation-log">Waiting for operation log...</pre>
+          </details>
         </section>
         <?php foreach (['required' => ['Dev Console prerequisites', true]] as $toolGroup => [$toolGroupLabel, $toolGroupOpen]): ?>
           <details class="compact-details" open>
@@ -4161,6 +4238,9 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                         <?= h(configuredDisplayValue($tool['package_source'] ?? '')) ?><br>
                         <span class="meta"><?= h(configuredDisplayValue($tool['purpose'] ?? '')) ?></span><br>
                         <span class="meta">Service user: <?= !empty($tool['available_to_service_user']) ? 'Executable' : 'Unavailable' ?></span><br>
+                        <?php if ((string)$toolId === 'codex'): ?>
+                          <span class="meta">Authentication: <?= h(configuredDisplayValue($tool['auth_label'] ?? '')) ?></span><br>
+                        <?php endif; ?>
                         <span class="meta">Last checked: <?= h(configuredDisplayValue($tool['last_checked_at'] ?? '')) ?></span>
                       </td>
                       <td>
@@ -4220,15 +4300,21 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
           $githubConnectionLabel = !empty($githubConfiguration['verified'])
               ? 'Verified'
               : ($githubConnectionFailed ? 'Failed' : ($githubConfigured ? 'Not verified' : 'Not configured'));
+          $githubSshTransportLabel = !empty($githubConfiguration['ssh_transport_verified'])
+              ? 'Verified'
+              : ($githubConfigured ? 'Not verified' : 'Not configured');
         ?>
         <dl class="apache-summary-grid">
           <div><dt>Account / organization</dt><dd><?= h(configuredDisplayValue($githubConfigured ? (string)$githubConfiguration['account'] : '')) ?></dd></div>
           <div><dt>Authentication</dt><dd><?= $githubConfigured ? 'Configured' : 'Not configured' ?></dd></div>
           <div><dt>GitHub CLI</dt><dd><?= $githubCliInstalled ? 'Installed' : 'Not installed' ?></dd></div>
           <div><dt>Connection</dt><dd><?= h($githubConnectionLabel) ?></dd></div>
+          <div><dt>Git transport</dt><dd><?= h($githubSshTransportLabel) ?></dd></div>
           <div><dt>Last verified</dt><dd><?= h(configuredDisplayValue($githubConfiguration['last_verified_at'] ?? '')) ?></dd></div>
           <?php if ($githubConfigured): ?>
             <div><dt>Authenticated login</dt><dd><?= h(configuredDisplayValue($githubConfiguration['authenticated_login'] ?? '')) ?></dd></div>
+            <div><dt>SSH alias</dt><dd><?= h(configuredDisplayValue($githubConfiguration['ssh_alias'] ?? '')) ?></dd></div>
+            <div><dt>SSH key</dt><dd><?= h(configuredDisplayValue($githubConfiguration['ssh_public_key_fingerprint'] ?? '')) ?></dd></div>
           <?php endif; ?>
         </dl>
 
@@ -4257,7 +4343,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
                 <label for="github_token">Personal Access Token</label>
                 <input id="github_token" name="github_token" type="password" maxlength="4096" placeholder="github_pat_..." autocomplete="new-password" spellcheck="false" autocorrect="off" autocapitalize="off"<?= $githubConfigured ? '' : ' required' ?>>
                 <p class="field-help">Stored only in the server's local configuration. Leave empty to keep the current token.</p>
-                <p class="field-help">Recommended token: Classic Personal Access Token with repo scope.</p>
+                <p class="field-help">Recommended token: Classic Personal Access Token with repo and admin:public_key scopes.</p>
                 <p class="field-help"><a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer">Create GitHub Personal Access Token</a></p>
               </div>
             </div>
@@ -4328,6 +4414,11 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
               ? 'Refresh diagnostics successfully before installing Composer.'
               : (!in_array($selectedServerSudoState, ['ready', 'root'], true)
                   ? 'Passwordless sudo is required before installing Composer.'
+                  : '');
+          $selectedServerApacheInstallDisabledReason = (string)($serverManagementSelectedServer['status'] ?? '') !== 'reachable'
+              ? 'Refresh diagnostics successfully before installing Apache.'
+              : (!in_array($selectedServerSudoState, ['ready', 'root'], true)
+                  ? 'Passwordless sudo is required before installing Apache.'
                   : '');
           $projectsOnSelectedServer = array_values(array_filter($projects, static fn(array $project): bool => (string)($project['managed_server_id'] ?? '') === $selectedServerId));
           $selectedServerApache = is_array($serverManagementSelectedServer['apache'] ?? null)
@@ -4514,14 +4605,19 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
             <div><dt>Version</dt><dd data-selected-server-detail="apache_version"><?= h(configuredDisplayValue($selectedServerApache['version'] ?? '')) ?></dd></div>
             <div><dt>Binary path</dt><dd class="path-value" data-selected-server-detail="apache_path"><?= h(configuredDisplayValue($selectedServerApache['binary_path'] ?? '')) ?></dd></div>
           </dl>
-          <?php if ($selectedServerApacheKnownNotInstalled): ?>
-            <p class="meta">Apache is not installed on this Managed Server.</p>
-          <?php elseif (!$selectedServerApacheDetected): ?>
-            <p class="meta">Apache diagnostics have not been refreshed successfully for this Managed Server.</p>
-          <?php elseif (empty($selectedServerApacheSites)): ?>
-            <p class="meta">No Apache virtual host configurations detected.</p>
-          <?php else: ?>
-            <div class="table-scroll">
+          <p class="meta" data-selected-server-apache-state="not-installed"<?= $selectedServerApacheKnownNotInstalled ? '' : ' hidden' ?>>Apache is not installed on this Managed Server.</p>
+          <div class="project-actions" data-selected-server-apache-state="install-action"<?= $selectedServerApacheKnownNotInstalled ? '' : ' hidden' ?>>
+            <form method="post" action="/?tab=server-management&managed_server_id=<?= rawurlencode($selectedServerId) ?>#server-management-tools" data-managed-server-test-form="1" data-operation-target="server-management" data-server-id="<?= h($selectedServerId) ?>" data-server-name="<?= h(configuredDisplayValue($serverManagementSelectedServer['name'] ?? '')) ?>">
+              <input type="hidden" name="action" value="install_managed_server_apache">
+              <input type="hidden" name="csrf_token" value="<?= h($csrfToken) ?>">
+              <input type="hidden" name="server_id" value="<?= h($selectedServerId) ?>">
+              <button type="submit"<?= $selectedServerApacheInstallDisabledReason === '' ? ' onclick="return confirm(\'Install Apache on this managed server using apt-get?\');"' : ' disabled title="' . h($selectedServerApacheInstallDisabledReason) . '"' ?>>Install Apache</button>
+            </form>
+          </div>
+          <p class="meta" data-selected-server-apache-state="unknown"<?= !$selectedServerApacheDetected && !$selectedServerApacheKnownNotInstalled ? '' : ' hidden' ?>>Apache diagnostics have not been refreshed successfully for this Managed Server.</p>
+          <p class="meta" data-selected-server-apache-state="empty-sites"<?= $selectedServerApacheDetected && empty($selectedServerApacheSites) ? '' : ' hidden' ?>>No Apache virtual host configurations detected.</p>
+          <?php if (!empty($selectedServerApacheSites)): ?>
+            <div class="table-scroll" data-selected-server-apache-state="sites">
               <table class="settings-table compact-sites">
                 <thead>
                   <tr>
@@ -4814,6 +4910,13 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
   const serverToolElapsed = document.getElementById('serverToolOperationElapsed');
   const serverToolStage = document.getElementById('serverToolOperationStage');
   const serverToolLog = document.getElementById('serverToolLiveLog');
+  const serverToolTechnicalLogDetails = document.getElementById('serverToolTechnicalLogDetails');
+  const serverToolCodexAuthPanel = document.getElementById('serverToolCodexAuthPanel');
+  const serverToolCodexAuthUrl = document.getElementById('serverToolCodexAuthUrl');
+  const serverToolCodexAuthUrlPending = document.getElementById('serverToolCodexAuthUrlPending');
+  const serverToolCodexAuthCode = document.getElementById('serverToolCodexAuthCode');
+  const serverToolCodexAuthCodePending = document.getElementById('serverToolCodexAuthCodePending');
+  const serverToolCodexAuthState = document.getElementById('serverToolCodexAuthState');
   const serverToolForms = Array.from(document.querySelectorAll('[data-server-tool-form="1"]'));
   const formatElapsed = (seconds) => {
     const value = Math.max(0, Number(seconds) || 0);
@@ -4841,6 +4944,43 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       const nextLog = operation.log && operation.log.trim() !== '' ? operation.log : 'Waiting for operation log...';
       serverToolLog.textContent = nextLog;
       serverToolLog.scrollTop = serverToolLog.scrollHeight;
+    }
+    const isCodexAuth = operation.tool_action === 'sign_in_chatgpt';
+    const deviceAuth = operation.device_auth || {};
+    const operationFailed = operation.status === 'failed';
+    const showCodexAuth = isCodexAuth && operation.status !== 'completed';
+    if (serverToolCodexAuthPanel) serverToolCodexAuthPanel.hidden = !showCodexAuth;
+    if (serverToolTechnicalLogDetails && serverToolTechnicalLogDetails.dataset.operationId !== (operation.id || 'pending')) {
+      serverToolTechnicalLogDetails.dataset.operationId = operation.id || 'pending';
+      serverToolTechnicalLogDetails.open = !isCodexAuth;
+    }
+    if (showCodexAuth) {
+      if (serverToolCodexAuthUrl) {
+        const url = deviceAuth.url || '';
+        serverToolCodexAuthUrl.hidden = url === '';
+        if (serverToolCodexAuthUrlPending) serverToolCodexAuthUrlPending.hidden = url !== '';
+        if (url !== '') {
+          serverToolCodexAuthUrl.textContent = url;
+          serverToolCodexAuthUrl.href = url;
+        } else {
+          serverToolCodexAuthUrl.removeAttribute('href');
+        }
+      }
+      if (serverToolCodexAuthCode) {
+        const code = deviceAuth.code || '';
+        serverToolCodexAuthCode.hidden = code === '';
+        if (serverToolCodexAuthCodePending) serverToolCodexAuthCodePending.hidden = code !== '';
+        serverToolCodexAuthCode.textContent = code;
+        serverToolCodexAuthCode.dataset.copyText = code;
+      }
+      if (operationFailed) {
+        if (serverToolCodexAuthUrlPending) serverToolCodexAuthUrlPending.textContent = deviceAuth.url ? '' : 'Authorization URL was not captured.';
+        if (serverToolCodexAuthCodePending) serverToolCodexAuthCodePending.textContent = deviceAuth.code ? '' : 'Device code was not captured.';
+      } else {
+        if (serverToolCodexAuthUrlPending) serverToolCodexAuthUrlPending.textContent = 'Waiting for authorization URL...';
+        if (serverToolCodexAuthCodePending) serverToolCodexAuthCodePending.textContent = 'Waiting for device code...';
+      }
+      if (serverToolCodexAuthState) serverToolCodexAuthState.textContent = operationFailed ? (deviceAuth.message || operation.message || 'ChatGPT sign-in failed.') : (deviceAuth.message || 'Waiting for authorization...');
     }
   };
   const pollServerToolOperation = (operationId, toolId) => {
@@ -4904,6 +5044,18 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       }
     });
   });
+  if (serverToolCodexAuthCode) {
+    serverToolCodexAuthCode.addEventListener('click', async () => {
+      const code = serverToolCodexAuthCode.dataset.copyText || '';
+      if (!code) return;
+      try {
+        await navigator.clipboard.writeText(code);
+        if (serverToolCodexAuthState) serverToolCodexAuthState.textContent = 'Code copied. Complete authorization in ChatGPT.';
+      } catch (error) {
+        if (serverToolCodexAuthState) serverToolCodexAuthState.textContent = 'Unable to copy code.';
+      }
+    });
+  }
 
   const managedServerPanel = document.getElementById('managedServerOperationPanel');
   const managedServerTitle = document.getElementById('managedServerOperationTitle');
@@ -4952,12 +5104,28 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
 	      form.querySelectorAll('button').forEach((button) => { button.disabled = disabled; });
 	    });
 	  };
-	  const setServerStatusPill = (element, reachable) => {
+  const setServerStatusPill = (element, reachable) => {
 	    if (!element) return;
 	    element.textContent = reachable ? 'Reachable' : 'Unreachable';
 	    element.classList.remove('healthy', 'warning', 'error');
 	    element.classList.add(reachable ? 'healthy' : 'error');
 	  };
+  const managedServerOperationActionFromForm = (form) => {
+    const action = form.querySelector('input[name="action"]')?.value || '';
+    if (action === 'install_managed_server_composer') return 'install_composer';
+    if (action === 'install_managed_server_apache') return 'install_apache';
+    return 'connection_test';
+  };
+  const managedServerOperationTitle = (action) => {
+    if (action === 'install_composer') return 'Install Composer';
+    if (action === 'install_apache') return 'Install Apache';
+    return 'Refresh Diagnostics';
+  };
+  const managedServerOperationStartMessage = (action) => {
+    if (action === 'install_composer') return 'Starting Composer installation.';
+    if (action === 'install_apache') return 'Starting Apache installation.';
+    return 'Starting SSH connection test.';
+  };
 	  const updateManagedServerCard = (operation) => {
 	    const serverId = operation.server_id || '';
 	    const card = Array.from(document.querySelectorAll('[data-server-card]')).find((candidate) => candidate.dataset.serverId === serverId);
@@ -5053,6 +5221,17 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       setDetail('apache_enabled', enabled);
       setDetail('apache_version', apache.version || '');
       setDetail('apache_path', apache.binary_path || '');
+      const apacheSites = Array.isArray(result.apache_sites) ? result.apache_sites : [];
+      const showApacheState = (stateName, visible) => {
+        document.querySelectorAll(`[data-selected-server-apache-state="${stateName}"]`).forEach((node) => {
+          node.hidden = !visible;
+        });
+      };
+      showApacheState('not-installed', !detected && completed);
+      showApacheState('install-action', !detected && completed);
+      showApacheState('unknown', !detected && !completed);
+      showApacheState('empty-sites', detected && apacheSites.length === 0);
+      showApacheState('sites', detected && apacheSites.length > 0);
     }
   };
 	  const showManagedServerOperation = (operation, target = 'servers') => {
@@ -5061,7 +5240,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     const result = operation.result || {};
     elements.panel.hidden = false;
     elements.panel.classList.toggle('failed', operation.status === 'failed');
-    if (elements.title) elements.title.textContent = operation.operation_action === 'install_composer' ? 'Install Composer' : 'Refresh Diagnostics';
+    if (elements.title) elements.title.textContent = managedServerOperationTitle(operation.operation_action || 'connection_test');
     if (elements.server) elements.server.textContent = operation.server_name || operation.server_id || '-';
     if (elements.status) elements.status.textContent = String(operation.status || 'running').replace(/^\w/, (letter) => letter.toUpperCase());
     if (elements.stage) elements.stage.textContent = operation.stage || 'Starting';
@@ -5122,6 +5301,7 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
       event.preventDefault();
       const serverId = form.dataset.serverId || '';
       const target = form.dataset.operationTarget || 'servers';
+      const operationAction = managedServerOperationActionFromForm(form);
       setManagedServerButtons(serverId, true);
       showManagedServerOperation({
         server_id: serverId,
@@ -5129,8 +5309,8 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
         status: 'running',
         stage: 'Starting',
         elapsed_seconds: 0,
-        operation_action: (form.querySelector('input[name="action"]')?.value || '') === 'install_managed_server_composer' ? 'install_composer' : 'connection_test',
-        message: (form.querySelector('input[name="action"]')?.value || '') === 'install_managed_server_composer' ? 'Starting Composer installation.' : 'Starting SSH connection test.',
+        operation_action: operationAction,
+        message: managedServerOperationStartMessage(operationAction),
         log: '',
       }, target);
       try {
@@ -5614,6 +5794,25 @@ if ($requestPath === '/' && in_array($requestedTab, ['dashboard', 'projects', 's
     }
     runCodex.disabled = true;
     codexStatus.textContent = 'Queued';
+    const setCodexResultField = (field, value) => {
+      document.querySelectorAll(`[data-codex-result-field="${field}"]`).forEach((node) => {
+        node.textContent = value;
+        if (field === 'commit') node.setAttribute('title', '');
+      });
+    };
+    setCodexResultField('status', 'Queued');
+    setCodexResultField('commit', 'Not configured');
+    setCodexResultField('files_changed', '0');
+    setCodexResultField('validation', 'Pending');
+    setCodexResultField('duration', 'Not configured');
+    document.querySelectorAll('[data-codex-activity-status]').forEach((node) => {
+      node.textContent = 'Queued: Codex run';
+    });
+    document.querySelectorAll('[data-codex-workflow-status]').forEach((node) => {
+      node.textContent = 'Queued';
+      node.classList.remove('done');
+      node.classList.add('pending');
+    });
     const formData = new FormData();
     formData.set('action', 'run-codex');
     formData.set('csrf_token', csrfToken);

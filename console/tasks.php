@@ -950,8 +950,28 @@ function startCodexRun(array $contexts, string $projectId, string $runsDir, stri
     $promptPath = runFile($runsDir, $taskId, 'prompt', $source);
     $statusPath = runFile($runsDir, $taskId, 'status', $source);
     $logPath = runFile($runsDir, $taskId, 'log', $source);
+    $resultPath = runFile($runsDir, $taskId, 'result.json', $source);
+    if ($status === 'failed') {
+        $attemptSuffix = 'failed-' . gmdate('Ymd-His');
+        if (is_file($logPath)) {
+            @copy($logPath, runFile($runsDir, $taskId, $attemptSuffix . '.log', $source));
+        }
+        if (is_file($resultPath)) {
+            @copy($resultPath, runFile($runsDir, $taskId, $attemptSuffix . '.result.json', $source));
+        }
+    }
     file_put_contents($promptPath, codexPromptForTask($contexts, $projectId, $taskId, $source));
     file_put_contents($statusPath, 'queued');
+    file_put_contents($resultPath, json_encode([
+        'task_id' => $taskId,
+        'status' => 'Queued',
+        'commit' => '',
+        'files_changed' => 0,
+        'validation' => 'Pending',
+        'duration_seconds' => 0,
+        'summary' => $status === 'failed' ? 'Codex retry queued.' : 'Codex run queued.',
+        'started_at' => date('c'),
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
     file_put_contents($logPath, '[' . date('c') . "] Queued Codex run for {$taskId}.\n");
 
     $worker = __DIR__ . '/run-codex.php';
@@ -1040,17 +1060,12 @@ function codexCliAuthenticated(): bool
         }
     }
 
-    $codex = serverToolsFindExecutable('codex', serverToolsDefaultPath());
-    if ($codex === '') {
+    $codex = function_exists('serverToolsResolveCodexCommand') ? serverToolsResolveCodexCommand() : serverToolsFindExecutable('codex', serverToolsDefaultPath());
+    if ($codex === '' || !function_exists('serverToolsCodexAuthStatus')) {
         return false;
     }
-    $doctor = processRunCommand([$codex, 'doctor', '--json'], [
-        'cwd' => devConsoleRepositoryRoot(),
-        'inherit_env' => true,
-        'timeout' => 8,
-    ]);
-    $decoded = json_decode((string)$doctor['stdout'], true);
-    $authenticated = is_array($decoded) && (string)($decoded['checks']['auth.credentials']['status'] ?? '') === 'ok';
+    $status = serverToolsCodexAuthStatus(null, $codex);
+    $authenticated = (string)($status['state'] ?? '') === 'authenticated';
     if (!is_dir(DEPLOY_STATE_DIR)) @mkdir(DEPLOY_STATE_DIR, 0750, true);
     @file_put_contents($cachePath, json_encode(['authenticated' => $authenticated, 'checked_at' => date('c')], JSON_UNESCAPED_SLASHES), LOCK_EX);
 

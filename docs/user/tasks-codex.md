@@ -53,6 +53,12 @@ Attachments are committed with the task. Preview and Production deployments excl
 
 Run Codex executes the selected task inside the Project repository.
 
+Codex CLI is installed from Settings -> Dev Console Host Tools. If the CLI is
+installed but not authenticated, use **Sign in with ChatGPT**. Dev Console runs
+the official `codex login --device-auth` flow as the Dev Console service user
+and shows the URL/code returned by the CLI. Dev Console does not implement its
+own OpenAI OAuth flow and does not store or display Codex credential files.
+
 The worker:
 
 1. validates the Project repository and task metadata

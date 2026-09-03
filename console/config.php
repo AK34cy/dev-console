@@ -33,6 +33,10 @@ function devConsoleDefaultGithubConfiguration(): array
         'verified' => false,
         'last_verified_at' => null,
         'authenticated_login' => null,
+        'ssh_transport_verified' => false,
+        'ssh_transport_verified_at' => null,
+        'ssh_alias' => null,
+        'ssh_public_key_fingerprint' => null,
     ];
 }
 
@@ -377,7 +381,8 @@ function devConsoleNormalizeGithubConfiguration(array $configuration): array
         $normalized['default_visibility'] = 'private';
     }
     $normalized['verified'] = !empty($configuration['verified']);
-    foreach (['configured_at', 'last_verified_at', 'authenticated_login'] as $field) {
+    $normalized['ssh_transport_verified'] = !empty($configuration['ssh_transport_verified']);
+    foreach (['configured_at', 'last_verified_at', 'authenticated_login', 'ssh_transport_verified_at', 'ssh_alias', 'ssh_public_key_fingerprint'] as $field) {
         if (array_key_exists($field, $configuration)) {
             $value = $configuration[$field];
             $normalized[$field] = is_scalar($value) && trim((string)$value) !== '' ? trim((string)$value) : null;

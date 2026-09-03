@@ -8,12 +8,16 @@ SOURCE_SERVICE_FILE="$REPOSITORY_ROOT/systemd/$SERVICE_NAME"
 TARGET_SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
 ENVIRONMENT_FILE="/etc/iovon-dev-console.env"
 PROJECT_REPOSITORY_ROOT="/var/www/git"
+CODEX_APPARMOR_HELPER="$REPOSITORY_ROOT/bin/configure-codex-apparmor"
 SELECTED_USER=""
 SELECTED_GROUP=""
 PHP_BIN=""
+TOKEN_CREATED=0
+GENERATED_TOKEN=""
 
 MANDATORY_PACKAGES=(
   ca-certificates
+  curl
   git
   openssh-client
   php-cli
@@ -167,9 +171,9 @@ ensure_environment_file() {
   else
     log "Creating environment file: $ENVIRONMENT_FILE"
     umask 077
-    token="$(php -r 'echo bin2hex(random_bytes(32));')"
-    printf 'IOVON_DEV_CONSOLE_TOKEN=%s\n' "$token" > "$ENVIRONMENT_FILE"
-    unset token
+    GENERATED_TOKEN="$(php -r 'echo bin2hex(random_bytes(32));')"
+    printf 'IOVON_DEV_CONSOLE_TOKEN=%s\n' "$GENERATED_TOKEN" > "$ENVIRONMENT_FILE"
+    TOKEN_CREATED=1
   fi
 
   chown root:root "$ENVIRONMENT_FILE"
@@ -209,6 +213,16 @@ verify_project_readable_by_user() {
 
   [[ -z "$unreadable_path" ]] || fail "$SELECTED_USER cannot read or traverse project path: $unreadable_path"
   log "$SELECTED_USER can read the checkout."
+}
+
+configure_codex_apparmor() {
+  if [[ ! -x "$CODEX_APPARMOR_HELPER" ]]; then
+    log "Codex AppArmor helper is not present; skipping Codex sandbox profile setup."
+    return
+  fi
+
+  log "Checking Codex AppArmor sandbox support..."
+  "$CODEX_APPARMOR_HELPER" --user "$SELECTED_USER"
 }
 
 install_service_file() {
@@ -256,26 +270,55 @@ verify_service_active() {
 }
 
 verify_health_endpoint() {
+  local timeout_seconds=15
+  local deadline=$((SECONDS + timeout_seconds))
+
   log "Checking local health endpoint..."
-  php -r '
-    $context = stream_context_create(["http" => ["timeout" => 5, "ignore_errors" => true]]);
+  while ((SECONDS <= deadline)); do
+    if php -r '
+    $context = stream_context_create(["http" => ["timeout" => 1, "ignore_errors" => true]]);
     $body = @file_get_contents("http://127.0.0.1:8090/health", false, $context);
     if ($body === false) {
-        fwrite(STDERR, "Could not connect to http://127.0.0.1:8090/health\n");
         exit(1);
     }
     $status = $http_response_header[0] ?? "";
     if (strpos($status, "200") === false) {
-        fwrite(STDERR, "Unexpected health response: " . $status . "\n");
         exit(1);
     }
     $json = json_decode($body, true);
     if (!is_array($json) || ($json["status"] ?? "") !== "ok") {
-        fwrite(STDERR, "Health endpoint did not return status=ok\n");
         exit(1);
     }
-  ' || fail "Health check failed."
-  log "Health endpoint returned OK."
+  '; then
+      log "Health endpoint returned OK."
+      return
+    fi
+
+    if ((SECONDS < deadline)); then
+      sleep 1
+    fi
+  done
+
+  systemctl status "$SERVICE_NAME" --no-pager >&2 || true
+  fail "Health check failed after ${timeout_seconds} seconds. Check logs with: journalctl -u $SERVICE_NAME --no-pager"
+}
+
+print_completion_summary() {
+  log "Installation completed successfully."
+  printf '\nDev Console service: %s\n' "$SERVICE_NAME"
+  printf 'Local URL: http://127.0.0.1:8090\n'
+  printf 'Environment file: %s\n' "$ENVIRONMENT_FILE"
+  printf 'Service user: %s:%s\n' "$SELECTED_USER" "$SELECTED_GROUP"
+
+  if [[ "$TOKEN_CREATED" -eq 1 ]]; then
+    printf '\nConsole authentication token:\n%s\n' "$GENERATED_TOKEN"
+    printf '\nThis token was shown once because it was newly generated.\n'
+  else
+    printf '\nExisting Console authentication token was preserved and was not printed.\n'
+  fi
+
+  printf 'Display the token again with:\n'
+  printf "  sudo grep '^IOVON_DEV_CONSOLE_TOKEN=' %s\n" "$ENVIRONMENT_FILE"
 }
 
 main() {
@@ -290,11 +333,12 @@ main() {
   ensure_environment_file
   ensure_runtime_directories
   verify_project_readable_by_user
+  configure_codex_apparmor
   install_service_file
   reload_and_start_service
   verify_service_active
   verify_health_endpoint
-  log "Installation completed successfully. Open http://127.0.0.1:8090 through a private/local connection."
+  print_completion_summary
 }
 
 main "$@"

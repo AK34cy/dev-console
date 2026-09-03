@@ -885,20 +885,32 @@ function managedServerStartComposerInstall(array $servers, string $serverId): ar
     return managedServerStartOperation($servers, $serverId, 'install_composer');
 }
 
+function managedServerStartApacheInstall(array $servers, string $serverId): array
+{
+    return managedServerStartOperation($servers, $serverId, 'install_apache');
+}
+
 function managedServerStartOperation(array $servers, string $serverId, string $operationAction): array
 {
     $server = managedServersFind($servers, $serverId);
     if ($server === null) {
         throw new RuntimeException('Managed server not found.');
     }
-    if (!in_array($operationAction, ['connection_test', 'install_composer'], true)) {
+    if (!in_array($operationAction, ['connection_test', 'install_composer', 'install_apache'], true)) {
         throw new RuntimeException('Unsupported managed server operation.');
     }
     if ($operationAction === 'install_composer' && (string)($server['status'] ?? '') !== 'reachable') {
         throw new RuntimeException('Test the managed server connection successfully before installing Composer.');
     }
+    if ($operationAction === 'install_apache' && (string)($server['status'] ?? '') !== 'reachable') {
+        throw new RuntimeException('Test the managed server connection successfully before installing Apache.');
+    }
     $operationId = 'mso_' . bin2hex(random_bytes(16));
-    $message = $operationAction === 'install_composer' ? 'Installing Composer.' : 'Testing SSH connection.';
+    $message = match ($operationAction) {
+        'install_composer' => 'Installing Composer.',
+        'install_apache' => 'Installing Apache.',
+        default => 'Testing SSH connection.',
+    };
     $state = [
         'id' => $operationId,
         'operation_action' => $operationAction,
@@ -966,6 +978,10 @@ function managedServerRunOperationById(string $operationId): void
     $operationAction = (string)($state['operation_action'] ?? 'connection_test');
     if ($operationAction === 'install_composer') {
         managedServerRunComposerInstall($operationId, $server);
+        return;
+    }
+    if ($operationAction === 'install_apache') {
+        managedServerRunApacheInstall($operationId, $server);
         return;
     }
     if ($operationAction === 'connection_test') {
@@ -1325,6 +1341,43 @@ function managedServerParseComposerInstallCheck(string $stdout): array
     return $result;
 }
 
+function managedServerApacheInstallCheckCommand(): string
+{
+    return 'printf "__DEV_CONSOLE_SERVER_CHECK__\n"; '
+        . 'if [ -r /etc/os-release ]; then . /etc/os-release; printf "__DEV_CONSOLE_OS_ID__=%s\n" "${ID:-}"; printf "__DEV_CONSOLE_OS_LIKE__=%s\n" "${ID_LIKE:-}"; fi; '
+        . 'if [ "$(id -u)" = 0 ]; then printf "__DEV_CONSOLE_SUDO__=root\n"; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then printf "__DEV_CONSOLE_SUDO__=ready\n"; else printf "__DEV_CONSOLE_SUDO__=setup_required\n"; fi; '
+        . 'apache_path="$(command -v apache2 2>/dev/null || command -v httpd 2>/dev/null || true)"; '
+        . 'if [ -n "$apache_path" ]; then printf "__DEV_CONSOLE_APACHE_PATH__=%s\n" "$apache_path"; apache_version="$("$apache_path" -v 2>/dev/null | sed -n "s/^Server version:[[:space:]]*//p" | head -n 1 || true)"; printf "__DEV_CONSOLE_APACHE_VERSION__=%s\n" "$apache_version"; fi';
+}
+
+function managedServerParseApacheInstallCheck(string $stdout): array
+{
+    $result = [
+        'os_id' => '',
+        'os_like' => '',
+        'passwordless_sudo' => 'unknown',
+        'apache_path' => '',
+        'apache_version' => '',
+    ];
+    foreach (preg_split('/\R/', $stdout) ?: [] as $line) {
+        $line = trim($line);
+        foreach ([
+            '__DEV_CONSOLE_OS_ID__=' => 'os_id',
+            '__DEV_CONSOLE_OS_LIKE__=' => 'os_like',
+            '__DEV_CONSOLE_SUDO__=' => 'passwordless_sudo',
+            '__DEV_CONSOLE_APACHE_PATH__=' => 'apache_path',
+            '__DEV_CONSOLE_APACHE_VERSION__=' => 'apache_version',
+        ] as $prefix => $field) {
+            if (str_starts_with($line, $prefix)) {
+                $result[$field] = substr($line, strlen($prefix));
+                continue 2;
+            }
+        }
+    }
+
+    return $result;
+}
+
 function managedServerRemotePrivilegedPrefix(array $server): string
 {
     return (string)($server['user'] ?? '') === 'root' ? '' : 'sudo -n ';
@@ -1342,6 +1395,29 @@ function managedServerComposerInstallCommand(array $server): string
 function managedServerComposerVerifyCommand(): string
 {
     return 'command -v composer && composer --version --no-interaction';
+}
+
+function managedServerApacheInstallCommand(array $server): string
+{
+    if ((string)($server['user'] ?? '') === 'root') {
+        return 'apt-get update && apt-get install -y apache2';
+    }
+
+    return 'sudo -n apt-get update && sudo -n apt-get install -y apache2';
+}
+
+function managedServerApacheVerifyCommand(): string
+{
+    return 'apache_path="$(command -v apache2 2>/dev/null || true)"; '
+        . 'test -n "$apache_path" && printf "%s\n" "$apache_path" && command -v apache2ctl >/dev/null 2>&1 && apache2ctl configtest';
+}
+
+function managedServerApacheEnableStartCommand(array $server): string
+{
+    $prefix = managedServerRemotePrivilegedPrefix($server);
+    return 'if command -v systemctl >/dev/null 2>&1; then '
+        . $prefix . 'systemctl enable apache2 && ' . $prefix . 'systemctl start apache2; '
+        . 'else printf "systemctl not available; skipping enable/start.\n"; fi';
 }
 
 function managedServerRefreshDiagnosticsAfterOperation(string $operationId, array $server, float $started): array
@@ -1493,6 +1569,122 @@ function managedServerRunComposerInstall(string $operationId, array $server): vo
     $state['elapsed_seconds'] = max(0, (int)round(microtime(true) - $started));
     managedServerOperationWrite($state);
     managedServerOperationAppendLog($operationId, '[' . date('c') . '] Composer installed.');
+}
+
+function managedServerRunApacheInstall(string $operationId, array $server): void
+{
+    $started = microtime(true);
+    $state = managedServerOperationRead($operationId);
+    $state['stage'] = 'Checking Server';
+    $state['message'] = 'Checking SSH, sudo, Ubuntu and Apache state.';
+    managedServerOperationWrite($state);
+
+    $ssh = managedServersSshExecutable();
+    if ($ssh === '') {
+        throw new RuntimeException('SSH executable missing.');
+    }
+    if (!is_file((string)$server['key']) || !is_readable((string)$server['key'])) {
+        throw new RuntimeException('Key file missing.');
+    }
+    if (!managedServersKeyPermissionsValid((string)$server['key'])) {
+        throw new RuntimeException('Invalid key permissions.');
+    }
+
+    $check = managedServerOperationRunRemoteCommand($operationId, $server, managedServerApacheInstallCheckCommand(), 30);
+    if ($check['exit_code'] !== 0) {
+        throw new RuntimeException(managedServerConnectionResultMessage((string)$check['output']));
+    }
+    $parsed = managedServerParseApacheInstallCheck((string)$check['stdout']);
+    $sudoState = (string)$parsed['passwordless_sudo'];
+    if (!in_array($sudoState, ['root', 'ready'], true)) {
+        throw new RuntimeException('Passwordless sudo is not configured for this deployment user. Run the Managed Server setup command again as root.');
+    }
+    $osId = strtolower((string)$parsed['os_id']);
+    if ($osId !== 'ubuntu') {
+        throw new RuntimeException('Apache installation is supported only for Ubuntu managed servers. Install Apache manually for this server, then refresh diagnostics.');
+    }
+    if ((string)$parsed['apache_path'] !== '') {
+        $resultData = [
+            'success' => true,
+            'message' => 'Apache is already installed.',
+            'apache' => array_merge(managedServersEmptyServer()['apache'], [
+                'installed' => true,
+                'version' => (string)$parsed['apache_version'],
+                'binary_path' => (string)$parsed['apache_path'],
+            ]),
+            'output' => managedServerOperationLog($operationId),
+        ];
+        managedServersUpdateRuntimeDiagnostics((string)$server['id'], $resultData);
+        $diagnosticData = managedServerRefreshDiagnosticsAfterOperation($operationId, $server, $started);
+        $resultData = array_merge($resultData, $diagnosticData, [
+            'success' => true,
+            'message' => 'Apache is already installed.',
+            'output' => managedServerOperationLog($operationId),
+        ]);
+        $state['finished_at'] = date('c');
+        $state['status'] = 'completed';
+        $state['stage'] = 'Completed';
+        $state['message'] = 'Apache is already installed.';
+        $state['result'] = $resultData;
+        $state['elapsed_seconds'] = max(0, (int)round(microtime(true) - $started));
+        managedServerOperationWrite($state);
+        managedServerOperationAppendLog($operationId, '[' . date('c') . '] Apache is already installed.');
+        return;
+    }
+
+    $state['stage'] = 'Installing Apache';
+    $state['message'] = 'Installing Apache with apt-get.';
+    managedServerOperationWrite($state);
+    $install = managedServerOperationRunRemoteCommand($operationId, $server, managedServerApacheInstallCommand($server), 600);
+    if ($install['exit_code'] !== 0) {
+        throw new RuntimeException('Apache installation failed.');
+    }
+
+    $state = managedServerOperationRead($operationId);
+    $state['stage'] = 'Verifying Apache';
+    $state['message'] = 'Verifying Apache and Apache configuration.';
+    managedServerOperationWrite($state);
+    $verify = managedServerOperationRunRemoteCommand($operationId, $server, managedServerApacheVerifyCommand(), 30);
+    if ($verify['exit_code'] !== 0 || trim((string)$verify['stdout']) === '') {
+        throw new RuntimeException('Apache installation completed but apache2ctl configtest failed.');
+    }
+    $verifyLines = explode("\n", trim((string)$verify['stdout']));
+    $apachePath = trim((string)($verifyLines[0] ?? ''));
+
+    $state = managedServerOperationRead($operationId);
+    $state['stage'] = 'Starting Apache';
+    $state['message'] = 'Enabling and starting Apache.';
+    managedServerOperationWrite($state);
+    $start = managedServerOperationRunRemoteCommand($operationId, $server, managedServerApacheEnableStartCommand($server), 60);
+    if ($start['exit_code'] !== 0) {
+        throw new RuntimeException('Apache was installed, but enable/start failed.');
+    }
+
+    $resultData = [
+        'success' => true,
+        'message' => 'Apache installed.',
+        'apache' => array_merge(managedServersEmptyServer()['apache'], [
+            'installed' => true,
+            'binary_path' => $apachePath,
+        ]),
+        'output' => managedServerOperationLog($operationId),
+    ];
+    managedServersUpdateRuntimeDiagnostics((string)$server['id'], $resultData);
+    $diagnosticData = managedServerRefreshDiagnosticsAfterOperation($operationId, $server, $started);
+    $resultData = array_merge($resultData, $diagnosticData, [
+        'success' => true,
+        'message' => 'Apache installed.',
+        'output' => managedServerOperationLog($operationId),
+    ]);
+    $state = managedServerOperationRead($operationId);
+    $state['finished_at'] = date('c');
+    $state['status'] = 'completed';
+    $state['stage'] = 'Completed';
+    $state['message'] = 'Apache installed.';
+    $state['result'] = $resultData;
+    $state['elapsed_seconds'] = max(0, (int)round(microtime(true) - $started));
+    managedServerOperationWrite($state);
+    managedServerOperationAppendLog($operationId, '[' . date('c') . '] Apache installed.');
 }
 
 function managedServersUpdateRuntimeDiagnostics(string $serverId, array $result): void

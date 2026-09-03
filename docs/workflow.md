@@ -6,7 +6,7 @@ This document describes the workflows implemented in the current source code.
 
 - Settings: Dev Console configuration, GitHub configuration, local Dev Console host environment, runtime limits, and required Dev Console host tool diagnostics/actions for Git, PHP, and Codex CLI.
 - Servers: Managed Server registration, SSH onboarding, Add/Edit/Remove, Test Connection, reachability, and connection details.
-- Server Management: selected Managed Server overview, remote runtime/development tool inventory for PHP, Composer, Node.js, and npm, remote Apache diagnostics, operational Composer installation, and projects assigned to that server. It does not show the local Dev Console host as the managed server.
+- Server Management: selected Managed Server overview, remote runtime/development tool inventory for PHP, Composer, Node.js, and npm, remote Apache diagnostics, operational Composer/Apache installation, and projects assigned to that server. It does not show the local Dev Console host as the managed server.
 - Projects: Project lifecycle, repository state, infrastructure setup, and deployment configuration.
 
 ## Create Managed Server
@@ -1209,21 +1209,27 @@ Prerequisites:
 
 - Dev Console service has permission to run package manager commands.
 - Ubuntu/Debian-compatible package environment for supported installs.
-- Administrator-managed Codex CLI updates require `sudo -n true` for the Dev Console service user. Dev Console fails before running npm if non-interactive sudo is unavailable.
+- Codex CLI is installed with the official OpenAI standalone installer.
 
 User actions:
 
 1. Open Settings.
-2. Press Install, Update, Reinstall, or Refresh for supported tools.
+2. Press Install, Update, Reinstall, Sign in with ChatGPT, or Refresh for supported tools.
 
 Internal operations:
 
 - Starts asynchronous server tool operation.
 - Runs predefined commands only.
-- Updates an administrator-managed/system-wide Codex CLI with `sudo -n npm install -g @openai/codex` when the existing global install path requires elevated privileges.
-- Updates writable user-managed Codex CLI installs with `npm install -g @openai/codex`.
+- Displays the last-known Dev Console host diagnostics on Settings load when a previous successful refresh exists.
+- Refresh Diagnostics performs a fresh check and replaces the persisted last-known host diagnostic state.
+- Downloads the official OpenAI Codex installer from `https://chatgpt.com/codex/install.sh`.
+- Runs the installer non-interactively for the Dev Console service user.
+- Installs Codex under the service user's standalone Codex location.
+- Runs `codex login --device-auth` for ChatGPT sign-in when requested.
+- Shows the URL/code returned by the official Codex CLI sign-in flow in the operation log.
 - Refreshes diagnostics after success.
 - Verifies the installed Codex CLI version after a successful update.
+- Verifies Codex authentication with the CLI after ChatGPT sign-in.
 - Writes operation history and logs.
 
 Files modified:
@@ -1246,7 +1252,11 @@ Possible failures:
 - Permission failure.
 - Package manager failure.
 - Composer checksum failure.
+- Codex CLI missing.
+- ChatGPT sign-in timeout.
+- Codex authentication status could not be verified.
 
 Recovery:
 
 - Fix server/package environment and rerun.
+- For Codex sign-in, rerun **Sign in with ChatGPT** and complete the official device-auth flow before the timeout.

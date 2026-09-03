@@ -21,6 +21,13 @@ $protectedTasksSnapshot = null;
 
 function resolveCodexCommand(): string
 {
+    if (function_exists('serverToolsResolveCodexCommand')) {
+        $path = serverToolsResolveCodexCommand();
+        if ($path !== '') {
+            return $path;
+        }
+    }
+
     if (function_exists('serverToolsFindExecutable') && function_exists('serverToolsDefaultPath')) {
         $path = serverToolsFindExecutable('codex', serverToolsDefaultPath());
         if ($path !== '') {
@@ -169,9 +176,19 @@ function assertProjectRepository(?array $project, string $repoRoot, string $proj
 
 function assertCodexAuthenticated(string $codex, string $repoRoot): void
 {
+    if (function_exists('serverToolsCodexAuthStatus')) {
+        $status = serverToolsCodexAuthStatus(null, $codex);
+        if ((string)($status['state'] ?? '') !== 'authenticated') {
+            throw new RuntimeException('Codex CLI is not authenticated for the Dev Console service user.');
+        }
+
+        return;
+    }
+
     $doctor = processRunCommand([$codex, 'doctor', '--json'], [
         'cwd' => $repoRoot,
-        'inherit_env' => true,
+        'env' => function_exists('serverToolsCodexEnvironment') ? serverToolsCodexEnvironment() : [],
+        'inherit_env' => !function_exists('serverToolsCodexEnvironment'),
         'timeout' => 20,
     ]);
     if ($doctor['exit_code'] !== 0 && trim((string)$doctor['stdout']) === '') {

@@ -71,5 +71,6 @@ Server Management provides explicit operational actions for the selected server:
 
 - Refresh Diagnostics
 - Install Composer when Composer is missing and the existing safety prerequisites are met
+- Install Apache on supported Ubuntu Managed Servers when Apache is missing and the existing safety prerequisites are met
 
 It does not manage the local Dev Console host. Dev Console host prerequisites for Git, PHP, Codex CLI, and runtime limits are shown in Settings. Web-server and Apache operations belong to Server Management for the selected Managed Server.

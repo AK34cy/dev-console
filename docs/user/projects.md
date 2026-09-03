@@ -53,6 +53,10 @@ Retry Setup appears after setup fails. It runs the same setup operation again af
 
 Update Infrastructure appears when infrastructure-affecting Project settings changed after setup. It runs the same setup operation against the current Project configuration.
 
+## Local DNS Testing
+
+When Project DNS is not configured yet, Dev Console shows hosts-file guidance based on the assigned Managed Server address. If the Managed Server is configured with a non-loopback IP address, the suggested hosts-file line uses that IP for the Production and Preview domains. If the server is configured as `localhost`, `127.x.x.x`, `::1`, or a hostname, Dev Console does not guess the browser client's network path; use the IP address that the browser/client can use to reach the Managed Server.
+
 ## Remove from Console
 
 Remove from Console removes only the Project registration from Dev Console.

@@ -81,11 +81,12 @@ GitHub CLI is used for:
 
 - connection testing
 - account/organization verification
+- Dev Console GitHub SSH public-key registration
 - repository lookup
 - private repository creation
 - optional exact repository deletion
 
-Normal Project Git repository remotes currently use the configured account-level SSH alias. Dev Console also contains an askpass helper path for authenticated Git commands using token environment variables, but this does not create per-Project credentials.
+Normal Project Git repository remotes currently use the configured account-level SSH alias `github.com-dev-console-account`. Dev Console maintains one service-user SSH key for this alias and preserves unrelated SSH configuration. Dev Console also contains an askpass helper path for authenticated Git commands using token environment variables, but this does not create per-Project credentials.
 
 ## SSH Authentication
 
@@ -159,6 +160,38 @@ The setup command validates sudoers syntax with `visudo`.
 Connection tests check whether `sudo -n true` succeeds for non-root users. If it fails, Dev Console records the server as reachable but reports that passwordless sudo is not configured for the deployment user.
 
 Project setup and deletion require privileged operations for Apache and `/var/www/projects`. Those operations fail unless the deployment user has passwordless sudo or the SSH user is root.
+
+## Codex AppArmor Sandbox
+
+Ubuntu 24.04 can keep `kernel.apparmor_restrict_unprivileged_userns=1`, which
+blocks unconfined processes from creating unprivileged user namespaces. Codex's
+normal workspace sandbox uses its bundled Bubblewrap binary, so Dev Console
+installs a narrow AppArmor profile for that bundled executable instead of
+disabling the global restriction.
+
+The managed profile is:
+
+```text
+/etc/apparmor.d/iovon-dev-console-codex-bwrap
+```
+
+It matches only the Dev Console service user's standalone Codex release tree:
+
+```text
+<service-home>/.codex/packages/standalone/releases/*/codex-resources/bwrap
+```
+
+The profile uses Ubuntu's `flags=(unconfined)` plus `userns,` pattern for
+applications that need user namespaces. Dev Console does not grant user
+namespace creation globally, does not disable AppArmor, and does not persist
+`kernel.apparmor_restrict_unprivileged_userns=0`.
+
+Useful verification commands:
+
+```sh
+sysctl kernel.apparmor_restrict_unprivileged_userns
+sudo apparmor_parser -Q -T /etc/apparmor.d/iovon-dev-console-codex-bwrap
+```
 
 ## Apache Safety
 

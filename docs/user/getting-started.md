@@ -5,7 +5,7 @@ Dev Console is an internal tool for managing Projects, task execution with Codex
 For a fresh Dev Console host, install from a Git checkout:
 
 ```sh
-git clone <repo> /var/www/dev-console
+sudo git clone <repo> /var/www/dev-console
 cd /var/www/dev-console
 sudo ./install.sh
 ```
@@ -35,11 +35,17 @@ The normal v1 workflow is:
 - A Linux server reachable over SSH.
 - A deployment SSH user on that server.
 - The Dev Console Server Key generated in the Servers page.
-- GitHub configured in Settings.
+- GitHub configured in Settings with a token that can manage repositories and SSH public keys.
 - GitHub CLI installed on the Dev Console host.
-- Codex CLI installed and authenticated before running Codex tasks.
+- Codex CLI installed and signed in with ChatGPT before running Codex tasks.
 
 Managed Servers do not need Git for Dev Console operation. Dev Console keeps Project repositories on the Dev Console host and sends deployment files to Managed Servers over SSH/rsync.
+
+On Ubuntu 24.04, Dev Console may also need a narrow AppArmor profile for Codex's
+bundled Bubblewrap sandbox. Settings configures this automatically after Codex
+standalone installation when non-interactive `sudo -n` is available. If Settings
+reports that AppArmor setup could not be completed, run `sudo ./install.sh` from
+the Dev Console checkout after Codex is installed.
 
 Root SSH is not required. Dev Console v1 expects the configured SSH user to have passwordless sudo after running the generated server setup command.
 
@@ -54,8 +60,9 @@ Root SSH is not required. Dev Console v1 expects the configured SSH user to have
 7. Open Projects and create a Project assigned to the reachable server.
 8. Initialize Repository.
 9. Press Set up.
-10. Create a task and run Codex.
-11. Deploy Preview.
-12. After review, deploy Production.
+10. In Settings, install Codex CLI if needed and use **Sign in with ChatGPT**.
+11. Create a task and run Codex.
+12. Deploy Preview.
+13. After review, deploy Production.
 
 Dev Console does not deploy to Production automatically.

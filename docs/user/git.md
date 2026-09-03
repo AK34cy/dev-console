@@ -4,6 +4,12 @@
 
 Dev Console uses one global GitHub configuration. The GitHub account or organization and Personal Access Token are configured once in Settings, and every Project repository uses that global GitHub account/authentication. Projects do not have separate GitHub credentials.
 
+When GitHub configuration is saved or tested, Dev Console also prepares the Git SSH transport used by Project remotes. It maintains one Dev Console-owned SSH key for the service user, registers the matching public key with GitHub when needed, and writes a managed SSH config alias:
+
+```text
+github.com-dev-console-account
+```
+
 Every Dev Console Project has its own local Git repository on the Dev Console host under:
 
 ```text
@@ -57,12 +63,13 @@ Initialize Repository:
 
 1. verifies GitHub configuration
 2. checks GitHub CLI
-3. creates a private GitHub repository when available
-4. creates the local Project repository on the Dev Console host
-5. writes initial files
-6. commits
-7. pushes `main`
-8. saves repository metadata
+3. verifies the Dev Console GitHub SSH transport alias
+4. creates a private GitHub repository when available
+5. creates the local Project repository on the Dev Console host
+6. writes initial files
+7. commits
+8. pushes `main`
+9. saves repository metadata
 
 Repository visibility is private.
 

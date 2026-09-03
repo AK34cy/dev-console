@@ -239,7 +239,11 @@ Current default shape:
   "configured_at": null,
   "verified": false,
   "last_verified_at": null,
-  "authenticated_login": null
+  "authenticated_login": null,
+  "ssh_transport_verified": false,
+  "ssh_transport_verified_at": null,
+  "ssh_alias": null,
+  "ssh_public_key_fingerprint": null
 }
 ```
 
@@ -252,6 +256,10 @@ Fields:
 - `verified`: whether the saved connection has been verified.
 - `last_verified_at`: last successful verification timestamp.
 - `authenticated_login`: login returned by GitHub for the token.
+- `ssh_transport_verified`: whether the Dev Console GitHub SSH alias/key transport was verified.
+- `ssh_transport_verified_at`: timestamp for the last successful SSH transport verification.
+- `ssh_alias`: managed SSH host alias used by Project Git remotes.
+- `ssh_public_key_fingerprint`: fingerprint for the Dev Console GitHub SSH public key.
 
 The token is passed to `gh` as `GH_TOKEN` and is not displayed in normal UI.
 

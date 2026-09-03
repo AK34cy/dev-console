@@ -12,7 +12,7 @@ runtime. Apache is not used to serve Dev Console itself.
 Install the service once, on the server, from a Git checkout:
 
 ```sh
-git clone <repo> /var/www/dev-console
+sudo git clone <repo> /var/www/dev-console
 cd /var/www/dev-console
 sudo ./install.sh
 ```
@@ -33,12 +33,13 @@ submitted in the request body so it does not appear in the URL or journald
 access logs. The console then stores authentication in its secure HTTP session.
 
 The token is generated only during the first installation and stored at
-`/etc/iovon-dev-console.env` with `0600` permissions. It is not printed or
-committed. Existing tokens are preserved. A root user can retrieve it when
-needed with:
+`/etc/iovon-dev-console.env` with `0600` permissions. The installer prints a
+newly generated token once in the completion summary. Existing tokens are
+preserved on rerun and are not printed. A root user can retrieve the current
+token when needed with:
 
 ```sh
-sudo sed -n 's/^IOVON_DEV_CONSOLE_TOKEN=//p' /etc/iovon-dev-console.env
+sudo grep '^IOVON_DEV_CONSOLE_TOKEN=' /etc/iovon-dev-console.env
 ```
 
 Service operations:
