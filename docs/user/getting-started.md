@@ -2,6 +2,10 @@
 
 Dev Console is an internal tool for managing Projects, task execution with Codex, and Preview/Production deployments on managed Linux servers.
 
+For the product overview, rationale, and security model, start with the
+[Product & User Guide](../product-guide.md). This page focuses on the practical
+installation and first-run workflow.
+
 For a fresh Dev Console host, install from a Git checkout:
 
 ```sh
@@ -36,8 +40,8 @@ The normal v1 workflow is:
 - A deployment SSH user on that server.
 - The Dev Console Server Key generated in the Servers page.
 - GitHub configured in Settings with a token that can manage repositories and SSH public keys.
-- GitHub CLI installed on the Dev Console host.
-- Codex CLI installed and signed in with ChatGPT before running Codex tasks.
+- GitHub CLI installed on the Dev Console host, or installed from Settings.
+- Codex CLI installed from Settings and signed in with ChatGPT before running Codex tasks.
 
 Managed Servers do not need Git for Dev Console operation. Dev Console keeps Project repositories on the Dev Console host and sends deployment files to Managed Servers over SSH/rsync.
 

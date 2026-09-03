@@ -1,41 +1,98 @@
 # IOVON Dev Console
 
-IOVON Dev Console is a small, private PHP console for managing local development
-workflows on an Ubuntu server. It provides a browser UI for creating task files,
-running Codex against those tasks, viewing run activity, and triggering preview
-or production deployments.
+IOVON Dev Console turns AI coding into a controlled website development and
+deployment workflow.
 
-The service is designed to bind only to `127.0.0.1:8090`. Remote access should be
-provided by a private tunnel such as Tailscale Serve rather than by exposing the
-PHP server directly.
+You describe a change as a task. Codex CLI works on the Project source in a
+local Git repository. Dev Console commits and synchronizes the result with
+GitHub, deploys it to Preview for review, and promotes it to Production only
+after an explicit user action.
 
-For lower-level service details, see [docs/DEV_CONSOLE.md](docs/DEV_CONSOLE.md).
+```text
+AI task -> Git -> GitHub -> Preview -> human approval -> Production
+```
 
-## Features
+Dev Console is for website owners, developers, consultants, and small teams who
+want AI-assisted implementation without giving the AI direct authority over live
+Production releases.
 
-- Token-protected web console for internal use.
-- Managed Server registration, SSH onboarding, and connection testing.
-- Task creation with optional attachments.
-- Codex run queueing and activity display.
-- Project repository initialization with GitHub.
-- Preview and production deployment controls.
-- Remote Server Management diagnostics for runtime tools, Apache, and assigned projects.
-- Project, workflow, and deployment status dashboard.
-- Built-in Documentation section.
-- Unauthenticated JSON health endpoint at `/health`.
-- Portable Git-checkout installer for systemd installation.
+## Why It Exists
+
+AI can make useful code changes, but the surrounding workflow still matters:
+
+- Which source tree should be changed?
+- What changed, and was it committed?
+- Was the repository synchronized?
+- Can the result be tested before it goes live?
+- Who approves Production?
+- How are servers, SSH access, and privileged operations controlled?
+
+Dev Console packages those control points into one internal console. The core
+principle is:
+
+> AI writes the change. Git records it. Preview proves it. You decide whether it
+> goes live.
+
+## What It Includes
+
+- Token-protected internal web console.
+- Managed Server registration, SSH onboarding, diagnostics, and tool actions.
+- Project creation and existing-project adoption.
+- Local Project repositories on the Dev Console host under `/var/www/git`.
+- Private GitHub repository initialization and synchronization.
+- Task files with persistent attachments.
+- Codex CLI task execution.
+- Preview deployment over SSH/rsync.
+- Production preflight, deletion review, and explicit Production promotion.
+- Documentation for users and implementation maintainers.
+- Portable Git-checkout installer for Ubuntu/systemd hosts.
+
+Dev Console itself runs as a normal Linux service user, not as root. Operations
+that genuinely need host or Managed Server privileges use explicit,
+non-interactive privilege paths such as `sudo -n`.
+
+## Documentation Path
+
+Start here:
+
+1. [Product & User Guide](docs/product-guide.md) explains what Dev Console is,
+   who it is for, and the product/security model.
+2. [Getting Started](docs/user/getting-started.md) covers the practical install
+   and first-run workflow.
+3. User documentation:
+   [Workflow](docs/user/workflow.md),
+   [Projects](docs/user/projects.md),
+   [Servers](docs/user/servers.md),
+   [Git & GitHub](docs/user/git.md),
+   [Tasks & Codex](docs/user/tasks-codex.md),
+   [Preview](docs/user/preview.md),
+   [Production](docs/user/production.md),
+   [Security](docs/user/security.md), and
+   [Troubleshooting](docs/user/troubleshooting.md).
+4. Technical reference:
+   [Architecture](docs/architecture.md),
+   [Workflow Internals](docs/workflow.md),
+   [Project Actions](docs/project-actions.md),
+   [Server Actions](docs/server-actions.md),
+   [Data Model](docs/data-model.md),
+   [Security Internals](docs/security.md), and
+   [Service Notes](docs/DEV_CONSOLE.md).
 
 ## Requirements
 
 - Ubuntu server with systemd.
 - Existing non-root Linux user to run the service.
 - `sudo` access for installation.
-- Optional: Tailscale Serve or another private tunnel for private HTTPS access.
+- Optional: Tailscale Serve, SSH port forwarding, VPN, or another private access
+  path for browser access.
 
 The installer installs the base packages required for Dev Console itself,
 including PHP CLI and required PHP extensions, curl, Git, OpenSSH client, rsync,
-sudo, and certificate support. GitHub CLI, Node.js, npm, Composer, and Codex CLI
-are managed as optional host or server tools after installation.
+sudo, and certificate support.
+
+GitHub CLI, Codex CLI, and Managed Server tools such as Composer, Node.js, npm,
+and Apache are detected automatically and changed only through explicit user
+actions in the console.
 
 ## Installation
 
@@ -48,7 +105,7 @@ cd /var/www/dev-console
 sudo ./install.sh
 ```
 
-To explicitly choose the Linux user that should run the service:
+To explicitly choose the existing Linux user that should run the service:
 
 ```sh
 sudo ./install.sh --user deploy
@@ -64,25 +121,27 @@ The installer:
   access.
 - Installs missing base packages with `apt`.
 - Creates `/etc/iovon-dev-console.env` with a strong token if it is missing.
-- Preserves existing local configuration, secrets, project repositories, managed
-  server definitions, SSH keys, and runtime state.
+- Preserves existing local configuration, secrets, Project repositories, Managed
+  Server definitions, SSH keys, and runtime state.
 - Ensures `/var/www/git` and ignored Dev Console runtime directories exist with
   service-user ownership.
 - On Ubuntu hosts that restrict unprivileged user namespaces through AppArmor,
   configures a narrow Codex sandbox profile if Codex standalone is already
   installed.
-- Generates `/etc/systemd/system/iovon-dev-console.service` from the tracked
-  systemd template.
-- Reloads systemd, enables the service, starts or restarts it, and verifies it is
-  active.
-- Checks the local `/health` endpoint.
+- Installs and restarts `iovon-dev-console.service`.
+- Checks the local `/health` endpoint with a bounded retry loop.
 
-## Configuration
+## First Login
+
+The service listens on:
+
+```text
+http://127.0.0.1:8090
+```
 
 The installer creates `/etc/iovon-dev-console.env` if it does not exist and
 stores `IOVON_DEV_CONSOLE_TOKEN` with `root:root` ownership and `0600`
-permissions. Existing tokens are preserved. The token is required for the web UI
-and is not required for `/health`.
+permissions. Existing tokens are preserved.
 
 On first install, the newly generated token is printed once in the installer
 completion summary. On reruns, the existing token is preserved and is not
@@ -94,37 +153,28 @@ Retrieve the configured token when needed:
 sudo grep '^IOVON_DEV_CONSOLE_TOKEN=' /etc/iovon-dev-console.env
 ```
 
-Dev Console runtime settings, including task attachment upload limits, are
-managed in Settings -> Dev Console Runtime. The defaults are 25 MB per
-attachment and 50 MB per request. Saving new values requires restarting
-`iovon-dev-console.service` before PHP reports them as effective. If Settings
-reports that the runtime unit needs an update, run `sudo ./install.sh` once to
-install the service unit that starts `bin/run-dev-console`.
+Remote browser access should be provided through a private path such as
+Tailscale Serve, SSH port forwarding, or VPN. Do not expose the PHP listener as a
+public unauthenticated service.
 
-Project repositories are stored on the Dev Console host under `/var/www/git`.
-Fresh installs start with no configured projects, no GitHub token, and no
-managed servers.
+## Normal Workflow
 
-On Ubuntu 24.04, AppArmor may restrict unprivileged user namespaces while Codex
-needs its bundled Bubblewrap sandbox. Dev Console keeps the global kernel
-restriction enabled and, after Codex standalone is installed, manages only this
-profile:
+1. Install Dev Console.
+2. Install/sign in to Codex CLI from Settings.
+3. Configure GitHub in Settings.
+4. Add and test a Managed Server.
+5. Create a new Project or adopt an existing website.
+6. Initialize the Project repository when needed.
+7. Set up infrastructure when needed.
+8. Create a task and run Codex.
+9. Deploy Preview and review the site.
+10. Promote Preview to Production explicitly.
 
-```text
-/etc/apparmor.d/iovon-dev-console-codex-bwrap
-```
+Production deployment is never automatic just because Codex completed a task.
 
-If Codex is installed later from Settings, Dev Console attempts the same profile
-setup with non-interactive `sudo -n`. If that is unavailable, run the installer
-again after installing Codex:
+## Operations
 
-```sh
-sudo ./install.sh
-```
-
-## Starting the Service
-
-Start, restart, or inspect the systemd service with:
+Start, restart, or inspect the service:
 
 ```sh
 sudo systemctl start iovon-dev-console.service
@@ -132,91 +182,18 @@ sudo systemctl restart iovon-dev-console.service
 systemctl status iovon-dev-console.service --no-pager
 ```
 
-The service listens on:
-
-```text
-http://127.0.0.1:8090
-```
-
-If Tailscale Serve is configured separately, use `bin/start-dev-console` to
-display the tailnet URL and service status:
-
-```sh
-bin/start-dev-console
-```
-
-## Health Endpoint
-
-The health endpoint does not require authentication:
+Check the unauthenticated health endpoint:
 
 ```sh
 curl -fsS http://127.0.0.1:8090/health
 ```
 
-Example response:
-
-```json
-{
-  "status": "ok",
-  "version": "0.1",
-  "php_version": "8.3.6",
-  "timestamp": "2026-07-24T15:59:58+00:00",
-  "uptime": "2m 14s",
-  "git_commit": "2e0a4e6eb9fc5e58add25624f7a0166aa55343ba"
-}
-```
-
-If Git metadata is unavailable, `git_commit` is returned as `null`.
-
-## Server Management
-
-Settings shows Dev Console host prerequisites such as Git, PHP, Codex CLI, and
-GitHub configuration. Server Management is scoped to one selected Managed
-Server and shows remote PHP, Composer, Node.js, npm, Apache status, Apache site
-inventory, and projects assigned to that server. Composer can be installed from
-Server Management through a predefined POST action with CSRF protection.
-
-## Updating
-
 Update the repository checkout, then rerun the installer so the installed
-systemd unit is regenerated from the current files:
+systemd unit and host setup are refreshed:
 
 ```sh
 git pull
 sudo ./install.sh
 ```
 
-If the service user should change during an update, pass it explicitly:
-
-```sh
-sudo ./install.sh --user deploy
-```
-
-The installer is idempotent and will restart the service when it is already
-active.
-
-## Troubleshooting
-
-Check service state and logs:
-
-```sh
-systemctl status iovon-dev-console.service --no-pager
-journalctl -u iovon-dev-console.service -f
-```
-
-Confirm the local listener:
-
-```sh
-ss -ltnp 'sport = :8090'
-```
-
-Common issues:
-
-- `Linux user does not exist`: rerun with `--user <existing-linux-user>` or
-  create the account intentionally outside the installer.
-- `cannot read or traverse project path`: fix repository ownership or
-  permissions so the selected service user can read the checkout.
-- `/health` fails remotely but works locally: check the private tunnel or
-  Tailscale Serve configuration.
-
-More operational detail lives in [docs/DEV_CONSOLE.md](docs/DEV_CONSOLE.md).
+More service-level detail lives in [docs/DEV_CONSOLE.md](docs/DEV_CONSOLE.md).

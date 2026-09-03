@@ -40,7 +40,7 @@ Some project status displays use saved setup/provisioning metadata rather than a
 
 ## Production Deployment Privilege Behavior
 
-Production deployment promotes Preview to Production with remote `rsync`. It does not use the project setup sudo wrapper path; current implementation expects the remote Production directory to be writable by the deployment user.
+Production deployment promotes Preview to Production with remote `rsync` as the deployment user. Current implementation can remove exact explicitly approved deletion candidates with managed privileges when required, but it does not use that privilege path to bypass preflight approval or preserve rules.
 
 ## Preview Deployment Privilege Behavior
 
@@ -52,7 +52,7 @@ Remote managed-server vhosts use `<project-id>-preview.conf` and `<project-id>-p
 
 ## Task Sorting Duplication
 
-Task list code sorts task collections before grouping, while visible grouped output also sorts by task number. The final behavior is project-specific ascending groups, but sorting logic appears duplicated.
+Task list code sorts task collections before grouping, while visible grouped output also sorts by task number. The Dashboard intentionally presents newest tasks first, but sorting logic appears duplicated.
 
 ## Legacy Task Storage
 
